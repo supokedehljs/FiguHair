@@ -1,5 +1,18 @@
 import bpy
-from .operators import sync_point_settings, generate_pipe_mesh, sync_active_point_from_selection, is_curve_edit_mode
+from .operators import (
+    sync_point_settings,
+    generate_pipe_mesh,
+    sync_active_point_from_selection,
+    is_curve_edit_mode,
+    ensure_curve_defaults,
+    get_pipe_mesh_name,
+    verts_to_world_space,
+    configure_pipe_object,
+    redirect_pipe_selection,
+)
+
+
+_is_redirecting_selection = False
 
 
 def rebuild_existing_pipe(curve_obj):
@@ -9,15 +22,17 @@ def rebuild_existing_pipe(curve_obj):
     if len(settings.point_settings) == 0:
         return
 
-    mesh_name = curve_obj.name + "_FiguHair"
+    mesh_name = get_pipe_mesh_name(curve_obj)
     pipe_obj = bpy.data.objects.get(mesh_name)
     if pipe_obj is None:
         return
 
+    ensure_curve_defaults(curve_obj)
     sync_point_settings(curve_obj)
     verts, faces = generate_pipe_mesh(curve_obj, settings)
     if verts is None:
         return
+    verts = verts_to_world_space(verts, curve_obj)
 
     mesh = bpy.data.meshes.new(mesh_name + "_temp")
     mesh.from_pydata(verts, [], faces)
@@ -29,10 +44,27 @@ def rebuild_existing_pipe(curve_obj):
 
     old_mesh = pipe_obj.data
     pipe_obj.data = mesh
-    pipe_obj.matrix_world = curve_obj.matrix_world.copy()
+    configure_pipe_object(pipe_obj, curve_obj)
     mesh.name = mesh_name
     if old_mesh and old_mesh.users == 0:
         bpy.data.meshes.remove(old_mesh)
+
+
+def selection_redirect_callback(scene):
+    global _is_redirecting_selection
+    if _is_redirecting_selection:
+        return
+
+    context = bpy.context
+    active_obj = context.active_object
+    if active_obj is None or active_obj.type != 'MESH':
+        return
+
+    _is_redirecting_selection = True
+    try:
+        redirect_pipe_selection(context, active_obj)
+    finally:
+        _is_redirecting_selection = False
 
 
 def update_pipe_callback(scene):
@@ -73,6 +105,7 @@ def register_handler():
     global _handler_registered, _timer_registered
     if not _handler_registered:
         bpy.app.handlers.depsgraph_update_post.append(update_pipe_callback)
+        bpy.app.handlers.depsgraph_update_post.append(selection_redirect_callback)
         _handler_registered = True
     if not _timer_registered:
         bpy.app.timers.register(selection_sync_timer, persistent=True)
@@ -81,8 +114,11 @@ def register_handler():
 
 def unregister_handler():
     global _handler_registered, _timer_registered
-    if _handler_registered and update_pipe_callback in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.remove(update_pipe_callback)
+    if _handler_registered:
+        if update_pipe_callback in bpy.app.handlers.depsgraph_update_post:
+            bpy.app.handlers.depsgraph_update_post.remove(update_pipe_callback)
+        if selection_redirect_callback in bpy.app.handlers.depsgraph_update_post:
+            bpy.app.handlers.depsgraph_update_post.remove(selection_redirect_callback)
         _handler_registered = False
     if _timer_registered:
         try:

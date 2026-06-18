@@ -1,11 +1,27 @@
 import bpy
 import math
-from mathutils import Vector
+from mathutils import Matrix, Vector
 from bpy.props import IntProperty, FloatProperty
+
+
+def ensure_curve_defaults(curve_obj):
+    if curve_obj is None or curve_obj.type != 'CURVE':
+        return
+    curve_obj.data.dimensions = '3D'
+    curve_obj.data.resolution_u = 1
+    for spline in curve_obj.data.splines:
+        spline.resolution_u = 1
 
 
 def get_curve_points_data(curve_obj):
     """Extract control points from a curve object"""
+    ensure_curve_defaults(curve_obj)
+    if is_curve_edit_mode(curve_obj):
+        try:
+            curve_obj.update_from_editmode()
+        except Exception:
+            pass
+
     splines = curve_obj.data.splines
     all_splines_data = []
 
@@ -265,6 +281,30 @@ def get_cross_section_frame(tangent):
     return normal, binormal
 
 
+def catmull_rom_value(v0, v1, v2, v3, t):
+    t2 = t * t
+    t3 = t2 * t
+    return 0.5 * (
+        (2.0 * v1)
+        + (-v0 + v2) * t
+        + (2.0 * v0 - 5.0 * v1 + 4.0 * v2 - v3) * t2
+        + (-v0 + 3.0 * v1 - 3.0 * v2 + v3) * t3
+    )
+
+
+def get_cross_section_sample(point_setting, point=None, vert_idx=0):
+    verts = point_setting.cross_section_verts
+    if len(verts) == 0:
+        return 0.0, 0.0, 0.0
+
+    curve_radius = point.get('radius', 1.0) if point else 1.0
+    curve_tilt = point.get('tilt', 0.0) if point else 0.0
+    scale = point_setting.scale * curve_radius
+    rotation = math.radians(point_setting.rotation) + curve_tilt
+    vert = verts[vert_idx % len(verts)]
+    return vert.offset_x * scale, vert.offset_y * scale, rotation
+
+
 def interpolate_cross_sections(ps0, ps1, t, point0=None, point1=None):
     """Interpolate cross-section vertex positions between two point settings"""
     verts0 = ps0.cross_section_verts
@@ -275,27 +315,47 @@ def interpolate_cross_sections(ps0, ps1, t, point0=None, point1=None):
         return []
 
     num_verts = min(n0, n1)
-    curve_radius0 = point0.get('radius', 1.0) if point0 else 1.0
-    curve_radius1 = point1.get('radius', 1.0) if point1 else 1.0
-    curve_tilt0 = point0.get('tilt', 0.0) if point0 else 0.0
-    curve_tilt1 = point1.get('tilt', 0.0) if point1 else 0.0
-    scale0 = ps0.scale * curve_radius0
-    scale1 = ps1.scale * curve_radius1
-    rot0 = math.radians(ps0.rotation) + curve_tilt0
-    rot1 = math.radians(ps1.rotation) + curve_tilt1
-
+    _, _, rot0 = get_cross_section_sample(ps0, point0)
+    _, _, rot1 = get_cross_section_sample(ps1, point1)
     interp_rot = rot0 * (1.0 - t) + rot1 * t
     cos_r = math.cos(interp_rot)
     sin_r = math.sin(interp_rot)
 
     result = []
     for i in range(num_verts):
-        x0 = verts0[i % n0].offset_x * scale0
-        y0 = verts0[i % n0].offset_y * scale0
-        x1 = verts1[i % n1].offset_x * scale1
-        y1 = verts1[i % n1].offset_y * scale1
+        x0, y0, _ = get_cross_section_sample(ps0, point0, i)
+        x1, y1, _ = get_cross_section_sample(ps1, point1, i)
         lx = x0 * (1.0 - t) + x1 * t
         ly = y0 * (1.0 - t) + y1 * t
+        rx = lx * cos_r - ly * sin_r
+        ry = lx * sin_r + ly * cos_r
+        result.append((rx, ry))
+    return result
+
+
+def interpolate_cross_sections_smooth(ps_prev, ps0, ps1, ps_next, t, point_prev=None, point0=None, point1=None, point_next=None):
+    verts0 = ps0.cross_section_verts
+    verts1 = ps1.cross_section_verts
+    if len(verts0) == 0 or len(verts1) == 0:
+        return []
+
+    num_verts = min(len(verts0), len(verts1))
+    _, _, rot_prev = get_cross_section_sample(ps_prev, point_prev)
+    _, _, rot0 = get_cross_section_sample(ps0, point0)
+    _, _, rot1 = get_cross_section_sample(ps1, point1)
+    _, _, rot_next = get_cross_section_sample(ps_next, point_next)
+    interp_rot = catmull_rom_value(rot_prev, rot0, rot1, rot_next, t)
+    cos_r = math.cos(interp_rot)
+    sin_r = math.sin(interp_rot)
+
+    result = []
+    for i in range(num_verts):
+        x_prev, y_prev, _ = get_cross_section_sample(ps_prev, point_prev, i)
+        x0, y0, _ = get_cross_section_sample(ps0, point0, i)
+        x1, y1, _ = get_cross_section_sample(ps1, point1, i)
+        x_next, y_next, _ = get_cross_section_sample(ps_next, point_next, i)
+        lx = catmull_rom_value(x_prev, x0, x1, x_next, t)
+        ly = catmull_rom_value(y_prev, y0, y1, y_next, t)
         rx = lx * cos_r - ly * sin_r
         ry = lx * sin_r + ly * cos_r
         result.append((rx, ry))
@@ -468,6 +528,10 @@ def generate_pipe_mesh(curve_obj, settings):
                 p1 = points[idx1]['co']
                 ps0 = get_point_setting(point_settings, global_point_idx + idx0, settings)
                 ps1 = get_point_setting(point_settings, global_point_idx + idx1, settings)
+                idx_prev = (idx0 - 1) % num_points if is_cyclic or idx0 > 0 else idx0
+                idx_next = (idx1 + 1) % num_points if is_cyclic or idx1 < num_points - 1 else idx1
+                ps_prev = get_point_setting(point_settings, global_point_idx + idx_prev, settings)
+                ps_next = get_point_setting(point_settings, global_point_idx + idx_next, settings)
                 steps = max(1, resolution)
                 end_inc = 1 if (seg_idx == seg_count - 1 and not is_cyclic) else 0
                 for step in range(steps + end_inc):
@@ -476,7 +540,10 @@ def generate_pipe_mesh(curve_obj, settings):
                     tan0 = get_bezier_control_tangent(points, idx0, is_cyclic)
                     tan1 = get_bezier_control_tangent(points, idx1, is_cyclic)
                     tan = safe_normalized(tan0.lerp(tan1, t), evaluate_bezier_tangent(p0, h0r, h1l, p1, t))
-                    interp = interpolate_cross_sections(ps0, ps1, t, points[idx0], points[idx1])
+                    interp = interpolate_cross_sections_smooth(
+                        ps_prev, ps0, ps1, ps_next, t,
+                        points[idx_prev], points[idx0], points[idx1], points[idx_next]
+                    )
                     ring_specs.append((pos, tan, interp))
         elif spline_data['type'] == 'NURBS':
             order = max(2, min(spline_data.get('order_u', 4), num_points))
@@ -524,6 +591,10 @@ def generate_pipe_mesh(curve_obj, settings):
                 p1 = points[idx1]['co']
                 ps0 = get_point_setting(point_settings, global_point_idx + idx0, settings)
                 ps1 = get_point_setting(point_settings, global_point_idx + idx1, settings)
+                idx_prev = (idx0 - 1) % num_points if is_cyclic or idx0 > 0 else idx0
+                idx_next = (idx1 + 1) % num_points if is_cyclic or idx1 < num_points - 1 else idx1
+                ps_prev = get_point_setting(point_settings, global_point_idx + idx_prev, settings)
+                ps_next = get_point_setting(point_settings, global_point_idx + idx_next, settings)
                 steps = max(1, resolution)
                 end_inc = 1 if (seg_idx == seg_count - 1 and not is_cyclic) else 0
                 for step in range(steps + end_inc):
@@ -532,7 +603,10 @@ def generate_pipe_mesh(curve_obj, settings):
                     tan0 = get_poly_control_tangent(points, idx0, is_cyclic)
                     tan1 = get_poly_control_tangent(points, idx1, is_cyclic)
                     tan = safe_normalized(tan0.lerp(tan1, t), p1 - p0)
-                    interp = interpolate_cross_sections(ps0, ps1, t, points[idx0], points[idx1])
+                    interp = interpolate_cross_sections_smooth(
+                        ps_prev, ps0, ps1, ps_next, t,
+                        points[idx_prev], points[idx0], points[idx1], points[idx_next]
+                    )
                     ring_specs.append((pos, tan, interp))
 
         rings = build_minimal_twist_rings(ring_specs, is_cyclic)
@@ -641,6 +715,69 @@ def sync_active_point_from_selection(curve_obj):
     return True
 
 
+def get_pipe_mesh_name(curve_obj):
+    return curve_obj.name + "_FiguHair"
+
+
+def verts_to_world_space(verts, curve_obj):
+    matrix = curve_obj.matrix_world
+    return [matrix @ vert for vert in verts]
+
+
+def get_pipe_source_curve(pipe_obj):
+    if pipe_obj is None or pipe_obj.type != 'MESH':
+        return None
+    source_name = pipe_obj.get("hair_pipe_source_curve")
+    if not source_name:
+        return None
+    curve_obj = bpy.data.objects.get(source_name)
+    if curve_obj is not None and curve_obj.type == 'CURVE':
+        return curve_obj
+    return None
+
+
+def get_context_curve_object(context):
+    obj = context.active_object
+    if obj is None:
+        return None
+    if obj.type == 'CURVE':
+        return obj
+    return get_pipe_source_curve(obj)
+
+
+def configure_pipe_object(pipe_obj, curve_obj):
+    pipe_obj["hair_pipe_source_curve"] = curve_obj.name
+    pipe_obj.parent = None
+    pipe_obj.matrix_parent_inverse.identity()
+    pipe_obj.matrix_world = Matrix.Identity(4)
+    pipe_obj.show_in_front = False
+    pipe_obj.hide_select = False
+    pipe_obj.select_set(False)
+
+
+def redirect_pipe_selection(context, pipe_obj=None):
+    pipe_obj = pipe_obj or context.active_object
+    curve_obj = get_pipe_source_curve(pipe_obj)
+    if curve_obj is None:
+        return False
+
+    if not curve_obj.hair_pipe_settings.redirect_selection:
+        return False
+
+    if context.view_layer.objects.get(curve_obj.name) is None:
+        return False
+
+    if context.mode != 'OBJECT':
+        return False
+
+    for obj in context.selected_objects:
+        obj.select_set(False)
+    curve_obj.hide_set(False)
+    curve_obj.select_set(True)
+    context.view_layer.objects.active = curve_obj
+    return True
+
+
 def get_curve_point_by_global_index(curve_obj, target_index):
     if curve_obj is None or curve_obj.type != 'CURVE':
         return None
@@ -663,18 +800,22 @@ class HAIRPIPE_OT_generate_pipe(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        obj = context.active_object
-        return obj is not None and obj.type == 'CURVE'
+        return get_context_curve_object(context) is not None
 
     def execute(self, context):
-        curve_obj = context.active_object
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            self.report({'ERROR'}, "Select a curve or its FiguHair preview mesh")
+            return {'CANCELLED'}
         settings = curve_obj.hair_pipe_settings
+        ensure_curve_defaults(curve_obj)
         sync_point_settings(curve_obj)
         verts, faces = generate_pipe_mesh(curve_obj, settings)
         if verts is None:
             self.report({'ERROR'}, "Could not generate pipe from curve")
             return {'CANCELLED'}
-        mesh_name = curve_obj.name + "_FiguHair"
+        verts = verts_to_world_space(verts, curve_obj)
+        mesh_name = get_pipe_mesh_name(curve_obj)
         mesh = bpy.data.meshes.new(mesh_name)
         mesh.from_pydata(verts, [], faces)
         mesh.update()
@@ -692,7 +833,7 @@ class HAIRPIPE_OT_generate_pipe(bpy.types.Operator):
         if settings.smooth_shading:
             for poly in mesh.polygons:
                 poly.use_smooth = True
-        pipe_obj.matrix_world = curve_obj.matrix_world.copy()
+        configure_pipe_object(pipe_obj, curve_obj)
         self.report({'INFO'}, f"Generated pipe with {len(verts)} vertices")
         return {'FINISHED'}
 

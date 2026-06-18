@@ -1,5 +1,11 @@
 import bpy
-from .operators import sync_point_settings, sync_active_point_from_selection, is_curve_edit_mode, get_curve_point_by_global_index
+from .operators import (
+    sync_point_settings,
+    sync_active_point_from_selection,
+    is_curve_edit_mode,
+    get_curve_point_by_global_index,
+    get_context_curve_object,
+)
 
 
 class HAIRPIPE_PT_main_panel(bpy.types.Panel):
@@ -11,12 +17,14 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        obj = context.active_object
-        return obj is not None and obj.type == 'CURVE'
+        return get_context_curve_object(context) is not None
 
     def draw(self, context):
         layout = self.layout
-        curve_obj = context.active_object
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            layout.label(text="请选择曲线或 FiguHair 预览网格", icon='INFO')
+            return
         settings = curve_obj.hair_pipe_settings
         sync_point_settings(curve_obj)
         if is_curve_edit_mode(curve_obj):
@@ -28,6 +36,7 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         row.scale_y = 1.35
         row.operator("hair_pipe.generate_pipe", text="生成 / 更新管线")
         box.prop(settings, "auto_update", text="自动更新")
+        box.prop(settings, "redirect_selection", text="点击预览选择曲线")
 
         box = layout.box()
         box.label(text="默认形状", icon='MESH_CIRCLE')
@@ -54,12 +63,13 @@ class HAIRPIPE_PT_point_select_panel(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        obj = context.active_object
-        return obj is not None and obj.type == 'CURVE'
+        return get_context_curve_object(context) is not None
 
     def draw(self, context):
         layout = self.layout
-        curve_obj = context.active_object
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            return
         settings = curve_obj.hair_pipe_settings
         sync_point_settings(curve_obj)
         if is_curve_edit_mode(curve_obj):
@@ -84,15 +94,17 @@ class HAIRPIPE_PT_cross_section_panel(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        obj = context.active_object
-        if obj is None or obj.type != 'CURVE':
+        obj = get_context_curve_object(context)
+        if obj is None:
             return False
         s = obj.hair_pipe_settings
         return len(s.point_settings) > 0 and s.active_point_index < len(s.point_settings)
 
     def draw(self, context):
         layout = self.layout
-        curve_obj = context.active_object
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            return
         settings = curve_obj.hair_pipe_settings
         if is_curve_edit_mode(curve_obj):
             sync_active_point_from_selection(curve_obj)

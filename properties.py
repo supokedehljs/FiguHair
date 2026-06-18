@@ -81,6 +81,11 @@ class HairPipeSettings(PropertyGroup):
         description="Close the ends of the pipe",
         default=False,
     )
+    redirect_selection: BoolProperty(
+        name="Select Curve From Preview",
+        description="Selecting the generated preview mesh automatically selects this source curve",
+        default=True,
+    )
     point_settings: CollectionProperty(type=HairPipePointSettings)
     active_point_index: IntProperty(
         name="Active Point",
