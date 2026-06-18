@@ -70,40 +70,75 @@ def make_nurbs_knot_vector(num_points, degree, is_cyclic, use_endpoint):
     return [float(i) for i in range(knot_count)]
 
 
-def nurbs_basis(i, degree, u, knots):
-    if degree == 0:
-        is_in_span = knots[i] <= u < knots[i + 1]
-        is_last_knot = u == knots[-1] and knots[i] <= u <= knots[i + 1]
-        return 1.0 if is_in_span or is_last_knot else 0.0
+def find_nurbs_span(num_eval_points, degree, u, knots):
+    last_span = num_eval_points - 1
+    if u >= knots[last_span + 1]:
+        return last_span
+    if u <= knots[degree]:
+        return degree
 
-    value = 0.0
-    left_den = knots[i + degree] - knots[i]
-    if left_den > 1e-8:
-        value += ((u - knots[i]) / left_den) * nurbs_basis(i, degree - 1, u, knots)
+    low = degree
+    high = last_span + 1
+    mid = (low + high) // 2
+    while u < knots[mid] or u >= knots[mid + 1]:
+        if u < knots[mid]:
+            high = mid
+        else:
+            low = mid
+        mid = (low + high) // 2
+    return mid
 
-    right_den = knots[i + degree + 1] - knots[i + 1]
-    if right_den > 1e-8:
-        value += ((knots[i + degree + 1] - u) / right_den) * nurbs_basis(i + 1, degree - 1, u, knots)
 
-    return value
+def nurbs_basis_values(span, degree, u, knots):
+    values = [0.0] * (degree + 1)
+    left = [0.0] * (degree + 1)
+    right = [0.0] * (degree + 1)
+    values[0] = 1.0
+
+    for j in range(1, degree + 1):
+        left[j] = u - knots[span + 1 - j]
+        right[j] = knots[span + j] - u
+        saved = 0.0
+        for r in range(j):
+            denominator = right[r + 1] + left[j - r]
+            temp = values[r] / denominator if abs(denominator) > 1e-8 else 0.0
+            values[r] = saved + right[r + 1] * temp
+            saved = left[j - r] * temp
+        values[j] = saved
+
+    return values
 
 
-def evaluate_nurbs_curve(points, degree, u, knots, is_cyclic):
-    eval_points = points
-    if is_cyclic:
-        eval_points = points + points[:degree]
+def get_nurbs_weighted_controls(points, degree, u, knots, is_cyclic):
+    eval_points = points + points[:degree] if is_cyclic else points
+    span = find_nurbs_span(len(eval_points), degree, u, knots)
+    basis_values = nurbs_basis_values(span, degree, u, knots)
+
+    weighted = []
+    total = 0.0
+    point_count = len(points)
+    for local_idx, basis in enumerate(basis_values):
+        eval_idx = span - degree + local_idx
+        if eval_idx < 0 or eval_idx >= len(eval_points):
+            continue
+        control_idx = eval_idx % point_count
+        point = eval_points[eval_idx]
+        weight = basis * point.get('weight', 1.0)
+        if weight > 1e-8:
+            weighted.append((control_idx, weight))
+            total += weight
+
+    return weighted, total
+
+
+def evaluate_nurbs_from_weighted(points, weighted, total):
+    if total < 1e-8 or not weighted:
+        return points[0]['co'].copy()
 
     numerator = Vector((0, 0, 0))
-    denominator = 0.0
-    for i, point in enumerate(eval_points):
-        weight = point.get('weight', 1.0)
-        basis = nurbs_basis(i, degree, u, knots) * weight
-        numerator += point['co'] * basis
-        denominator += basis
-
-    if denominator < 1e-8:
-        return eval_points[0]['co'].copy()
-    return numerator / denominator
+    for idx, weight in weighted:
+        numerator += points[idx]['co'] * weight
+    return numerator / total
 
 
 def get_nurbs_domain(num_points, degree, knots, is_cyclic):
@@ -112,40 +147,24 @@ def get_nurbs_domain(num_points, degree, knots, is_cyclic):
     return knots[degree], knots[num_points]
 
 
-def get_nurbs_control_mix(points, degree, u, knots, is_cyclic):
-    eval_points = points
-    if is_cyclic:
-        eval_points = points + points[:degree]
-
-    weighted = []
-    total = 0.0
-    for i, point in enumerate(eval_points):
-        weight = nurbs_basis(i, degree, u, knots) * point.get('weight', 1.0)
-        if weight > 1e-8:
-            weighted.append((i % len(points), weight))
-            total += weight
-    return weighted, total
-
-
-def interpolate_nurbs_cross_sections(point_settings, points, degree, u, knots, is_cyclic, settings, global_point_idx):
-    weighted, total = get_nurbs_control_mix(points, degree, u, knots, is_cyclic)
+def interpolate_nurbs_cross_sections(point_settings, points, weighted, total, settings, global_point_idx):
     if total < 1e-8 or not weighted:
         return []
 
     max_count = 0
-    for idx, _weight in weighted:
+    cached_offsets = []
+    for idx, weight in weighted:
         ps = get_point_setting(point_settings, global_point_idx + idx, settings)
-        max_count = max(max_count, len(ps.cross_section_verts))
+        local_offsets = interpolate_cross_sections(ps, ps, 0.0, points[idx], points[idx])
+        if local_offsets:
+            cached_offsets.append((local_offsets, weight))
+            max_count = max(max_count, len(local_offsets))
     if max_count == 0:
         return []
 
     accum = [(0.0, 0.0) for _ in range(max_count)]
-    for idx, weight in weighted:
+    for local_offsets, weight in cached_offsets:
         normalized_weight = weight / total
-        ps = get_point_setting(point_settings, global_point_idx + idx, settings)
-        local_offsets = interpolate_cross_sections(ps, ps, 0.0, points[idx], points[idx])
-        if not local_offsets:
-            continue
         for i in range(max_count):
             ox, oy = local_offsets[i % len(local_offsets)]
             ax, ay = accum[i]
@@ -358,10 +377,11 @@ def generate_pipe_mesh(curve_obj, settings):
             use_endpoint = spline_data.get('use_endpoint_u', False)
             knots = make_nurbs_knot_vector(num_points, degree, is_cyclic, use_endpoint)
             u_start, u_end = get_nurbs_domain(num_points, degree, knots, is_cyclic)
-            sample_count = max(2, (num_points if is_cyclic else num_points - 1) * max(4, resolution * 4))
+            sample_count = max(2, (num_points if is_cyclic else num_points - 1) * max(4, resolution * 2))
             ring_count = sample_count if is_cyclic else sample_count + 1
             u_range = u_end - u_start
-            tangent_delta = u_range / max(1000.0, ring_count * 10.0)
+            centers = []
+            interp_offsets = []
 
             for sample_idx in range(ring_count):
                 if is_cyclic:
@@ -372,22 +392,21 @@ def generate_pipe_mesh(curve_obj, settings):
                 if is_cyclic and sample_idx == ring_count - 1:
                     u = u_end - 1e-8
 
-                pos = evaluate_nurbs_curve(points, degree, u, knots, is_cyclic)
-                u_prev = max(u_start, u - tangent_delta)
-                u_next = min(u_end, u + tangent_delta)
+                weighted, total = get_nurbs_weighted_controls(points, degree, u, knots, is_cyclic)
+                centers.append(evaluate_nurbs_from_weighted(points, weighted, total))
+                interp_offsets.append(interpolate_nurbs_cross_sections(
+                    point_settings, points, weighted, total, settings, global_point_idx
+                ))
+
+            for sample_idx, pos in enumerate(centers):
                 if is_cyclic:
-                    u_prev = u - tangent_delta
-                    u_next = u + tangent_delta
-                    if u_prev < u_start:
-                        u_prev += u_range
-                    if u_next > u_end:
-                        u_next -= u_range
-                prev_pos = evaluate_nurbs_curve(points, degree, u_prev, knots, is_cyclic)
-                next_pos = evaluate_nurbs_curve(points, degree, u_next, knots, is_cyclic)
+                    prev_pos = centers[(sample_idx - 1) % ring_count]
+                    next_pos = centers[(sample_idx + 1) % ring_count]
+                else:
+                    prev_pos = centers[max(0, sample_idx - 1)]
+                    next_pos = centers[min(ring_count - 1, sample_idx + 1)]
                 tan = safe_normalized(next_pos - prev_pos)
-                interp = interpolate_nurbs_cross_sections(
-                    point_settings, points, degree, u, knots, is_cyclic, settings, global_point_idx
-                )
+                interp = interp_offsets[sample_idx]
                 if interp:
                     ring = make_ring_from_interpolated(pos, tan, interp)
                 else:
