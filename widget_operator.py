@@ -52,6 +52,7 @@ def draw_widget_callback():
         return
 
     ps = settings.point_settings[settings.active_point_index]
+    curve_point = get_active_curve_point(context)
     verts = ps.cross_section_verts
     n = len(verts)
     if n < 3:
@@ -73,11 +74,12 @@ def draw_widget_callback():
     padding = 18
     half = size / 2.0 - padding
 
-    max_off = max((max(abs(v.offset_x), abs(v.offset_y)) for v in verts), default=0.05)
+    max_off = max((max(abs(get_effective_offset(v, curve_point, ps)[0]), abs(get_effective_offset(v, curve_point, ps)[1])) for v in verts), default=0.05)
     if max_off < 1e-6:
         max_off = 0.05
-    sf = half / (max_off * 1.2)
-    wd.widget_scale_factor = sf
+    if wd.widget_scale_factor <= 1e-8:
+        wd.widget_scale_factor = half / (max_off * 1.2)
+    sf = wd.widget_scale_factor
 
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
     gpu.state.blend_set('ALPHA')
@@ -104,7 +106,7 @@ def draw_widget_callback():
     shader.uniform_float("color", (0.25, 0.25, 0.25, 0.7))
     batch.draw(shader)
 
-    ref_r = settings.default_radius * sf
+    ref_r = settings.default_radius * get_cross_section_effective_scale(curve_point, ps) * sf
     circ = []
     for i in range(64):
         a0 = 2 * math.pi * i / 64
@@ -119,8 +121,10 @@ def draw_widget_callback():
     outline = []
     for i in range(n):
         j = (i + 1) % n
-        outline.append((cx + verts[i].offset_x * sf, cy + verts[i].offset_y * sf))
-        outline.append((cx + verts[j].offset_x * sf, cy + verts[j].offset_y * sf))
+        ix, iy = get_effective_offset(verts[i], curve_point, ps)
+        jx, jy = get_effective_offset(verts[j], curve_point, ps)
+        outline.append((cx + ix * sf, cy + iy * sf))
+        outline.append((cx + jx * sf, cy + jy * sf))
     gpu.state.line_width_set(2.5)
     batch = batch_for_shader(shader, 'LINES', {"pos": outline})
     shader.bind()
@@ -128,7 +132,10 @@ def draw_widget_callback():
     batch.draw(shader)
 
     gpu.state.point_size_set(12.0)
-    pts = [(cx + v.offset_x * sf, cy + v.offset_y * sf) for v in verts]
+    pts = []
+    for v in verts:
+        ox, oy = get_effective_offset(v, curve_point, ps)
+        pts.append((cx + ox * sf, cy + oy * sf))
     batch = batch_for_shader(shader, 'POINTS', {"pos": pts})
     shader.bind()
     shader.uniform_float("color", (1.0, 1.0, 1.0, 1.0))
@@ -137,7 +144,8 @@ def draw_widget_callback():
     aidx = ps.active_vert_index
     if 0 <= aidx < n:
         gpu.state.point_size_set(18.0)
-        ap = [(cx + verts[aidx].offset_x * sf, cy + verts[aidx].offset_y * sf)]
+        ax, ay = get_effective_offset(verts[aidx], curve_point, ps)
+        ap = [(cx + ax * sf, cy + ay * sf)]
         batch = batch_for_shader(shader, 'POINTS', {"pos": ap})
         shader.bind()
         shader.uniform_float("color", (0.0, 0.95, 1.0, 1.0))
@@ -239,6 +247,7 @@ def setup_widget(context):
     wd.widget_size = min(region.width, region.height) * 0.5
     wd.widget_center_x = region.width / 2.0
     wd.widget_center_y = region.height / 2.0
+    wd.widget_scale_factor = 0.0
     wd.is_active = True
     wd.drag_vert_index = -1
     ensure_draw_handler()
@@ -254,6 +263,38 @@ def redraw_view3d(context):
 
 def is_inside_rect(x, y, x0, y0, x1, y1):
     return x0 <= x <= x1 and y0 <= y <= y1
+
+
+def get_cross_section_effective_scale(curve_point, point_setting):
+    curve_radius = getattr(curve_point, 'radius', 1.0) if curve_point is not None else 1.0
+    return max(1e-8, curve_radius * point_setting.scale)
+
+
+def get_effective_offset(vertex, curve_point, point_setting):
+    scale = get_cross_section_effective_scale(curve_point, point_setting)
+    return vertex.offset_x * scale, vertex.offset_y * scale
+
+
+def set_vertex_from_effective_offset(vertex, effective_x, effective_y, curve_point, point_setting):
+    scale = get_cross_section_effective_scale(curve_point, point_setting)
+    vertex.offset_x = effective_x / scale
+    vertex.offset_y = effective_y / scale
+
+
+def get_active_curve_point(context):
+    obj = context.active_object
+    if obj is None or obj.type != 'CURVE':
+        return None
+    settings = obj.hair_pipe_settings
+    target_index = settings.active_point_index
+    global_idx = 0
+    for spline in obj.data.splines:
+        points = spline.bezier_points if spline.type == 'BEZIER' else spline.points
+        for point in points:
+            if global_idx == target_index:
+                return point
+            global_idx += 1
+    return None
 
 
 def add_cross_section_vertex(ps, settings):
@@ -291,13 +332,16 @@ def add_cross_section_vertex_after_all(settings, idx):
             add_cross_section_vertex_after(point_setting, idx)
 
 
-def insert_cross_section_vertex_on_edge(ps, edge_idx, local_x, local_y):
+def insert_cross_section_vertex_on_edge(ps, edge_idx, local_x, local_y, curve_point=None):
     verts = ps.cross_section_verts
     n = len(verts)
     edge_idx = max(0, min(edge_idx, n - 1))
     v = verts.add()
-    v.offset_x = local_x
-    v.offset_y = local_y
+    if curve_point is None:
+        v.offset_x = local_x
+        v.offset_y = local_y
+    else:
+        set_vertex_from_effective_offset(v, local_x, local_y, curve_point, ps)
     target = edge_idx + 1
     for i in range(len(verts) - 1, target, -1):
         verts.move(i, i - 1)
@@ -314,12 +358,12 @@ def insert_cross_section_vertex_on_edge_at_ratio(ps, edge_idx, edge_t):
     insert_cross_section_vertex_on_edge(ps, edge_idx, local_x, local_y)
 
 
-def insert_cross_section_vertex_on_edge_all(settings, active_index, edge_idx, local_x, local_y, edge_t):
+def insert_cross_section_vertex_on_edge_all(settings, active_index, edge_idx, local_x, local_y, edge_t, curve_point):
     for idx, point_setting in enumerate(settings.point_settings):
         if len(point_setting.cross_section_verts) < 2:
             continue
         if idx == active_index:
-            insert_cross_section_vertex_on_edge(point_setting, edge_idx, local_x, local_y)
+            insert_cross_section_vertex_on_edge(point_setting, edge_idx, local_x, local_y, curve_point)
         else:
             insert_cross_section_vertex_on_edge_at_ratio(point_setting, edge_idx, edge_t)
 
@@ -338,7 +382,7 @@ def distance_point_to_segment(px, py, ax, ay, bx, by):
     return math.sqrt((px - cx) ** 2 + (py - cy) ** 2), cx, cy, t
 
 
-def find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf):
+def find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf, curve_point, point_setting):
     closest_idx = -1
     closest_dist = 18.0
     closest_local = (0.0, 0.0)
@@ -346,10 +390,12 @@ def find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf):
     n = len(verts)
     for i in range(n):
         j = (i + 1) % n
-        ax = cx + verts[i].offset_x * sf
-        ay = cy + verts[i].offset_y * sf
-        bx = cx + verts[j].offset_x * sf
-        by = cy + verts[j].offset_y * sf
+        ix, iy = get_effective_offset(verts[i], curve_point, point_setting)
+        jx, jy = get_effective_offset(verts[j], curve_point, point_setting)
+        ax = cx + ix * sf
+        ay = cy + iy * sf
+        bx = cx + jx * sf
+        by = cy + jy * sf
         dist, hit_x, hit_y, edge_t = distance_point_to_segment(mx, my, ax, ay, bx, by)
         if dist < closest_dist:
             closest_dist = dist
@@ -474,6 +520,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         return {'CANCELLED'}
 
     ps = settings.point_settings[settings.active_point_index]
+    curve_point = get_active_curve_point(context)
     verts = ps.cross_section_verts
     if len(verts) < 3:
         operator._finish(context)
@@ -493,10 +540,10 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
 
     if event.type == 'MIDDLEMOUSE' and event.value == 'PRESS':
         if inside_widget and sf > 0.001:
-            edge_idx, local_pos, edge_t = find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf)
+            edge_idx, local_pos, edge_t = find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf, curve_point, ps)
             if edge_idx >= 0:
                 insert_cross_section_vertex_on_edge_all(
-                    settings, settings.active_point_index, edge_idx, local_pos[0], local_pos[1], edge_t
+                    settings, settings.active_point_index, edge_idx, local_pos[0], local_pos[1], edge_t, curve_point
                 )
                 wd.drag_vert_index = -1
                 redraw_view3d(context)
@@ -525,8 +572,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         closest_idx = -1
         closest_dist = 24.0
         for i, v in enumerate(verts):
-            px = cx + v.offset_x * sf
-            py = cy + v.offset_y * sf
+            ox, oy = get_effective_offset(v, curve_point, ps)
+            px = cx + ox * sf
+            py = cy + oy * sf
             dist = math.sqrt((mx - px) ** 2 + (my - py) ** 2)
             if dist < closest_dist:
                 closest_dist = dist
@@ -540,8 +588,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
 
     if event.type == 'MOUSEMOVE':
         if 0 <= wd.drag_vert_index < len(verts) and sf > 0.001:
-            verts[wd.drag_vert_index].offset_x = (mx - cx) / sf
-            verts[wd.drag_vert_index].offset_y = (my - cy) / sf
+            effective_x = (mx - cx) / sf
+            effective_y = (my - cy) / sf
+            set_vertex_from_effective_offset(verts[wd.drag_vert_index], effective_x, effective_y, curve_point, ps)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if inside_widget or inside_controls:

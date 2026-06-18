@@ -358,6 +358,25 @@ def remove_cross_section_vertex_all(settings, idx):
     return True
 
 
+def normalize_cross_section_topology(settings):
+    if len(settings.point_settings) == 0:
+        return
+    active_idx = min(settings.active_point_index, len(settings.point_settings) - 1)
+    target_count = len(settings.point_settings[active_idx].cross_section_verts)
+    if target_count < 3:
+        return
+
+    for point_setting in settings.point_settings:
+        csv = point_setting.cross_section_verts
+        while len(csv) < target_count and len(csv) >= 2:
+            insert_idx = max(0, len(csv) - 1)
+            add_cross_section_vertex_after(point_setting, insert_idx)
+        while len(csv) > target_count and len(csv) > 3:
+            csv.remove(len(csv) - 1)
+        if point_setting.active_vert_index >= len(csv):
+            point_setting.active_vert_index = len(csv) - 1
+
+
 def generate_pipe_mesh(curve_obj, settings):
     splines_data = get_curve_points_data(curve_obj)
     if not splines_data:
@@ -507,17 +526,25 @@ def sync_point_settings(curve_obj):
             total_points += len(spline.points)
     current = len(settings.point_settings)
     if current < total_points:
+        template = settings.point_settings[settings.active_point_index] if current > 0 else None
         for _ in range(total_points - current):
             ps = settings.point_settings.add()
             ps.scale = 1.0
             ps.rotation = 0.0
-            init_cross_section_circle(ps, settings.default_radius, settings.default_segments)
+            if template is not None and len(template.cross_section_verts) > 0:
+                for sv in template.cross_section_verts:
+                    v = ps.cross_section_verts.add()
+                    v.offset_x = sv.offset_x
+                    v.offset_y = sv.offset_y
+            else:
+                init_cross_section_circle(ps, settings.default_radius, settings.default_segments)
     elif current > total_points:
         for _ in range(current - total_points):
             settings.point_settings.remove(len(settings.point_settings) - 1)
 
     if total_points > 0 and settings.active_point_index >= total_points:
         settings.active_point_index = total_points - 1
+    normalize_cross_section_topology(settings)
 
 
 def is_curve_edit_mode(curve_obj):
