@@ -413,6 +413,93 @@ def get_view_direction_marker(context, marker_radius):
     return direction.x * marker_radius, direction.y * marker_radius
 
 
+def get_active_curve_stable_frame(context):
+    obj = context.active_object
+    if obj is None or obj.type != 'CURVE':
+        return None
+
+    settings = obj.hair_pipe_settings
+    target_index = settings.active_point_index
+    global_idx = 0
+    world_3x3 = obj.matrix_world.to_3x3()
+
+    for spline in obj.data.splines:
+        if spline.type == 'BEZIER':
+            points = spline.bezier_points
+
+            def point_tangent(idx):
+                point = points[idx]
+                prev_tangent = None
+                next_tangent = None
+                if spline.use_cyclic_u or idx > 0:
+                    prev_tangent = point.co - point.handle_left
+                    if prev_tangent.length < 1e-8:
+                        prev_idx = (idx - 1) % len(points)
+                        prev_tangent = point.co - points[prev_idx].co
+                if spline.use_cyclic_u or idx < len(points) - 1:
+                    next_tangent = point.handle_right - point.co
+                    if next_tangent.length < 1e-8:
+                        next_idx = (idx + 1) % len(points)
+                        next_tangent = points[next_idx].co - point.co
+                if prev_tangent is not None and next_tangent is not None:
+                    return safe_normalized(prev_tangent + next_tangent, next_tangent)
+                if next_tangent is not None:
+                    return safe_normalized(next_tangent)
+                if prev_tangent is not None:
+                    return safe_normalized(prev_tangent)
+                return Vector((0, 0, 1))
+        else:
+            points = spline.points
+
+            def point_tangent(idx):
+                co = Vector(points[idx].co[:3])
+                prev_tangent = None
+                next_tangent = None
+                if spline.use_cyclic_u or idx > 0:
+                    prev_idx = (idx - 1) % len(points)
+                    prev_tangent = co - Vector(points[prev_idx].co[:3])
+                if spline.use_cyclic_u or idx < len(points) - 1:
+                    next_idx = (idx + 1) % len(points)
+                    next_tangent = Vector(points[next_idx].co[:3]) - co
+                if prev_tangent is not None and next_tangent is not None:
+                    return safe_normalized(prev_tangent + next_tangent, next_tangent)
+                if next_tangent is not None:
+                    return safe_normalized(next_tangent)
+                if prev_tangent is not None:
+                    return safe_normalized(prev_tangent)
+                return Vector((0, 0, 1))
+
+        local_count = len(points)
+        if target_index < global_idx or target_index >= global_idx + local_count:
+            global_idx += local_count
+            continue
+
+        target_local_idx = target_index - global_idx
+        tangent = point_tangent(0)
+        normal, binormal = get_cross_section_frame(tangent)
+        prev_tangent = tangent
+        for idx in range(1, target_local_idx + 1):
+            tangent = safe_normalized(point_tangent(idx), prev_tangent)
+            try:
+                transport = prev_tangent.rotation_difference(tangent)
+                normal = transport @ normal
+            except ValueError:
+                pass
+            normal = normal - tangent * normal.dot(tangent)
+            if normal.length < 1e-8:
+                normal, binormal = get_cross_section_frame(tangent)
+            else:
+                normal.normalize()
+                binormal = tangent.cross(normal).normalized()
+            prev_tangent = tangent
+
+        world_normal = safe_normalized(world_3x3 @ normal)
+        world_binormal = safe_normalized(world_3x3 @ binormal)
+        return world_normal, world_binormal
+
+    return None
+
+
 def get_view_direction_unit(context):
     region_data = context.region_data
     if region_data is None:
@@ -423,8 +510,11 @@ def get_view_direction_unit(context):
 
     view_direction = safe_normalized(region_data.view_rotation @ Vector((0, 0, -1)))
     to_camera_side = -view_direction
-    tangent = get_active_curve_tangent(context)
-    normal, binormal = get_cross_section_frame(tangent)
+    stable_frame = get_active_curve_stable_frame(context)
+    if stable_frame is None:
+        tangent = get_active_curve_tangent(context)
+        stable_frame = get_cross_section_frame(tangent)
+    normal, binormal = stable_frame
     projected = Vector((to_camera_side.dot(normal), to_camera_side.dot(binormal)))
     if projected.length < 1e-8:
         return None
