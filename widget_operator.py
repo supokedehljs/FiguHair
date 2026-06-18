@@ -167,10 +167,11 @@ def draw_widget_callback():
     shader.uniform_float("color", (0.12, 0.38, 0.18, 0.95))
     batch.draw(shader)
 
+    can_remove = all(len(point_setting.cross_section_verts) > 3 for point_setting in settings.point_settings)
     rem_bg = [(rem_x0, by0), (rem_x1, by0), (rem_x1, by1), (rem_x0, by1)]
     batch = batch_for_shader(shader, 'TRIS', {"pos": rem_bg}, indices=[(0, 1, 2), (0, 2, 3)])
     shader.bind()
-    shader.uniform_float("color", (0.42, 0.14, 0.12, 0.95) if n > 3 else (0.18, 0.18, 0.18, 0.85))
+    shader.uniform_float("color", (0.42, 0.14, 0.12, 0.95) if can_remove else (0.18, 0.18, 0.18, 0.85))
     batch.draw(shader)
 
     button_lines = [
@@ -194,7 +195,7 @@ def draw_widget_callback():
     blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
     blf.position(font_id, add_x0 + 17.0, by0 + 7.0, 0)
     blf.draw(font_id, "+ Add")
-    blf.color(font_id, 1.0, 1.0, 1.0, 1.0 if n > 3 else 0.35)
+    blf.color(font_id, 1.0, 1.0, 1.0, 1.0 if can_remove else 0.35)
     blf.position(font_id, rem_x0 + 18.0, by0 + 7.0, 0)
     blf.draw(font_id, "- Del")
 
@@ -259,14 +260,15 @@ def add_cross_section_vertex(ps, settings):
     verts = ps.cross_section_verts
     n = len(verts)
     if n < 2:
-        v = verts.add()
-        v.offset_x = settings.default_radius
-        v.offset_y = 0.0
-        ps.active_vert_index = len(verts) - 1
+        for point_setting in settings.point_settings:
+            v = point_setting.cross_section_verts.add()
+            v.offset_x = settings.default_radius
+            v.offset_y = 0.0
+            point_setting.active_vert_index = len(point_setting.cross_section_verts) - 1
         return
 
     idx = max(0, min(ps.active_vert_index, n - 1))
-    add_cross_section_vertex_after(ps, idx)
+    add_cross_section_vertex_after_all(settings, idx)
 
 
 def add_cross_section_vertex_after(ps, idx):
@@ -283,6 +285,12 @@ def add_cross_section_vertex_after(ps, idx):
     ps.active_vert_index = target
 
 
+def add_cross_section_vertex_after_all(settings, idx):
+    for point_setting in settings.point_settings:
+        if len(point_setting.cross_section_verts) >= 2:
+            add_cross_section_vertex_after(point_setting, idx)
+
+
 def insert_cross_section_vertex_on_edge(ps, edge_idx, local_x, local_y):
     verts = ps.cross_section_verts
     n = len(verts)
@@ -296,6 +304,26 @@ def insert_cross_section_vertex_on_edge(ps, edge_idx, local_x, local_y):
     ps.active_vert_index = target
 
 
+def insert_cross_section_vertex_on_edge_at_ratio(ps, edge_idx, edge_t):
+    verts = ps.cross_section_verts
+    n = len(verts)
+    edge_idx = max(0, min(edge_idx, n - 1))
+    idx_next = (edge_idx + 1) % n
+    local_x = verts[edge_idx].offset_x * (1.0 - edge_t) + verts[idx_next].offset_x * edge_t
+    local_y = verts[edge_idx].offset_y * (1.0 - edge_t) + verts[idx_next].offset_y * edge_t
+    insert_cross_section_vertex_on_edge(ps, edge_idx, local_x, local_y)
+
+
+def insert_cross_section_vertex_on_edge_all(settings, active_index, edge_idx, local_x, local_y, edge_t):
+    for idx, point_setting in enumerate(settings.point_settings):
+        if len(point_setting.cross_section_verts) < 2:
+            continue
+        if idx == active_index:
+            insert_cross_section_vertex_on_edge(point_setting, edge_idx, local_x, local_y)
+        else:
+            insert_cross_section_vertex_on_edge_at_ratio(point_setting, edge_idx, edge_t)
+
+
 def distance_point_to_segment(px, py, ax, ay, bx, by):
     abx = bx - ax
     aby = by - ay
@@ -303,17 +331,18 @@ def distance_point_to_segment(px, py, ax, ay, bx, by):
     apy = py - ay
     ab_len_sq = abx * abx + aby * aby
     if ab_len_sq < 1e-8:
-        return math.sqrt((px - ax) ** 2 + (py - ay) ** 2), ax, ay
+        return math.sqrt((px - ax) ** 2 + (py - ay) ** 2), ax, ay, 0.0
     t = max(0.0, min(1.0, (apx * abx + apy * aby) / ab_len_sq))
     cx = ax + abx * t
     cy = ay + aby * t
-    return math.sqrt((px - cx) ** 2 + (py - cy) ** 2), cx, cy
+    return math.sqrt((px - cx) ** 2 + (py - cy) ** 2), cx, cy, t
 
 
 def find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf):
     closest_idx = -1
     closest_dist = 18.0
     closest_local = (0.0, 0.0)
+    closest_t = 0.5
     n = len(verts)
     for i in range(n):
         j = (i + 1) % n
@@ -321,12 +350,13 @@ def find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf):
         ay = cy + verts[i].offset_y * sf
         bx = cx + verts[j].offset_x * sf
         by = cy + verts[j].offset_y * sf
-        dist, hit_x, hit_y = distance_point_to_segment(mx, my, ax, ay, bx, by)
+        dist, hit_x, hit_y, edge_t = distance_point_to_segment(mx, my, ax, ay, bx, by)
         if dist < closest_dist:
             closest_dist = dist
             closest_idx = i
             closest_local = ((hit_x - cx) / sf, (hit_y - cy) / sf)
-    return closest_idx, closest_local
+            closest_t = edge_t
+    return closest_idx, closest_local, closest_t
 
 
 def remove_cross_section_vertex(ps):
@@ -336,6 +366,17 @@ def remove_cross_section_vertex(ps):
     idx = max(0, min(ps.active_vert_index, len(verts) - 1))
     verts.remove(idx)
     ps.active_vert_index = min(idx, len(verts) - 1)
+    return True
+
+
+def remove_cross_section_vertex_all(settings, remove_idx):
+    if any(len(point_setting.cross_section_verts) <= 3 for point_setting in settings.point_settings):
+        return False
+    for point_setting in settings.point_settings:
+        verts = point_setting.cross_section_verts
+        idx = max(0, min(remove_idx, len(verts) - 1))
+        verts.remove(idx)
+        point_setting.active_vert_index = min(idx, len(verts) - 1)
     return True
 
 
@@ -452,9 +493,11 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
 
     if event.type == 'MIDDLEMOUSE' and event.value == 'PRESS':
         if inside_widget and sf > 0.001:
-            edge_idx, local_pos = find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf)
+            edge_idx, local_pos, edge_t = find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf)
             if edge_idx >= 0:
-                insert_cross_section_vertex_on_edge(ps, edge_idx, local_pos[0], local_pos[1])
+                insert_cross_section_vertex_on_edge_all(
+                    settings, settings.active_point_index, edge_idx, local_pos[0], local_pos[1], edge_t
+                )
                 wd.drag_vert_index = -1
                 redraw_view3d(context)
                 return {'RUNNING_MODAL'}
@@ -468,7 +511,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if inside_remove_button:
-            remove_cross_section_vertex(ps)
+            remove_cross_section_vertex_all(settings, ps.active_vert_index)
             wd.drag_vert_index = -1
             redraw_view3d(context)
             return {'RUNNING_MODAL'}

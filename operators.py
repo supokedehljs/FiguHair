@@ -147,23 +147,25 @@ def get_nurbs_domain(num_points, degree, knots, is_cyclic):
     return knots[degree], knots[num_points]
 
 
-def interpolate_nurbs_cross_sections(point_settings, points, weighted, total, settings, global_point_idx, target_count):
+def interpolate_nurbs_cross_sections(point_settings, points, weighted, total, settings, global_point_idx):
     if total < 1e-8 or not weighted:
         return []
 
+    max_count = 0
     cached_offsets = []
     for idx, weight in weighted:
         ps = get_point_setting(point_settings, global_point_idx + idx, settings)
-        local_offsets = interpolate_cross_sections(ps, ps, 0.0, points[idx], points[idx], target_count)
+        local_offsets = interpolate_cross_sections(ps, ps, 0.0, points[idx], points[idx])
         if local_offsets:
             cached_offsets.append((local_offsets, weight))
-    if target_count <= 0:
+            max_count = max(max_count, len(local_offsets))
+    if max_count == 0:
         return []
 
-    accum = [(0.0, 0.0) for _ in range(target_count)]
+    accum = [(0.0, 0.0) for _ in range(max_count)]
     for local_offsets, weight in cached_offsets:
         normalized_weight = weight / total
-        for i in range(target_count):
+        for i in range(max_count):
             ox, oy = local_offsets[i % len(local_offsets)]
             ax, ay = accum[i]
             accum[i] = (ax + ox * normalized_weight, ay + oy * normalized_weight)
@@ -246,15 +248,7 @@ def get_cross_section_frame(tangent):
     return normal, binormal
 
 
-def get_spline_cross_section_vertex_count(point_settings, global_point_idx, num_points, settings):
-    max_count = 0
-    for idx in range(num_points):
-        ps = get_point_setting(point_settings, global_point_idx + idx, settings)
-        max_count = max(max_count, len(ps.cross_section_verts))
-    return max(1, max_count)
-
-
-def interpolate_cross_sections(ps0, ps1, t, point0=None, point1=None, target_count=None):
+def interpolate_cross_sections(ps0, ps1, t, point0=None, point1=None):
     """Interpolate cross-section vertex positions between two point settings"""
     verts0 = ps0.cross_section_verts
     verts1 = ps1.cross_section_verts
@@ -263,7 +257,7 @@ def interpolate_cross_sections(ps0, ps1, t, point0=None, point1=None, target_cou
     if n0 == 0 or n1 == 0:
         return []
 
-    num_verts = target_count if target_count is not None else min(n0, n1)
+    num_verts = min(n0, n1)
     curve_radius0 = point0.get('radius', 1.0) if point0 else 1.0
     curve_radius1 = point1.get('radius', 1.0) if point1 else 1.0
     curve_tilt0 = point0.get('tilt', 0.0) if point0 else 0.0
@@ -331,6 +325,39 @@ def init_cross_section_circle(point_setting, radius, segments):
         v.offset_y = math.sin(angle) * radius
 
 
+def add_cross_section_vertex_after(point_setting, idx):
+    csv = point_setting.cross_section_verts
+    n = len(csv)
+    if n < 2:
+        return False
+    idx = max(0, min(idx, n - 1))
+    idx_next = (idx + 1) % n
+    v = csv.add()
+    v.offset_x = (csv[idx].offset_x + csv[idx_next].offset_x) * 0.5
+    v.offset_y = (csv[idx].offset_y + csv[idx_next].offset_y) * 0.5
+    target = idx + 1
+    for i in range(len(csv) - 1, target, -1):
+        csv.move(i, i - 1)
+    point_setting.active_vert_index = target
+    return True
+
+
+def add_cross_section_vertex_after_all(settings, idx):
+    for point_setting in settings.point_settings:
+        add_cross_section_vertex_after(point_setting, idx)
+
+
+def remove_cross_section_vertex_all(settings, idx):
+    if any(len(point_setting.cross_section_verts) <= 3 for point_setting in settings.point_settings):
+        return False
+    for point_setting in settings.point_settings:
+        csv = point_setting.cross_section_verts
+        remove_idx = max(0, min(idx, len(csv) - 1))
+        csv.remove(remove_idx)
+        point_setting.active_vert_index = min(remove_idx, len(csv) - 1)
+    return True
+
+
 def generate_pipe_mesh(curve_obj, settings):
     splines_data = get_curve_points_data(curve_obj)
     if not splines_data:
@@ -352,7 +379,6 @@ def generate_pipe_mesh(curve_obj, settings):
             continue
 
         rings = []
-        spline_segments = get_spline_cross_section_vertex_count(point_settings, global_point_idx, num_points, settings)
         if spline_data['type'] == 'BEZIER':
             seg_count = num_points if is_cyclic else num_points - 1
             for seg_idx in range(seg_count):
@@ -372,7 +398,7 @@ def generate_pipe_mesh(curve_obj, settings):
                     tan0 = get_bezier_control_tangent(points, idx0, is_cyclic)
                     tan1 = get_bezier_control_tangent(points, idx1, is_cyclic)
                     tan = safe_normalized(tan0.lerp(tan1, t), evaluate_bezier_tangent(p0, h0r, h1l, p1, t))
-                    interp = interpolate_cross_sections(ps0, ps1, t, points[idx0], points[idx1], spline_segments)
+                    interp = interpolate_cross_sections(ps0, ps1, t, points[idx0], points[idx1])
                     if interp:
                         ring = make_ring_from_interpolated(pos, tan, interp)
                     else:
@@ -402,7 +428,7 @@ def generate_pipe_mesh(curve_obj, settings):
                 weighted, total = get_nurbs_weighted_controls(points, degree, u, knots, is_cyclic)
                 centers.append(evaluate_nurbs_from_weighted(points, weighted, total))
                 interp_offsets.append(interpolate_nurbs_cross_sections(
-                    point_settings, points, weighted, total, settings, global_point_idx, spline_segments
+                    point_settings, points, weighted, total, settings, global_point_idx
                 ))
 
             for sample_idx, pos in enumerate(centers):
@@ -436,7 +462,7 @@ def generate_pipe_mesh(curve_obj, settings):
                     tan0 = get_poly_control_tangent(points, idx0, is_cyclic)
                     tan1 = get_poly_control_tangent(points, idx1, is_cyclic)
                     tan = safe_normalized(tan0.lerp(tan1, t), p1 - p0)
-                    interp = interpolate_cross_sections(ps0, ps1, t, points[idx0], points[idx1], spline_segments)
+                    interp = interpolate_cross_sections(ps0, ps1, t, points[idx0], points[idx1])
                     if interp:
                         ring = make_ring_from_interpolated(pos, tan, interp)
                     else:
@@ -700,19 +726,13 @@ class HAIRPIPE_OT_add_cs_vert(bpy.types.Operator):
         csv = ps.cross_section_verts
         n = len(csv)
         if n < 2:
-            v = csv.add()
-            v.offset_x = settings.default_radius
-            v.offset_y = 0.0
+            for point_setting in settings.point_settings:
+                v = point_setting.cross_section_verts.add()
+                v.offset_x = settings.default_radius
+                v.offset_y = 0.0
+                point_setting.active_vert_index = len(point_setting.cross_section_verts) - 1
         else:
-            idx = ps.active_vert_index
-            idx_next = (idx + 1) % n
-            v = csv.add()
-            v.offset_x = (csv[idx].offset_x + csv[idx_next].offset_x) * 0.5
-            v.offset_y = (csv[idx].offset_y + csv[idx_next].offset_y) * 0.5
-            target = idx + 1
-            for i in range(len(csv) - 1, target, -1):
-                csv.move(i, i - 1)
-            ps.active_vert_index = target
+            add_cross_section_vertex_after_all(settings, ps.active_vert_index)
         return {'FINISHED'}
 
 
@@ -730,15 +750,12 @@ class HAIRPIPE_OT_remove_cs_vert(bpy.types.Operator):
         s = obj.hair_pipe_settings
         if s.active_point_index >= len(s.point_settings):
             return False
-        ps = s.point_settings[s.active_point_index]
-        return len(ps.cross_section_verts) > 3
+        return all(len(ps.cross_section_verts) > 3 for ps in s.point_settings)
 
     def execute(self, context):
         settings = context.active_object.hair_pipe_settings
         ps = settings.point_settings[settings.active_point_index]
-        ps.cross_section_verts.remove(ps.active_vert_index)
-        if ps.active_vert_index >= len(ps.cross_section_verts):
-            ps.active_vert_index = len(ps.cross_section_verts) - 1
+        remove_cross_section_vertex_all(settings, ps.active_vert_index)
         return {'FINISHED'}
 
 
