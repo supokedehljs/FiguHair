@@ -2,7 +2,7 @@ import bpy
 import math
 from bpy.props import (
     FloatProperty, IntProperty, CollectionProperty,
-    FloatVectorProperty, BoolProperty, PointerProperty
+    FloatVectorProperty, BoolProperty, PointerProperty, EnumProperty
 )
 from bpy.types import PropertyGroup
 
@@ -65,6 +65,45 @@ class HairPipeSettings(PropertyGroup):
         default=8,
         min=3,
         max=64,
+    )
+    pipe_resolution: IntProperty(
+        name="Pipe Resolution",
+        description="Generated rings between neighboring curve control points; higher values make cross-section transitions smoother",
+        default=8,
+        min=1,
+        max=64,
+    )
+    transition_mode: EnumProperty(
+        name="Transition Mode",
+        description="How cross-section shapes blend across multiple curve points",
+        items=(
+            ('LINEAR', "线性", "Direct interpolation between neighboring cross-sections"),
+            ('EASE', "缓入缓出", "Smooth ease interpolation without overshoot"),
+            ('MONOTONE', "单调平滑", "Multi-section Hermite interpolation with overshoot limiting"),
+            ('CATMULL', "柔性样条", "Catmull-Rom interpolation using neighboring cross-sections"),
+            ('BLEND', "混合", "Blend between monotone and Catmull-Rom styles"),
+        ),
+        default='MONOTONE',
+    )
+    transition_strength: FloatProperty(
+        name="Transition Strength",
+        description="Controls how strongly neighboring cross-sections influence the blend",
+        default=0.6,
+        min=0.0,
+        max=2.0,
+        precision=3,
+    )
+    strong_smoothing: BoolProperty(
+        name="Strong Smoothing",
+        description="Apply additional smoothing across the whole generated ring sequence",
+        default=False,
+    )
+    strong_smoothing_iterations: IntProperty(
+        name="Strong Smoothing Iterations",
+        description="Number of smoothing passes applied to generated cross-section rings",
+        default=2,
+        min=1,
+        max=12,
     )
     smooth_shading: BoolProperty(
         name="Smooth Shading",

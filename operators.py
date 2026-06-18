@@ -201,9 +201,17 @@ def interpolate_nurbs_cross_sections_by_control_range(point_settings, points, se
         idx0 = span_count - 1
         local_t = 1.0
     idx1 = (idx0 + 1) % num_points
+    idx_prev = (idx0 - 1) % num_points if is_cyclic or idx0 > 0 else idx0
+    idx_next = (idx1 + 1) % num_points if is_cyclic or idx1 < num_points - 1 else idx1
+    ps_prev = get_point_setting(point_settings, global_point_idx + idx_prev, settings)
     ps0 = get_point_setting(point_settings, global_point_idx + idx0, settings)
     ps1 = get_point_setting(point_settings, global_point_idx + idx1, settings)
-    return interpolate_cross_sections(ps0, ps1, local_t, points[idx0], points[idx1])
+    ps_next = get_point_setting(point_settings, global_point_idx + idx_next, settings)
+    return interpolate_cross_sections_smooth(
+        ps_prev, ps0, ps1, ps_next, local_t,
+        points[idx_prev], points[idx0], points[idx1], points[idx_next],
+        settings.transition_mode, settings.transition_strength
+    )
 
 
 def safe_normalized(vector, fallback=None):
@@ -292,6 +300,63 @@ def catmull_rom_value(v0, v1, v2, v3, t):
     )
 
 
+def ease_value(v0, v1, t):
+    t = max(0.0, min(1.0, t))
+    eased_t = t * t * (3.0 - 2.0 * t)
+    return v0 * (1.0 - eased_t) + v1 * eased_t
+
+
+def lerp_value(v0, v1, t):
+    return v0 * (1.0 - t) + v1 * t
+
+
+def mix_value(a, b, factor):
+    factor = max(0.0, min(1.0, factor))
+    return a * (1.0 - factor) + b * factor
+
+
+def monotone_tangent(prev_value, value, next_value):
+    left = value - prev_value
+    right = next_value - value
+    if left * right <= 0.0:
+        return 0.0
+    tangent = 0.5 * (left + right)
+    limit = 2.0 * min(abs(left), abs(right))
+    return max(-limit, min(limit, tangent))
+
+
+def hermite_value(v0, v1, m0, m1, t):
+    t2 = t * t
+    t3 = t2 * t
+    h00 = 2.0 * t3 - 3.0 * t2 + 1.0
+    h10 = t3 - 2.0 * t2 + t
+    h01 = -2.0 * t3 + 3.0 * t2
+    h11 = t3 - t2
+    return h00 * v0 + h10 * m0 + h01 * v1 + h11 * m1
+
+
+def interpolate_section_value(prev_value, value0, value1, next_value, t, mode, strength):
+    t = max(0.0, min(1.0, t))
+    linear = lerp_value(value0, value1, t)
+    if mode == 'LINEAR':
+        return linear
+    if mode == 'EASE':
+        return mix_value(linear, ease_value(value0, value1, t), strength)
+
+    m0 = monotone_tangent(prev_value, value0, value1)
+    m1 = monotone_tangent(value0, value1, next_value)
+    monotone = hermite_value(value0, value1, m0, m1, t)
+    if mode == 'MONOTONE':
+        return mix_value(linear, monotone, strength)
+
+    catmull = catmull_rom_value(prev_value, value0, value1, next_value, t)
+    if mode == 'CATMULL':
+        return mix_value(linear, catmull, strength)
+    if mode == 'BLEND':
+        return mix_value(monotone, catmull, strength)
+    return monotone
+
+
 def get_cross_section_sample(point_setting, point=None, vert_idx=0):
     verts = point_setting.cross_section_verts
     if len(verts) == 0:
@@ -333,18 +398,23 @@ def interpolate_cross_sections(ps0, ps1, t, point0=None, point1=None):
     return result
 
 
-def interpolate_cross_sections_smooth(ps_prev, ps0, ps1, ps_next, t, point_prev=None, point0=None, point1=None, point_next=None):
+def interpolate_cross_sections_smooth(
+    ps_prev, ps0, ps1, ps_next, t,
+    point_prev=None, point0=None, point1=None, point_next=None,
+    mode='MONOTONE', strength=1.0,
+):
     verts0 = ps0.cross_section_verts
     verts1 = ps1.cross_section_verts
     if len(verts0) == 0 or len(verts1) == 0:
         return []
 
+    t = max(0.0, min(1.0, t))
     num_verts = min(len(verts0), len(verts1))
     _, _, rot_prev = get_cross_section_sample(ps_prev, point_prev)
     _, _, rot0 = get_cross_section_sample(ps0, point0)
     _, _, rot1 = get_cross_section_sample(ps1, point1)
     _, _, rot_next = get_cross_section_sample(ps_next, point_next)
-    interp_rot = catmull_rom_value(rot_prev, rot0, rot1, rot_next, t)
+    interp_rot = interpolate_section_value(rot_prev, rot0, rot1, rot_next, t, mode, strength)
     cos_r = math.cos(interp_rot)
     sin_r = math.sin(interp_rot)
 
@@ -354,12 +424,46 @@ def interpolate_cross_sections_smooth(ps_prev, ps0, ps1, ps_next, t, point_prev=
         x0, y0, _ = get_cross_section_sample(ps0, point0, i)
         x1, y1, _ = get_cross_section_sample(ps1, point1, i)
         x_next, y_next, _ = get_cross_section_sample(ps_next, point_next, i)
-        lx = catmull_rom_value(x_prev, x0, x1, x_next, t)
-        ly = catmull_rom_value(y_prev, y0, y1, y_next, t)
+        lx = interpolate_section_value(x_prev, x0, x1, x_next, t, mode, strength)
+        ly = interpolate_section_value(y_prev, y0, y1, y_next, t, mode, strength)
         rx = lx * cos_r - ly * sin_r
         ry = lx * sin_r + ly * cos_r
         result.append((rx, ry))
     return result
+
+
+def smooth_ring_offsets(ring_specs, iterations=2, factor=0.5, is_cyclic=False):
+    if len(ring_specs) < 3:
+        return ring_specs
+
+    smoothed = list(ring_specs)
+    for _ in range(max(1, iterations)):
+        next_specs = list(smoothed)
+        start = 0 if is_cyclic else 1
+        end = len(smoothed) if is_cyclic else len(smoothed) - 1
+        for i in range(start, end):
+            prev_spec = smoothed[(i - 1) % len(smoothed)]
+            center, tangent, offsets = smoothed[i]
+            next_spec = smoothed[(i + 1) % len(smoothed)]
+            prev_offsets = prev_spec[2]
+            next_offsets = next_spec[2]
+            if not offsets or not prev_offsets or not next_offsets:
+                continue
+            count = min(len(offsets), len(prev_offsets), len(next_offsets))
+            new_offsets = []
+            for j in range(count):
+                ox, oy = offsets[j]
+                px, py = prev_offsets[j]
+                nx, ny = next_offsets[j]
+                avg_x = (px + nx) * 0.5
+                avg_y = (py + ny) * 0.5
+                new_offsets.append((
+                    ox * (1.0 - factor) + avg_x * factor,
+                    oy * (1.0 - factor) + avg_y * factor,
+                ))
+            next_specs[i] = (center, tangent, new_offsets)
+        smoothed = next_specs
+    return smoothed
 
 
 def make_ring_from_frame(center, normal, binormal, interp_offsets):
@@ -509,7 +613,7 @@ def generate_pipe_mesh(curve_obj, settings):
 
     for spline_data in splines_data:
         points = spline_data['points']
-        resolution = spline_data['resolution']
+        resolution = max(1, settings.pipe_resolution)
         is_cyclic = spline_data['cyclic']
         num_points = len(points)
         if num_points < 2:
@@ -542,7 +646,8 @@ def generate_pipe_mesh(curve_obj, settings):
                     tan = safe_normalized(tan0.lerp(tan1, t), evaluate_bezier_tangent(p0, h0r, h1l, p1, t))
                     interp = interpolate_cross_sections_smooth(
                         ps_prev, ps0, ps1, ps_next, t,
-                        points[idx_prev], points[idx0], points[idx1], points[idx_next]
+                        points[idx_prev], points[idx0], points[idx1], points[idx_next],
+                        settings.transition_mode, settings.transition_strength
                     )
                     ring_specs.append((pos, tan, interp))
         elif spline_data['type'] == 'NURBS':
@@ -605,9 +710,18 @@ def generate_pipe_mesh(curve_obj, settings):
                     tan = safe_normalized(tan0.lerp(tan1, t), p1 - p0)
                     interp = interpolate_cross_sections_smooth(
                         ps_prev, ps0, ps1, ps_next, t,
-                        points[idx_prev], points[idx0], points[idx1], points[idx_next]
+                        points[idx_prev], points[idx0], points[idx1], points[idx_next],
+                        settings.transition_mode, settings.transition_strength
                     )
                     ring_specs.append((pos, tan, interp))
+
+        if settings.strong_smoothing:
+            ring_specs = smooth_ring_offsets(
+                ring_specs,
+                settings.strong_smoothing_iterations,
+                0.45,
+                is_cyclic,
+            )
 
         rings = build_minimal_twist_rings(ring_specs, is_cyclic)
         global_point_idx += num_points
