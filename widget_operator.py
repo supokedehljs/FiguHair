@@ -76,11 +76,11 @@ def draw_widget_callback():
     half = size / 2.0 - padding
     alignment_angle = get_view_alignment_angle(context)
 
-    max_off = max((max(abs(rotate_2d(*get_effective_offset(v, curve_point, ps), alignment_angle)[0]), abs(rotate_2d(*get_effective_offset(v, curve_point, ps), alignment_angle)[1])) for v in verts), default=0.05)
-    if max_off < 1e-6:
-        max_off = 0.05
+    base_radius = settings.default_radius * get_cross_section_effective_scale(curve_point, ps)
+    if base_radius < 1e-6:
+        base_radius = 0.05
     if wd.widget_scale_factor <= 1e-8:
-        wd.widget_scale_factor = half / (max_off * 1.2)
+        wd.widget_scale_factor = half / (base_radius * 2.4)
     sf = wd.widget_scale_factor
 
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
@@ -129,6 +129,17 @@ def draw_widget_callback():
     shader.bind()
     shader.uniform_float("color", (1.0, 0.8, 0.05, 1.0))
     batch.draw(shader)
+
+    effective_points = [get_effective_offset(v, curve_point, ps) for v in verts]
+    smooth_effective = chaikin_closed(effective_points, 3)
+    smooth_widget_points = [effective_to_widget(x, y, cx, cy, sf, alignment_angle) for x, y in smooth_effective]
+    smooth_lines = make_smooth_preview_lines(smooth_widget_points)
+    if smooth_lines:
+        gpu.state.line_width_set(2.0)
+        batch = batch_for_shader(shader, 'LINES', {"pos": smooth_lines})
+        shader.bind()
+        shader.uniform_float("color", (0.0, 0.95, 1.0, 0.9))
+        batch.draw(shader)
 
     gpu.state.point_size_set(12.0)
     pts = []
@@ -212,7 +223,7 @@ def draw_widget_callback():
     blf.size(font_id, 12)
     blf.color(font_id, 0.82, 0.82, 0.82, 0.9)
     blf.position(font_id, x0 + 10.0, by1 + 8.0, 0)
-    blf.draw(font_id, "Bottom red dot = side facing your view | Middle click edge to insert")
+    blf.draw(font_id, "Cyan line = subdivided smooth preview | Bottom red dot = side facing your view | Middle click edge to insert")
     blf.size(font_id, 14)
     blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
     blf.position(font_id, add_x0 + 17.0, by0 + 7.0, 0)
@@ -299,6 +310,33 @@ def get_effective_offset(vertex, curve_point, point_setting):
     cos_r = math.cos(rotation)
     sin_r = math.sin(rotation)
     return x * cos_r - y * sin_r, x * sin_r + y * cos_r
+
+
+def chaikin_closed(points, iterations=3):
+    if len(points) < 3:
+        return points
+    result = list(points)
+    for _ in range(max(1, iterations)):
+        refined = []
+        count = len(result)
+        for i in range(count):
+            x0, y0 = result[i]
+            x1, y1 = result[(i + 1) % count]
+            refined.append((x0 * 0.75 + x1 * 0.25, y0 * 0.75 + y1 * 0.25))
+            refined.append((x0 * 0.25 + x1 * 0.75, y0 * 0.25 + y1 * 0.75))
+        result = refined
+    return result
+
+
+def make_smooth_preview_lines(points):
+    if len(points) < 2:
+        return []
+    lines = []
+    count = len(points)
+    for i in range(count):
+        lines.append(points[i])
+        lines.append(points[(i + 1) % count])
+    return lines
 
 
 def set_vertex_from_effective_offset(vertex, effective_x, effective_y, curve_point, point_setting):
@@ -652,6 +690,19 @@ def find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf, curve_point, poin
     return closest_idx, closest_local, closest_t
 
 
+def find_nearest_cross_section_vertex(verts, mx, my, cx, cy, sf, curve_point, point_setting, alignment_angle, max_dist=24.0):
+    closest_idx = -1
+    closest_dist = max_dist
+    for i, v in enumerate(verts):
+        ox, oy = get_effective_offset(v, curve_point, point_setting)
+        px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle)
+        dist = math.sqrt((mx - px) ** 2 + (my - py) ** 2)
+        if dist < closest_dist:
+            closest_dist = dist
+            closest_idx = i
+    return closest_idx
+
+
 def remove_cross_section_vertex(ps):
     verts = ps.cross_section_verts
     if len(verts) <= 3:
@@ -813,26 +864,21 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
 
+        closest_idx = find_nearest_cross_section_vertex(
+            verts, mx, my, cx, cy, sf, curve_point, ps, alignment_angle
+        )
+        if closest_idx >= 0:
+            wd.drag_vert_index = closest_idx
+            ps.active_vert_index = closest_idx
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+
         if not inside_widget:
             if close_on_key_release or inside_controls:
                 return {'RUNNING_MODAL'}
             operator._finish(context)
             return {'FINISHED'}
 
-        closest_idx = -1
-        closest_dist = 24.0
-        for i, v in enumerate(verts):
-            ox, oy = get_effective_offset(v, curve_point, ps)
-            px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle)
-            dist = math.sqrt((mx - px) ** 2 + (my - py) ** 2)
-            if dist < closest_dist:
-                closest_dist = dist
-                closest_idx = i
-
-        if closest_idx >= 0:
-            wd.drag_vert_index = closest_idx
-            ps.active_vert_index = closest_idx
-            redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
     if event.type == 'MOUSEMOVE':
