@@ -21,6 +21,11 @@ class HairPipeCrossSectionVertex(PropertyGroup):
         default=0.0,
         precision=4,
     )
+    is_ghost: BoolProperty(
+        name="Ghost",
+        description="Ghost vertices keep topology without being directly editable",
+        default=False,
+    )
 
 
 class HairPipePointSettings(PropertyGroup):

@@ -31,6 +31,10 @@ class HairPipeWidgetSettings(PropertyGroup):
     remove_button_y0: FloatProperty(default=0.0)
     remove_button_x1: FloatProperty(default=0.0)
     remove_button_y1: FloatProperty(default=0.0)
+    toggle_button_x0: FloatProperty(default=0.0)
+    toggle_button_y0: FloatProperty(default=0.0)
+    toggle_button_x1: FloatProperty(default=0.0)
+    toggle_button_y1: FloatProperty(default=0.0)
 
 
 def draw_widget_callback():
@@ -53,6 +57,7 @@ def draw_widget_callback():
         return
 
     ps = settings.point_settings[settings.active_point_index]
+    update_ghost_vertices(ps)
     curve_point = get_active_curve_point(context)
     verts = ps.cross_section_verts
     n = len(verts)
@@ -141,15 +146,27 @@ def draw_widget_callback():
         shader.uniform_float("color", (0.0, 0.95, 1.0, 0.9))
         batch.draw(shader)
 
-    gpu.state.point_size_set(12.0)
-    pts = []
+    normal_pts = []
+    ghost_pts = []
     for v in verts:
         ox, oy = get_effective_offset(v, curve_point, ps)
-        pts.append(effective_to_widget(ox, oy, cx, cy, sf, alignment_angle))
-    batch = batch_for_shader(shader, 'POINTS', {"pos": pts})
-    shader.bind()
-    shader.uniform_float("color", (1.0, 1.0, 1.0, 1.0))
-    batch.draw(shader)
+        point = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle)
+        if getattr(v, 'is_ghost', False):
+            ghost_pts.append(point)
+        else:
+            normal_pts.append(point)
+    if ghost_pts:
+        gpu.state.point_size_set(10.0)
+        batch = batch_for_shader(shader, 'POINTS', {"pos": ghost_pts})
+        shader.bind()
+        shader.uniform_float("color", (0.45, 0.65, 1.0, 0.55))
+        batch.draw(shader)
+    if normal_pts:
+        gpu.state.point_size_set(12.0)
+        batch = batch_for_shader(shader, 'POINTS', {"pos": normal_pts})
+        shader.bind()
+        shader.uniform_float("color", (1.0, 1.0, 1.0, 1.0))
+        batch.draw(shader)
 
     aidx = ps.active_vert_index
     if 0 <= aidx < n:
@@ -158,7 +175,10 @@ def draw_widget_callback():
         ap = [effective_to_widget(ax, ay, cx, cy, sf, alignment_angle)]
         batch = batch_for_shader(shader, 'POINTS', {"pos": ap})
         shader.bind()
-        shader.uniform_float("color", (0.0, 0.95, 1.0, 1.0))
+        if getattr(verts[aidx], 'is_ghost', False):
+            shader.uniform_float("color", (0.55, 0.75, 1.0, 0.95))
+        else:
+            shader.uniform_float("color", (0.0, 0.95, 1.0, 1.0))
         batch.draw(shader)
 
     marker_radius = min(half * 0.82, max(ref_r, half * 0.35))
@@ -181,10 +201,13 @@ def draw_widget_callback():
     gap = 10.0
     by0 = y0 - button_h - 10.0
     by1 = by0 + button_h
-    add_x0 = cx - button_w - gap * 0.5
+    total_w = button_w * 3.0 + gap * 2.0
+    add_x0 = cx - total_w * 0.5
     add_x1 = add_x0 + button_w
-    rem_x0 = cx + gap * 0.5
+    rem_x0 = add_x1 + gap
     rem_x1 = rem_x0 + button_w
+    tog_x0 = rem_x1 + gap
+    tog_x1 = tog_x0 + button_w
     wd.add_button_x0 = add_x0
     wd.add_button_y0 = by0
     wd.add_button_x1 = add_x1
@@ -193,6 +216,10 @@ def draw_widget_callback():
     wd.remove_button_y0 = by0
     wd.remove_button_x1 = rem_x1
     wd.remove_button_y1 = by1
+    wd.toggle_button_x0 = tog_x0
+    wd.toggle_button_y0 = by0
+    wd.toggle_button_x1 = tog_x1
+    wd.toggle_button_y1 = by1
 
     add_bg = [(add_x0, by0), (add_x1, by0), (add_x1, by1), (add_x0, by1)]
     batch = batch_for_shader(shader, 'TRIS', {"pos": add_bg}, indices=[(0, 1, 2), (0, 2, 3)])
@@ -207,11 +234,20 @@ def draw_widget_callback():
     shader.uniform_float("color", (0.42, 0.14, 0.12, 0.95) if can_remove else (0.18, 0.18, 0.18, 0.85))
     batch.draw(shader)
 
+    active_is_ghost = 0 <= ps.active_vert_index < n and getattr(verts[ps.active_vert_index], 'is_ghost', False)
+    tog_bg = [(tog_x0, by0), (tog_x1, by0), (tog_x1, by1), (tog_x0, by1)]
+    batch = batch_for_shader(shader, 'TRIS', {"pos": tog_bg}, indices=[(0, 1, 2), (0, 2, 3)])
+    shader.bind()
+    shader.uniform_float("color", (0.18, 0.28, 0.58, 0.95) if active_is_ghost else (0.24, 0.24, 0.24, 0.95))
+    batch.draw(shader)
+
     button_lines = [
         (add_x0, by0), (add_x1, by0), (add_x1, by0), (add_x1, by1),
         (add_x1, by1), (add_x0, by1), (add_x0, by1), (add_x0, by0),
         (rem_x0, by0), (rem_x1, by0), (rem_x1, by0), (rem_x1, by1),
         (rem_x1, by1), (rem_x0, by1), (rem_x0, by1), (rem_x0, by0),
+        (tog_x0, by0), (tog_x1, by0), (tog_x1, by0), (tog_x1, by1),
+        (tog_x1, by1), (tog_x0, by1), (tog_x0, by1), (tog_x0, by0),
     ]
     gpu.state.line_width_set(1.0)
     batch = batch_for_shader(shader, 'LINES', {"pos": button_lines})
@@ -223,7 +259,7 @@ def draw_widget_callback():
     blf.size(font_id, 12)
     blf.color(font_id, 0.82, 0.82, 0.82, 0.9)
     blf.position(font_id, x0 + 10.0, by1 + 8.0, 0)
-    blf.draw(font_id, "Cyan line = subdivided smooth preview | Bottom red dot = side facing your view | Middle click edge to insert")
+    blf.draw(font_id, "Cyan line = subdivided preview | Blue points = ghost | Middle click edge to insert")
     blf.size(font_id, 14)
     blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
     blf.position(font_id, add_x0 + 17.0, by0 + 7.0, 0)
@@ -231,6 +267,9 @@ def draw_widget_callback():
     blf.color(font_id, 1.0, 1.0, 1.0, 1.0 if can_remove else 0.35)
     blf.position(font_id, rem_x0 + 18.0, by0 + 7.0, 0)
     blf.draw(font_id, "- Del")
+    blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
+    blf.position(font_id, tog_x0 + 9.0, by0 + 7.0, 0)
+    blf.draw(font_id, "Ghost")
 
     gpu.state.line_width_set(1.0)
     gpu.state.point_size_set(1.0)
@@ -310,6 +349,53 @@ def get_effective_offset(vertex, curve_point, point_setting):
     cos_r = math.cos(rotation)
     sin_r = math.sin(rotation)
     return x * cos_r - y * sin_r, x * sin_r + y * cos_r
+
+
+def catmull_rom_2d(p0, p1, p2, p3, t):
+    t2 = t * t
+    t3 = t2 * t
+    x = 0.5 * (
+        2.0 * p1[0]
+        + (-p0[0] + p2[0]) * t
+        + (2.0 * p0[0] - 5.0 * p1[0] + 4.0 * p2[0] - p3[0]) * t2
+        + (-p0[0] + 3.0 * p1[0] - 3.0 * p2[0] + p3[0]) * t3
+    )
+    y = 0.5 * (
+        2.0 * p1[1]
+        + (-p0[1] + p2[1]) * t
+        + (2.0 * p0[1] - 5.0 * p1[1] + 4.0 * p2[1] - p3[1]) * t2
+        + (-p0[1] + 3.0 * p1[1] - 3.0 * p2[1] + p3[1]) * t3
+    )
+    return x, y
+
+
+def update_ghost_vertices(point_setting):
+    verts = point_setting.cross_section_verts
+    count = len(verts)
+    if count < 3:
+        return
+    real_indices = [i for i, v in enumerate(verts) if not getattr(v, 'is_ghost', False)]
+    real_count = len(real_indices)
+    if real_count < 2:
+        return
+    for real_pos, start_idx in enumerate(real_indices):
+        end_idx = real_indices[(real_pos + 1) % real_count]
+        gap = (end_idx - start_idx - 1) % count
+        if gap <= 0:
+            continue
+        prev_idx = real_indices[(real_pos - 1) % real_count]
+        next_idx = real_indices[(real_pos + 2) % real_count]
+        p0 = (verts[prev_idx].offset_x, verts[prev_idx].offset_y)
+        p1 = (verts[start_idx].offset_x, verts[start_idx].offset_y)
+        p2 = (verts[end_idx].offset_x, verts[end_idx].offset_y)
+        p3 = (verts[next_idx].offset_x, verts[next_idx].offset_y)
+        for step in range(1, gap + 1):
+            ghost_idx = (start_idx + step) % count
+            ghost_vert = verts[ghost_idx]
+            if not getattr(ghost_vert, 'is_ghost', False):
+                continue
+            t = step / (gap + 1)
+            ghost_vert.offset_x, ghost_vert.offset_y = catmull_rom_2d(p0, p1, p2, p3, t)
 
 
 def chaikin_closed(points, iterations=3):
@@ -587,19 +673,21 @@ def widget_to_effective(mx, my, cx, cy, sf, alignment_angle):
 def add_cross_section_vertex(ps, settings):
     verts = ps.cross_section_verts
     n = len(verts)
+    active_point_index = settings.active_point_index
     if n < 2:
-        for point_setting in settings.point_settings:
+        for idx, point_setting in enumerate(settings.point_settings):
             v = point_setting.cross_section_verts.add()
             v.offset_x = settings.default_radius
             v.offset_y = 0.0
+            v.is_ghost = idx != active_point_index
             point_setting.active_vert_index = len(point_setting.cross_section_verts) - 1
         return
 
     idx = max(0, min(ps.active_vert_index, n - 1))
-    add_cross_section_vertex_after_all(settings, idx)
+    add_cross_section_vertex_after_all(settings, active_point_index, idx)
 
 
-def add_cross_section_vertex_after(ps, idx):
+def add_cross_section_vertex_after(ps, idx, is_ghost=False):
     verts = ps.cross_section_verts
     n = len(verts)
     idx = max(0, min(idx, n - 1))
@@ -607,19 +695,20 @@ def add_cross_section_vertex_after(ps, idx):
     v = verts.add()
     v.offset_x = (verts[idx].offset_x + verts[idx_next].offset_x) * 0.5
     v.offset_y = (verts[idx].offset_y + verts[idx_next].offset_y) * 0.5
+    v.is_ghost = is_ghost
     target = idx + 1
     for i in range(len(verts) - 1, target, -1):
         verts.move(i, i - 1)
     ps.active_vert_index = target
 
 
-def add_cross_section_vertex_after_all(settings, idx):
-    for point_setting in settings.point_settings:
+def add_cross_section_vertex_after_all(settings, active_index, idx):
+    for point_idx, point_setting in enumerate(settings.point_settings):
         if len(point_setting.cross_section_verts) >= 2:
-            add_cross_section_vertex_after(point_setting, idx)
+            add_cross_section_vertex_after(point_setting, idx, point_idx != active_index)
 
 
-def insert_cross_section_vertex_on_edge(ps, edge_idx, local_x, local_y, curve_point=None):
+def insert_cross_section_vertex_on_edge(ps, edge_idx, local_x, local_y, curve_point=None, is_ghost=False):
     verts = ps.cross_section_verts
     n = len(verts)
     edge_idx = max(0, min(edge_idx, n - 1))
@@ -629,20 +718,21 @@ def insert_cross_section_vertex_on_edge(ps, edge_idx, local_x, local_y, curve_po
         v.offset_y = local_y
     else:
         set_vertex_from_effective_offset(v, local_x, local_y, curve_point, ps)
+    v.is_ghost = is_ghost
     target = edge_idx + 1
     for i in range(len(verts) - 1, target, -1):
         verts.move(i, i - 1)
     ps.active_vert_index = target
 
 
-def insert_cross_section_vertex_on_edge_at_ratio(ps, edge_idx, edge_t):
+def insert_cross_section_vertex_on_edge_at_ratio(ps, edge_idx, edge_t, is_ghost=True):
     verts = ps.cross_section_verts
     n = len(verts)
     edge_idx = max(0, min(edge_idx, n - 1))
     idx_next = (edge_idx + 1) % n
     local_x = verts[edge_idx].offset_x * (1.0 - edge_t) + verts[idx_next].offset_x * edge_t
     local_y = verts[edge_idx].offset_y * (1.0 - edge_t) + verts[idx_next].offset_y * edge_t
-    insert_cross_section_vertex_on_edge(ps, edge_idx, local_x, local_y)
+    insert_cross_section_vertex_on_edge(ps, edge_idx, local_x, local_y, is_ghost=is_ghost)
 
 
 def insert_cross_section_vertex_on_edge_all(settings, active_index, edge_idx, local_x, local_y, edge_t, curve_point):
@@ -650,9 +740,9 @@ def insert_cross_section_vertex_on_edge_all(settings, active_index, edge_idx, lo
         if len(point_setting.cross_section_verts) < 2:
             continue
         if idx == active_index:
-            insert_cross_section_vertex_on_edge(point_setting, edge_idx, local_x, local_y, curve_point)
+            insert_cross_section_vertex_on_edge(point_setting, edge_idx, local_x, local_y, curve_point, is_ghost=False)
         else:
-            insert_cross_section_vertex_on_edge_at_ratio(point_setting, edge_idx, edge_t)
+            insert_cross_section_vertex_on_edge_at_ratio(point_setting, edge_idx, edge_t, is_ghost=True)
 
 
 def distance_point_to_segment(px, py, ax, ay, bx, by):
@@ -818,6 +908,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         return {'CANCELLED'}
 
     ps = settings.point_settings[settings.active_point_index]
+    update_ghost_vertices(ps)
     curve_point = get_active_curve_point(context)
     verts = ps.cross_section_verts
     if len(verts) < 3:
@@ -835,7 +926,10 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     inside_remove_button = is_inside_rect(
         mx, my, wd.remove_button_x0, wd.remove_button_y0, wd.remove_button_x1, wd.remove_button_y1
     )
-    inside_controls = inside_add_button or inside_remove_button
+    inside_toggle_button = is_inside_rect(
+        mx, my, wd.toggle_button_x0, wd.toggle_button_y0, wd.toggle_button_x1, wd.toggle_button_y1
+    )
+    inside_controls = inside_add_button or inside_remove_button or inside_toggle_button
 
     if event.type == 'MIDDLEMOUSE' and event.value == 'PRESS':
         if inside_widget and sf > 0.001:
@@ -863,13 +957,23 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             wd.drag_vert_index = -1
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
+        if inside_toggle_button:
+            if 0 <= ps.active_vert_index < len(verts):
+                verts[ps.active_vert_index].is_ghost = not getattr(verts[ps.active_vert_index], 'is_ghost', False)
+                update_ghost_vertices(ps)
+            wd.drag_vert_index = -1
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
 
         closest_idx = find_nearest_cross_section_vertex(
             verts, mx, my, cx, cy, sf, curve_point, ps, alignment_angle
         )
         if closest_idx >= 0:
-            wd.drag_vert_index = closest_idx
             ps.active_vert_index = closest_idx
+            if getattr(verts[closest_idx], 'is_ghost', False):
+                wd.drag_vert_index = -1
+            else:
+                wd.drag_vert_index = closest_idx
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
 
@@ -882,9 +986,10 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         return {'RUNNING_MODAL'}
 
     if event.type == 'MOUSEMOVE':
-        if 0 <= wd.drag_vert_index < len(verts) and sf > 0.001:
+        if 0 <= wd.drag_vert_index < len(verts) and sf > 0.001 and not getattr(verts[wd.drag_vert_index], 'is_ghost', False):
             effective_x, effective_y = widget_to_effective(mx, my, cx, cy, sf, alignment_angle)
             set_vertex_from_effective_offset(verts[wd.drag_vert_index], effective_x, effective_y, curve_point, ps)
+            update_ghost_vertices(ps)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if inside_widget or inside_controls:

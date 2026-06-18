@@ -546,9 +546,62 @@ def init_cross_section_circle(point_setting, radius, segments):
         v = point_setting.cross_section_verts.add()
         v.offset_x = math.cos(angle) * radius
         v.offset_y = math.sin(angle) * radius
+        v.is_ghost = False
 
 
-def add_cross_section_vertex_after(point_setting, idx):
+def catmull_rom_2d(p0, p1, p2, p3, t):
+    t2 = t * t
+    t3 = t2 * t
+    x = 0.5 * (
+        2.0 * p1[0]
+        + (-p0[0] + p2[0]) * t
+        + (2.0 * p0[0] - 5.0 * p1[0] + 4.0 * p2[0] - p3[0]) * t2
+        + (-p0[0] + 3.0 * p1[0] - 3.0 * p2[0] + p3[0]) * t3
+    )
+    y = 0.5 * (
+        2.0 * p1[1]
+        + (-p0[1] + p2[1]) * t
+        + (2.0 * p0[1] - 5.0 * p1[1] + 4.0 * p2[1] - p3[1]) * t2
+        + (-p0[1] + 3.0 * p1[1] - 3.0 * p2[1] + p3[1]) * t3
+    )
+    return x, y
+
+
+def update_ghost_vertices(point_setting):
+    verts = point_setting.cross_section_verts
+    count = len(verts)
+    if count < 3:
+        return
+    real_indices = [i for i, v in enumerate(verts) if not getattr(v, 'is_ghost', False)]
+    real_count = len(real_indices)
+    if real_count < 2:
+        return
+    for real_pos, start_idx in enumerate(real_indices):
+        end_idx = real_indices[(real_pos + 1) % real_count]
+        gap = (end_idx - start_idx - 1) % count
+        if gap <= 0:
+            continue
+        prev_idx = real_indices[(real_pos - 1) % real_count]
+        next_idx = real_indices[(real_pos + 2) % real_count]
+        p0 = (verts[prev_idx].offset_x, verts[prev_idx].offset_y)
+        p1 = (verts[start_idx].offset_x, verts[start_idx].offset_y)
+        p2 = (verts[end_idx].offset_x, verts[end_idx].offset_y)
+        p3 = (verts[next_idx].offset_x, verts[next_idx].offset_y)
+        for step in range(1, gap + 1):
+            ghost_idx = (start_idx + step) % count
+            ghost_vert = verts[ghost_idx]
+            if not getattr(ghost_vert, 'is_ghost', False):
+                continue
+            t = step / (gap + 1)
+            ghost_vert.offset_x, ghost_vert.offset_y = catmull_rom_2d(p0, p1, p2, p3, t)
+
+
+def update_all_ghost_vertices(settings):
+    for point_setting in settings.point_settings:
+        update_ghost_vertices(point_setting)
+
+
+def add_cross_section_vertex_after(point_setting, idx, is_ghost=False):
     csv = point_setting.cross_section_verts
     n = len(csv)
     if n < 2:
@@ -558,6 +611,7 @@ def add_cross_section_vertex_after(point_setting, idx):
     v = csv.add()
     v.offset_x = (csv[idx].offset_x + csv[idx_next].offset_x) * 0.5
     v.offset_y = (csv[idx].offset_y + csv[idx_next].offset_y) * 0.5
+    v.is_ghost = is_ghost
     target = idx + 1
     for i in range(len(csv) - 1, target, -1):
         csv.move(i, i - 1)
@@ -566,8 +620,9 @@ def add_cross_section_vertex_after(point_setting, idx):
 
 
 def add_cross_section_vertex_after_all(settings, idx):
-    for point_setting in settings.point_settings:
-        add_cross_section_vertex_after(point_setting, idx)
+    active_idx = min(settings.active_point_index, len(settings.point_settings) - 1)
+    for point_idx, point_setting in enumerate(settings.point_settings):
+        add_cross_section_vertex_after(point_setting, idx, point_idx != active_idx)
 
 
 def remove_cross_section_vertex_all(settings, idx):
@@ -601,6 +656,7 @@ def normalize_cross_section_topology(settings):
 
 
 def generate_pipe_mesh(curve_obj, settings):
+    update_all_ghost_vertices(settings)
     splines_data = get_curve_points_data(curve_obj)
     if not splines_data:
         return None, None
@@ -772,6 +828,7 @@ def sync_point_settings(curve_obj):
                     v = ps.cross_section_verts.add()
                     v.offset_x = sv.offset_x
                     v.offset_y = sv.offset_y
+                    v.is_ghost = getattr(sv, 'is_ghost', False)
             else:
                 init_cross_section_circle(ps, settings.default_radius, settings.default_segments)
     elif current > total_points:
@@ -781,6 +838,7 @@ def sync_point_settings(curve_obj):
     if total_points > 0 and settings.active_point_index >= total_points:
         settings.active_point_index = total_points - 1
     normalize_cross_section_topology(settings)
+    update_all_ghost_vertices(settings)
 
 
 def is_curve_edit_mode(curve_obj):
@@ -1056,13 +1114,15 @@ class HAIRPIPE_OT_add_cs_vert(bpy.types.Operator):
         csv = ps.cross_section_verts
         n = len(csv)
         if n < 2:
-            for point_setting in settings.point_settings:
+            for point_idx, point_setting in enumerate(settings.point_settings):
                 v = point_setting.cross_section_verts.add()
                 v.offset_x = settings.default_radius
                 v.offset_y = 0.0
+                v.is_ghost = point_idx != settings.active_point_index
                 point_setting.active_vert_index = len(point_setting.cross_section_verts) - 1
         else:
             add_cross_section_vertex_after_all(settings, ps.active_vert_index)
+        update_all_ghost_vertices(settings)
         return {'FINISHED'}
 
 
@@ -1125,6 +1185,7 @@ class HAIRPIPE_OT_copy_cs_to_all(bpy.types.Operator):
                 v = ps.cross_section_verts.add()
                 v.offset_x = sv.offset_x
                 v.offset_y = sv.offset_y
+                v.is_ghost = getattr(sv, 'is_ghost', False)
         self.report({'INFO'}, "Cross-section copied to all points")
         return {'FINISHED'}
 
