@@ -186,6 +186,10 @@ def draw_widget_callback():
     batch.draw(shader)
 
     font_id = 0
+    blf.size(font_id, 12)
+    blf.color(font_id, 0.82, 0.82, 0.82, 0.9)
+    blf.position(font_id, x0 + 10.0, by1 + 8.0, 0)
+    blf.draw(font_id, "Middle click an edge to insert a point")
     blf.size(font_id, 14)
     blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
     blf.position(font_id, add_x0 + 17.0, by0 + 7.0, 0)
@@ -262,6 +266,13 @@ def add_cross_section_vertex(ps, settings):
         return
 
     idx = max(0, min(ps.active_vert_index, n - 1))
+    add_cross_section_vertex_after(ps, idx)
+
+
+def add_cross_section_vertex_after(ps, idx):
+    verts = ps.cross_section_verts
+    n = len(verts)
+    idx = max(0, min(idx, n - 1))
     idx_next = (idx + 1) % n
     v = verts.add()
     v.offset_x = (verts[idx].offset_x + verts[idx_next].offset_x) * 0.5
@@ -270,6 +281,52 @@ def add_cross_section_vertex(ps, settings):
     for i in range(len(verts) - 1, target, -1):
         verts.move(i, i - 1)
     ps.active_vert_index = target
+
+
+def insert_cross_section_vertex_on_edge(ps, edge_idx, local_x, local_y):
+    verts = ps.cross_section_verts
+    n = len(verts)
+    edge_idx = max(0, min(edge_idx, n - 1))
+    v = verts.add()
+    v.offset_x = local_x
+    v.offset_y = local_y
+    target = edge_idx + 1
+    for i in range(len(verts) - 1, target, -1):
+        verts.move(i, i - 1)
+    ps.active_vert_index = target
+
+
+def distance_point_to_segment(px, py, ax, ay, bx, by):
+    abx = bx - ax
+    aby = by - ay
+    apx = px - ax
+    apy = py - ay
+    ab_len_sq = abx * abx + aby * aby
+    if ab_len_sq < 1e-8:
+        return math.sqrt((px - ax) ** 2 + (py - ay) ** 2), ax, ay
+    t = max(0.0, min(1.0, (apx * abx + apy * aby) / ab_len_sq))
+    cx = ax + abx * t
+    cy = ay + aby * t
+    return math.sqrt((px - cx) ** 2 + (py - cy) ** 2), cx, cy
+
+
+def find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf):
+    closest_idx = -1
+    closest_dist = 18.0
+    closest_local = (0.0, 0.0)
+    n = len(verts)
+    for i in range(n):
+        j = (i + 1) % n
+        ax = cx + verts[i].offset_x * sf
+        ay = cy + verts[i].offset_y * sf
+        bx = cx + verts[j].offset_x * sf
+        by = cy + verts[j].offset_y * sf
+        dist, hit_x, hit_y = distance_point_to_segment(mx, my, ax, ay, bx, by)
+        if dist < closest_dist:
+            closest_dist = dist
+            closest_idx = i
+            closest_local = ((hit_x - cx) / sf, (hit_y - cy) / sf)
+    return closest_idx, closest_local
 
 
 def remove_cross_section_vertex(ps):
@@ -392,6 +449,17 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         mx, my, wd.remove_button_x0, wd.remove_button_y0, wd.remove_button_x1, wd.remove_button_y1
     )
     inside_controls = inside_add_button or inside_remove_button
+
+    if event.type == 'MIDDLEMOUSE' and event.value == 'PRESS':
+        if inside_widget and sf > 0.001:
+            edge_idx, local_pos = find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf)
+            if edge_idx >= 0:
+                insert_cross_section_vertex_on_edge(ps, edge_idx, local_pos[0], local_pos[1])
+                wd.drag_vert_index = -1
+                redraw_view3d(context)
+                return {'RUNNING_MODAL'}
+        if inside_widget or inside_controls:
+            return {'RUNNING_MODAL'}
 
     if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
         if inside_add_button:

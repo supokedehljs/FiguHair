@@ -147,25 +147,23 @@ def get_nurbs_domain(num_points, degree, knots, is_cyclic):
     return knots[degree], knots[num_points]
 
 
-def interpolate_nurbs_cross_sections(point_settings, points, weighted, total, settings, global_point_idx):
+def interpolate_nurbs_cross_sections(point_settings, points, weighted, total, settings, global_point_idx, target_count):
     if total < 1e-8 or not weighted:
         return []
 
-    max_count = 0
     cached_offsets = []
     for idx, weight in weighted:
         ps = get_point_setting(point_settings, global_point_idx + idx, settings)
-        local_offsets = interpolate_cross_sections(ps, ps, 0.0, points[idx], points[idx])
+        local_offsets = interpolate_cross_sections(ps, ps, 0.0, points[idx], points[idx], target_count)
         if local_offsets:
             cached_offsets.append((local_offsets, weight))
-            max_count = max(max_count, len(local_offsets))
-    if max_count == 0:
+    if target_count <= 0:
         return []
 
-    accum = [(0.0, 0.0) for _ in range(max_count)]
+    accum = [(0.0, 0.0) for _ in range(target_count)]
     for local_offsets, weight in cached_offsets:
         normalized_weight = weight / total
-        for i in range(max_count):
+        for i in range(target_count):
             ox, oy = local_offsets[i % len(local_offsets)]
             ax, ay = accum[i]
             accum[i] = (ax + ox * normalized_weight, ay + oy * normalized_weight)
@@ -248,7 +246,15 @@ def get_cross_section_frame(tangent):
     return normal, binormal
 
 
-def interpolate_cross_sections(ps0, ps1, t, point0=None, point1=None):
+def get_spline_cross_section_vertex_count(point_settings, global_point_idx, num_points, settings):
+    max_count = 0
+    for idx in range(num_points):
+        ps = get_point_setting(point_settings, global_point_idx + idx, settings)
+        max_count = max(max_count, len(ps.cross_section_verts))
+    return max(1, max_count)
+
+
+def interpolate_cross_sections(ps0, ps1, t, point0=None, point1=None, target_count=None):
     """Interpolate cross-section vertex positions between two point settings"""
     verts0 = ps0.cross_section_verts
     verts1 = ps1.cross_section_verts
@@ -257,7 +263,7 @@ def interpolate_cross_sections(ps0, ps1, t, point0=None, point1=None):
     if n0 == 0 or n1 == 0:
         return []
 
-    num_verts = min(n0, n1)
+    num_verts = target_count if target_count is not None else min(n0, n1)
     curve_radius0 = point0.get('radius', 1.0) if point0 else 1.0
     curve_radius1 = point1.get('radius', 1.0) if point1 else 1.0
     curve_tilt0 = point0.get('tilt', 0.0) if point0 else 0.0
@@ -346,6 +352,7 @@ def generate_pipe_mesh(curve_obj, settings):
             continue
 
         rings = []
+        spline_segments = get_spline_cross_section_vertex_count(point_settings, global_point_idx, num_points, settings)
         if spline_data['type'] == 'BEZIER':
             seg_count = num_points if is_cyclic else num_points - 1
             for seg_idx in range(seg_count):
@@ -365,7 +372,7 @@ def generate_pipe_mesh(curve_obj, settings):
                     tan0 = get_bezier_control_tangent(points, idx0, is_cyclic)
                     tan1 = get_bezier_control_tangent(points, idx1, is_cyclic)
                     tan = safe_normalized(tan0.lerp(tan1, t), evaluate_bezier_tangent(p0, h0r, h1l, p1, t))
-                    interp = interpolate_cross_sections(ps0, ps1, t, points[idx0], points[idx1])
+                    interp = interpolate_cross_sections(ps0, ps1, t, points[idx0], points[idx1], spline_segments)
                     if interp:
                         ring = make_ring_from_interpolated(pos, tan, interp)
                     else:
@@ -395,7 +402,7 @@ def generate_pipe_mesh(curve_obj, settings):
                 weighted, total = get_nurbs_weighted_controls(points, degree, u, knots, is_cyclic)
                 centers.append(evaluate_nurbs_from_weighted(points, weighted, total))
                 interp_offsets.append(interpolate_nurbs_cross_sections(
-                    point_settings, points, weighted, total, settings, global_point_idx
+                    point_settings, points, weighted, total, settings, global_point_idx, spline_segments
                 ))
 
             for sample_idx, pos in enumerate(centers):
@@ -429,7 +436,7 @@ def generate_pipe_mesh(curve_obj, settings):
                     tan0 = get_poly_control_tangent(points, idx0, is_cyclic)
                     tan1 = get_poly_control_tangent(points, idx1, is_cyclic)
                     tan = safe_normalized(tan0.lerp(tan1, t), p1 - p0)
-                    interp = interpolate_cross_sections(ps0, ps1, t, points[idx0], points[idx1])
+                    interp = interpolate_cross_sections(ps0, ps1, t, points[idx0], points[idx1], spline_segments)
                     if interp:
                         ring = make_ring_from_interpolated(pos, tan, interp)
                     else:
