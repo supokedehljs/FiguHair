@@ -283,20 +283,36 @@ def is_inside_rect(x, y, x0, y0, x1, y1):
     return x0 <= x <= x1 and y0 <= y <= y1
 
 
-def get_cross_section_effective_scale(curve_point, point_setting):
+def get_cross_section_effective_transform(curve_point, point_setting):
     curve_radius = getattr(curve_point, 'radius', 1.0) if curve_point is not None else 1.0
-    return max(1e-8, curve_radius * point_setting.scale)
+    curve_tilt = getattr(curve_point, 'tilt', 0.0) if curve_point is not None else 0.0
+    scale = max(1e-8, curve_radius * point_setting.scale)
+    rotation = math.radians(point_setting.rotation) + curve_tilt
+    return scale, rotation
+
+
+def get_cross_section_effective_scale(curve_point, point_setting):
+    scale, _rotation = get_cross_section_effective_transform(curve_point, point_setting)
+    return scale
 
 
 def get_effective_offset(vertex, curve_point, point_setting):
-    scale = get_cross_section_effective_scale(curve_point, point_setting)
-    return vertex.offset_x * scale, vertex.offset_y * scale
+    scale, rotation = get_cross_section_effective_transform(curve_point, point_setting)
+    x = vertex.offset_x * scale
+    y = vertex.offset_y * scale
+    cos_r = math.cos(rotation)
+    sin_r = math.sin(rotation)
+    return x * cos_r - y * sin_r, x * sin_r + y * cos_r
 
 
 def set_vertex_from_effective_offset(vertex, effective_x, effective_y, curve_point, point_setting):
-    scale = get_cross_section_effective_scale(curve_point, point_setting)
-    vertex.offset_x = effective_x / scale
-    vertex.offset_y = effective_y / scale
+    scale, rotation = get_cross_section_effective_transform(curve_point, point_setting)
+    cos_r = math.cos(rotation)
+    sin_r = math.sin(rotation)
+    local_x = effective_x * cos_r + effective_y * sin_r
+    local_y = -effective_x * sin_r + effective_y * cos_r
+    vertex.offset_x = local_x / scale
+    vertex.offset_y = local_y / scale
 
 
 def get_active_curve_point(context):

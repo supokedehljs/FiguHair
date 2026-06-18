@@ -173,6 +173,23 @@ def interpolate_nurbs_cross_sections(point_settings, points, weighted, total, se
     return accum
 
 
+def interpolate_nurbs_cross_sections_by_control_range(point_settings, points, settings, global_point_idx, sample_t, is_cyclic):
+    num_points = len(points)
+    if num_points < 2:
+        return []
+    span_count = num_points if is_cyclic else num_points - 1
+    span_pos = sample_t * span_count
+    idx0 = int(math.floor(span_pos))
+    local_t = span_pos - idx0
+    if not is_cyclic and idx0 >= span_count:
+        idx0 = span_count - 1
+        local_t = 1.0
+    idx1 = (idx0 + 1) % num_points
+    ps0 = get_point_setting(point_settings, global_point_idx + idx0, settings)
+    ps1 = get_point_setting(point_settings, global_point_idx + idx1, settings)
+    return interpolate_cross_sections(ps0, ps1, local_t, points[idx0], points[idx1])
+
+
 def safe_normalized(vector, fallback=None):
     if vector.length >= 1e-8:
         return vector.normalized()
@@ -446,8 +463,8 @@ def generate_pipe_mesh(curve_obj, settings):
 
                 weighted, total = get_nurbs_weighted_controls(points, degree, u, knots, is_cyclic)
                 centers.append(evaluate_nurbs_from_weighted(points, weighted, total))
-                interp_offsets.append(interpolate_nurbs_cross_sections(
-                    point_settings, points, weighted, total, settings, global_point_idx
+                interp_offsets.append(interpolate_nurbs_cross_sections_by_control_range(
+                    point_settings, points, settings, global_point_idx, t, is_cyclic
                 ))
 
             for sample_idx, pos in enumerate(centers):
