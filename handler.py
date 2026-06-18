@@ -29,6 +29,7 @@ def rebuild_existing_pipe(curve_obj):
 
     old_mesh = pipe_obj.data
     pipe_obj.data = mesh
+    pipe_obj.matrix_world = curve_obj.matrix_world.copy()
     mesh.name = mesh_name
     if old_mesh and old_mesh.users == 0:
         bpy.data.meshes.remove(old_mesh)

@@ -1,6 +1,6 @@
 import bpy
 import math
-from mathutils import Vector, Matrix
+from mathutils import Vector
 from bpy.props import IntProperty, FloatProperty
 
 
@@ -14,9 +14,9 @@ def get_curve_points_data(curve_obj):
         if spline.type == 'BEZIER':
             for bp in spline.bezier_points:
                 points_data.append({
-                    'co': curve_obj.matrix_world @ bp.co,
-                    'handle_left': curve_obj.matrix_world @ bp.handle_left,
-                    'handle_right': curve_obj.matrix_world @ bp.handle_right,
+                    'co': bp.co.copy(),
+                    'handle_left': bp.handle_left.copy(),
+                    'handle_right': bp.handle_right.copy(),
                     'radius': bp.radius,
                     'tilt': bp.tilt,
                 })
@@ -24,7 +24,7 @@ def get_curve_points_data(curve_obj):
             for p in spline.points:
                 co = Vector(p.co[:3])
                 points_data.append({
-                    'co': curve_obj.matrix_world @ co,
+                    'co': co,
                     'weight': p.co[3],
                     'radius': p.radius,
                     'tilt': p.tilt,
@@ -302,13 +302,55 @@ def interpolate_cross_sections(ps0, ps1, t, point0=None, point1=None):
     return result
 
 
-def make_ring_from_interpolated(center, tangent, interp_offsets):
-    normal, binormal = get_cross_section_frame(tangent)
+def make_ring_from_frame(center, normal, binormal, interp_offsets):
     verts = []
     for rx, ry in interp_offsets:
         point = center + normal * rx + binormal * ry
         verts.append(point)
     return verts
+
+
+def make_ring_from_interpolated(center, tangent, interp_offsets):
+    normal, binormal = get_cross_section_frame(tangent)
+    return make_ring_from_frame(center, normal, binormal, interp_offsets)
+
+
+def build_minimal_twist_rings(ring_specs, is_cyclic=False):
+    if not ring_specs:
+        return []
+
+    rings = []
+    first_center, first_tangent, first_offsets = ring_specs[0]
+    tangent = safe_normalized(first_tangent)
+    normal, binormal = get_cross_section_frame(tangent)
+
+    if first_offsets:
+        rings.append(make_ring_from_frame(first_center, normal, binormal, first_offsets))
+    else:
+        rings.append([first_center])
+
+    prev_tangent = tangent
+    for center, raw_tangent, offsets in ring_specs[1:]:
+        tangent = safe_normalized(raw_tangent, prev_tangent)
+        if prev_tangent.length >= 1e-8 and tangent.length >= 1e-8:
+            try:
+                transport = prev_tangent.rotation_difference(tangent)
+                normal = transport @ normal
+            except ValueError:
+                pass
+        normal = normal - tangent * normal.dot(tangent)
+        if normal.length < 1e-8:
+            normal, binormal = get_cross_section_frame(tangent)
+        else:
+            normal.normalize()
+            binormal = tangent.cross(normal).normalized()
+        if offsets:
+            rings.append(make_ring_from_frame(center, normal, binormal, offsets))
+        else:
+            rings.append([center])
+        prev_tangent = tangent
+
+    return rings
 
 
 def get_point_setting(point_settings, idx, settings):
@@ -414,7 +456,7 @@ def generate_pipe_mesh(curve_obj, settings):
             global_point_idx += num_points
             continue
 
-        rings = []
+        ring_specs = []
         if spline_data['type'] == 'BEZIER':
             seg_count = num_points if is_cyclic else num_points - 1
             for seg_idx in range(seg_count):
@@ -435,11 +477,7 @@ def generate_pipe_mesh(curve_obj, settings):
                     tan1 = get_bezier_control_tangent(points, idx1, is_cyclic)
                     tan = safe_normalized(tan0.lerp(tan1, t), evaluate_bezier_tangent(p0, h0r, h1l, p1, t))
                     interp = interpolate_cross_sections(ps0, ps1, t, points[idx0], points[idx1])
-                    if interp:
-                        ring = make_ring_from_interpolated(pos, tan, interp)
-                    else:
-                        ring = [pos]
-                    rings.append(ring)
+                    ring_specs.append((pos, tan, interp))
         elif spline_data['type'] == 'NURBS':
             order = max(2, min(spline_data.get('order_u', 4), num_points))
             degree = order - 1
@@ -476,11 +514,7 @@ def generate_pipe_mesh(curve_obj, settings):
                     next_pos = centers[min(ring_count - 1, sample_idx + 1)]
                 tan = safe_normalized(next_pos - prev_pos)
                 interp = interp_offsets[sample_idx]
-                if interp:
-                    ring = make_ring_from_interpolated(pos, tan, interp)
-                else:
-                    ring = [pos]
-                rings.append(ring)
+                ring_specs.append((pos, tan, interp))
         elif spline_data['type'] == 'POLY':
             seg_count = num_points if is_cyclic else num_points - 1
             for seg_idx in range(seg_count):
@@ -499,12 +533,9 @@ def generate_pipe_mesh(curve_obj, settings):
                     tan1 = get_poly_control_tangent(points, idx1, is_cyclic)
                     tan = safe_normalized(tan0.lerp(tan1, t), p1 - p0)
                     interp = interpolate_cross_sections(ps0, ps1, t, points[idx0], points[idx1])
-                    if interp:
-                        ring = make_ring_from_interpolated(pos, tan, interp)
-                    else:
-                        ring = [pos]
-                    rings.append(ring)
+                    ring_specs.append((pos, tan, interp))
 
+        rings = build_minimal_twist_rings(ring_specs, is_cyclic)
         global_point_idx += num_points
         if not rings:
             continue
@@ -661,7 +692,7 @@ class HAIRPIPE_OT_generate_pipe(bpy.types.Operator):
         if settings.smooth_shading:
             for poly in mesh.polygons:
                 poly.use_smooth = True
-        pipe_obj.matrix_world = Matrix.Identity(4)
+        pipe_obj.matrix_world = curve_obj.matrix_world.copy()
         self.report({'INFO'}, f"Generated pipe with {len(verts)} vertices")
         return {'FINISHED'}
 
