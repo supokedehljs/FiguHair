@@ -1,6 +1,7 @@
 import bpy
 import gpu
 import math
+import blf
 from gpu_extras.batch import batch_for_shader
 from bpy.props import IntProperty, FloatProperty, BoolProperty
 from bpy.types import PropertyGroup
@@ -21,6 +22,14 @@ class HairPipeWidgetSettings(PropertyGroup):
     region_offset_x: IntProperty(default=0)
     region_offset_y: IntProperty(default=0)
     hold_key_mode: BoolProperty(default=False)
+    add_button_x0: FloatProperty(default=0.0)
+    add_button_y0: FloatProperty(default=0.0)
+    add_button_x1: FloatProperty(default=0.0)
+    add_button_y1: FloatProperty(default=0.0)
+    remove_button_x0: FloatProperty(default=0.0)
+    remove_button_y0: FloatProperty(default=0.0)
+    remove_button_x1: FloatProperty(default=0.0)
+    remove_button_y1: FloatProperty(default=0.0)
 
 
 def draw_widget_callback():
@@ -134,6 +143,57 @@ def draw_widget_callback():
         shader.uniform_float("color", (0.0, 0.95, 1.0, 1.0))
         batch.draw(shader)
 
+    button_w = 74.0
+    button_h = 28.0
+    gap = 10.0
+    by0 = y0 - button_h - 10.0
+    by1 = by0 + button_h
+    add_x0 = cx - button_w - gap * 0.5
+    add_x1 = add_x0 + button_w
+    rem_x0 = cx + gap * 0.5
+    rem_x1 = rem_x0 + button_w
+    wd.add_button_x0 = add_x0
+    wd.add_button_y0 = by0
+    wd.add_button_x1 = add_x1
+    wd.add_button_y1 = by1
+    wd.remove_button_x0 = rem_x0
+    wd.remove_button_y0 = by0
+    wd.remove_button_x1 = rem_x1
+    wd.remove_button_y1 = by1
+
+    add_bg = [(add_x0, by0), (add_x1, by0), (add_x1, by1), (add_x0, by1)]
+    batch = batch_for_shader(shader, 'TRIS', {"pos": add_bg}, indices=[(0, 1, 2), (0, 2, 3)])
+    shader.bind()
+    shader.uniform_float("color", (0.12, 0.38, 0.18, 0.95))
+    batch.draw(shader)
+
+    rem_bg = [(rem_x0, by0), (rem_x1, by0), (rem_x1, by1), (rem_x0, by1)]
+    batch = batch_for_shader(shader, 'TRIS', {"pos": rem_bg}, indices=[(0, 1, 2), (0, 2, 3)])
+    shader.bind()
+    shader.uniform_float("color", (0.42, 0.14, 0.12, 0.95) if n > 3 else (0.18, 0.18, 0.18, 0.85))
+    batch.draw(shader)
+
+    button_lines = [
+        (add_x0, by0), (add_x1, by0), (add_x1, by0), (add_x1, by1),
+        (add_x1, by1), (add_x0, by1), (add_x0, by1), (add_x0, by0),
+        (rem_x0, by0), (rem_x1, by0), (rem_x1, by0), (rem_x1, by1),
+        (rem_x1, by1), (rem_x0, by1), (rem_x0, by1), (rem_x0, by0),
+    ]
+    gpu.state.line_width_set(1.0)
+    batch = batch_for_shader(shader, 'LINES', {"pos": button_lines})
+    shader.bind()
+    shader.uniform_float("color", (0.75, 0.75, 0.75, 1.0))
+    batch.draw(shader)
+
+    font_id = 0
+    blf.size(font_id, 14)
+    blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
+    blf.position(font_id, add_x0 + 17.0, by0 + 7.0, 0)
+    blf.draw(font_id, "+ Add")
+    blf.color(font_id, 1.0, 1.0, 1.0, 1.0 if n > 3 else 0.35)
+    blf.position(font_id, rem_x0 + 18.0, by0 + 7.0, 0)
+    blf.draw(font_id, "- Del")
+
     gpu.state.line_width_set(1.0)
     gpu.state.point_size_set(1.0)
     gpu.state.blend_set('NONE')
@@ -185,6 +245,41 @@ def redraw_view3d(context):
     for area in context.screen.areas:
         if area.type == 'VIEW_3D':
             area.tag_redraw()
+
+
+def is_inside_rect(x, y, x0, y0, x1, y1):
+    return x0 <= x <= x1 and y0 <= y <= y1
+
+
+def add_cross_section_vertex(ps, settings):
+    verts = ps.cross_section_verts
+    n = len(verts)
+    if n < 2:
+        v = verts.add()
+        v.offset_x = settings.default_radius
+        v.offset_y = 0.0
+        ps.active_vert_index = len(verts) - 1
+        return
+
+    idx = max(0, min(ps.active_vert_index, n - 1))
+    idx_next = (idx + 1) % n
+    v = verts.add()
+    v.offset_x = (verts[idx].offset_x + verts[idx_next].offset_x) * 0.5
+    v.offset_y = (verts[idx].offset_y + verts[idx_next].offset_y) * 0.5
+    target = idx + 1
+    for i in range(len(verts) - 1, target, -1):
+        verts.move(i, i - 1)
+    ps.active_vert_index = target
+
+
+def remove_cross_section_vertex(ps):
+    verts = ps.cross_section_verts
+    if len(verts) <= 3:
+        return False
+    idx = max(0, min(ps.active_vert_index, len(verts) - 1))
+    verts.remove(idx)
+    ps.active_vert_index = min(idx, len(verts) - 1)
+    return True
 
 
 class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
@@ -292,10 +387,26 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     mx, my = operator._get_local_mouse(event, wd)
     half = wd.widget_size / 2.0
     inside_widget = abs(mx - cx) <= half and abs(my - cy) <= half
+    inside_add_button = is_inside_rect(mx, my, wd.add_button_x0, wd.add_button_y0, wd.add_button_x1, wd.add_button_y1)
+    inside_remove_button = is_inside_rect(
+        mx, my, wd.remove_button_x0, wd.remove_button_y0, wd.remove_button_x1, wd.remove_button_y1
+    )
+    inside_controls = inside_add_button or inside_remove_button
 
     if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+        if inside_add_button:
+            add_cross_section_vertex(ps, settings)
+            wd.drag_vert_index = -1
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if inside_remove_button:
+            remove_cross_section_vertex(ps)
+            wd.drag_vert_index = -1
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+
         if not inside_widget:
-            if close_on_key_release:
+            if close_on_key_release or inside_controls:
                 return {'RUNNING_MODAL'}
             operator._finish(context)
             return {'FINISHED'}
@@ -322,7 +433,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             verts[wd.drag_vert_index].offset_y = (my - cy) / sf
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
-        if inside_widget:
+        if inside_widget or inside_controls:
             return {'RUNNING_MODAL'}
 
     if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
@@ -334,7 +445,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         operator._finish(context)
         return {'FINISHED'}
 
-    if inside_widget and event.type in {'LEFTMOUSE', 'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
+    if (inside_widget or inside_controls) and event.type in {'LEFTMOUSE', 'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
         return {'RUNNING_MODAL'}
 
     return {'PASS_THROUGH'}
