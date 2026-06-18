@@ -5,6 +5,7 @@ import blf
 from gpu_extras.batch import batch_for_shader
 from bpy.props import IntProperty, FloatProperty, BoolProperty
 from bpy.types import PropertyGroup
+from mathutils import Vector
 
 
 _draw_handle = None
@@ -151,6 +152,23 @@ def draw_widget_callback():
         shader.uniform_float("color", (0.0, 0.95, 1.0, 1.0))
         batch.draw(shader)
 
+    marker_radius = min(half * 0.82, max(ref_r, half * 0.35))
+    marker = get_view_direction_marker(context, marker_radius / max(sf, 1e-8))
+    if marker is not None:
+        marker_x = cx + marker[0] * sf
+        marker_y = cy + marker[1] * sf
+        gpu.state.line_width_set(2.0)
+        view_line = [(cx, cy), (marker_x, marker_y)]
+        batch = batch_for_shader(shader, 'LINES', {"pos": view_line})
+        shader.bind()
+        shader.uniform_float("color", (1.0, 0.05, 0.04, 0.7))
+        batch.draw(shader)
+        gpu.state.point_size_set(18.0)
+        batch = batch_for_shader(shader, 'POINTS', {"pos": [(marker_x, marker_y)]})
+        shader.bind()
+        shader.uniform_float("color", (1.0, 0.0, 0.0, 1.0))
+        batch.draw(shader)
+
     button_w = 74.0
     button_h = 28.0
     gap = 10.0
@@ -198,7 +216,7 @@ def draw_widget_callback():
     blf.size(font_id, 12)
     blf.color(font_id, 0.82, 0.82, 0.82, 0.9)
     blf.position(font_id, x0 + 10.0, by1 + 8.0, 0)
-    blf.draw(font_id, "Middle click an edge to insert a point")
+    blf.draw(font_id, "Red dot = side facing your view | Middle click edge to insert")
     blf.size(font_id, 14)
     blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
     blf.position(font_id, add_x0 + 17.0, by0 + 7.0, 0)
@@ -295,6 +313,106 @@ def get_active_curve_point(context):
                 return point
             global_idx += 1
     return None
+
+
+def safe_normalized(vector, fallback=None):
+    if vector.length >= 1e-8:
+        return vector.normalized()
+    if fallback is not None and fallback.length >= 1e-8:
+        return fallback.normalized()
+    return Vector((0, 0, 1))
+
+
+def get_cross_section_frame(tangent):
+    tangent = safe_normalized(tangent)
+    up = Vector((0, 0, 1))
+    if abs(tangent.dot(up)) > 0.999:
+        up = Vector((1, 0, 0))
+    normal = tangent.cross(up).normalized()
+    binormal = tangent.cross(normal).normalized()
+    return normal, binormal
+
+
+def get_active_curve_point_world_position(context):
+    obj = context.active_object
+    if obj is None or obj.type != 'CURVE':
+        return None
+    point = get_active_curve_point(context)
+    if point is None:
+        return None
+    if hasattr(point, 'co') and len(point.co) == 4:
+        return obj.matrix_world @ Vector(point.co[:3])
+    return obj.matrix_world @ point.co
+
+
+def get_active_curve_tangent(context):
+    obj = context.active_object
+    if obj is None or obj.type != 'CURVE':
+        return Vector((0, 0, 1))
+
+    settings = obj.hair_pipe_settings
+    target_index = settings.active_point_index
+    global_idx = 0
+    for spline in obj.data.splines:
+        if spline.type == 'BEZIER':
+            points = spline.bezier_points
+            for idx, point in enumerate(points):
+                if global_idx == target_index:
+                    prev_tangent = None
+                    next_tangent = None
+                    if spline.use_cyclic_u or idx > 0:
+                        prev_tangent = point.co - point.handle_left
+                    if spline.use_cyclic_u or idx < len(points) - 1:
+                        next_tangent = point.handle_right - point.co
+                    if prev_tangent is not None and next_tangent is not None:
+                        return safe_normalized(obj.matrix_world.to_3x3() @ (prev_tangent + next_tangent), obj.matrix_world.to_3x3() @ next_tangent)
+                    if next_tangent is not None:
+                        return safe_normalized(obj.matrix_world.to_3x3() @ next_tangent)
+                    if prev_tangent is not None:
+                        return safe_normalized(obj.matrix_world.to_3x3() @ prev_tangent)
+                global_idx += 1
+        else:
+            points = spline.points
+            for idx, point in enumerate(points):
+                if global_idx == target_index:
+                    co = Vector(point.co[:3])
+                    prev_tangent = None
+                    next_tangent = None
+                    if spline.use_cyclic_u or idx > 0:
+                        prev_idx = (idx - 1) % len(points)
+                        prev_tangent = co - Vector(points[prev_idx].co[:3])
+                    if spline.use_cyclic_u or idx < len(points) - 1:
+                        next_idx = (idx + 1) % len(points)
+                        next_tangent = Vector(points[next_idx].co[:3]) - co
+                    if prev_tangent is not None and next_tangent is not None:
+                        return safe_normalized(obj.matrix_world.to_3x3() @ (prev_tangent + next_tangent), obj.matrix_world.to_3x3() @ next_tangent)
+                    if next_tangent is not None:
+                        return safe_normalized(obj.matrix_world.to_3x3() @ next_tangent)
+                    if prev_tangent is not None:
+                        return safe_normalized(obj.matrix_world.to_3x3() @ prev_tangent)
+                global_idx += 1
+    return Vector((0, 0, 1))
+
+
+def get_view_direction_marker(context, marker_radius):
+    region_data = context.region_data
+    if region_data is None:
+        return None
+    center = get_active_curve_point_world_position(context)
+    if center is None:
+        return None
+
+    view_direction = safe_normalized(region_data.view_rotation @ Vector((0, 0, -1)))
+    to_camera_side = -view_direction
+    tangent = get_active_curve_tangent(context)
+    normal, binormal = get_cross_section_frame(tangent)
+    x = to_camera_side.dot(normal)
+    y = to_camera_side.dot(binormal)
+    projected = Vector((x, y))
+    if projected.length < 1e-8:
+        return None
+    projected.normalize()
+    return projected.x * marker_radius, projected.y * marker_radius
 
 
 def add_cross_section_vertex(ps, settings):
