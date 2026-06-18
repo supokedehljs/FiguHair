@@ -25,6 +25,7 @@ def get_curve_points_data(curve_obj):
                 co = Vector(p.co[:3])
                 points_data.append({
                     'co': curve_obj.matrix_world @ co,
+                    'weight': p.co[3],
                     'radius': p.radius,
                     'tilt': p.tilt,
                 })
@@ -33,6 +34,8 @@ def get_curve_points_data(curve_obj):
             'type': spline.type,
             'cyclic': spline.use_cyclic_u,
             'resolution': spline.resolution_u,
+            'order_u': getattr(spline, 'order_u', 4),
+            'use_endpoint_u': getattr(spline, 'use_endpoint_u', False),
         })
     return all_splines_data
 
@@ -50,33 +53,105 @@ def evaluate_bezier_tangent(p0, h0_right, h1_left, p1, t):
     return tangent.normalized()
 
 
-def evaluate_catmull_rom_segment(p0, p1, p2, p3, t):
-    t2 = t * t
-    t3 = t2 * t
-    return 0.5 * (
-        2.0 * p1
-        + (-p0 + p2) * t
-        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
-        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
-    )
-
-
-def evaluate_catmull_rom_tangent(p0, p1, p2, p3, t):
-    t2 = t * t
-    tangent = 0.5 * (
-        -p0 + p2
-        + 2.0 * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t
-        + 3.0 * (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t2
-    )
-    return tangent
-
-
-def get_spline_point(points, idx, is_cyclic):
-    num_points = len(points)
+def make_nurbs_knot_vector(num_points, degree, is_cyclic, use_endpoint):
     if is_cyclic:
-        return points[idx % num_points]['co']
-    clamped_idx = max(0, min(idx, num_points - 1))
-    return points[clamped_idx]['co']
+        return [float(i) for i in range(num_points + 2 * degree + 1)]
+
+    knot_count = num_points + degree + 1
+    if use_endpoint:
+        interior_count = knot_count - 2 * (degree + 1)
+        knots = [0.0] * (degree + 1)
+        if interior_count > 0:
+            for i in range(1, interior_count + 1):
+                knots.append(float(i) / float(interior_count + 1))
+        knots.extend([1.0] * (degree + 1))
+        return knots
+
+    return [float(i) for i in range(knot_count)]
+
+
+def nurbs_basis(i, degree, u, knots):
+    if degree == 0:
+        is_in_span = knots[i] <= u < knots[i + 1]
+        is_last_knot = u == knots[-1] and knots[i] <= u <= knots[i + 1]
+        return 1.0 if is_in_span or is_last_knot else 0.0
+
+    value = 0.0
+    left_den = knots[i + degree] - knots[i]
+    if left_den > 1e-8:
+        value += ((u - knots[i]) / left_den) * nurbs_basis(i, degree - 1, u, knots)
+
+    right_den = knots[i + degree + 1] - knots[i + 1]
+    if right_den > 1e-8:
+        value += ((knots[i + degree + 1] - u) / right_den) * nurbs_basis(i + 1, degree - 1, u, knots)
+
+    return value
+
+
+def evaluate_nurbs_curve(points, degree, u, knots, is_cyclic):
+    eval_points = points
+    if is_cyclic:
+        eval_points = points + points[:degree]
+
+    numerator = Vector((0, 0, 0))
+    denominator = 0.0
+    for i, point in enumerate(eval_points):
+        weight = point.get('weight', 1.0)
+        basis = nurbs_basis(i, degree, u, knots) * weight
+        numerator += point['co'] * basis
+        denominator += basis
+
+    if denominator < 1e-8:
+        return eval_points[0]['co'].copy()
+    return numerator / denominator
+
+
+def get_nurbs_domain(num_points, degree, knots, is_cyclic):
+    if is_cyclic:
+        return knots[degree], knots[num_points]
+    return knots[degree], knots[num_points]
+
+
+def get_nurbs_control_mix(points, degree, u, knots, is_cyclic):
+    eval_points = points
+    if is_cyclic:
+        eval_points = points + points[:degree]
+
+    weighted = []
+    total = 0.0
+    for i, point in enumerate(eval_points):
+        weight = nurbs_basis(i, degree, u, knots) * point.get('weight', 1.0)
+        if weight > 1e-8:
+            weighted.append((i % len(points), weight))
+            total += weight
+    return weighted, total
+
+
+def interpolate_nurbs_cross_sections(point_settings, points, degree, u, knots, is_cyclic, settings, global_point_idx):
+    weighted, total = get_nurbs_control_mix(points, degree, u, knots, is_cyclic)
+    if total < 1e-8 or not weighted:
+        return []
+
+    max_count = 0
+    for idx, _weight in weighted:
+        ps = get_point_setting(point_settings, global_point_idx + idx, settings)
+        max_count = max(max_count, len(ps.cross_section_verts))
+    if max_count == 0:
+        return []
+
+    accum = [(0.0, 0.0) for _ in range(max_count)]
+    for idx, weight in weighted:
+        normalized_weight = weight / total
+        ps = get_point_setting(point_settings, global_point_idx + idx, settings)
+        local_offsets = interpolate_cross_sections(ps, ps, 0.0, points[idx], points[idx])
+        if not local_offsets:
+            continue
+        for i in range(max_count):
+            ox, oy = local_offsets[i % len(local_offsets)]
+            ax, ay = accum[i]
+            accum[i] = (ax + ox * normalized_weight, ay + oy * normalized_weight)
+
+    return accum
 
 
 def safe_normalized(vector, fallback=None):
@@ -278,28 +353,46 @@ def generate_pipe_mesh(curve_obj, settings):
                         ring = [pos]
                     rings.append(ring)
         elif spline_data['type'] == 'NURBS':
-            seg_count = num_points if is_cyclic else num_points - 1
-            for seg_idx in range(seg_count):
-                idx0 = seg_idx
-                idx1 = (seg_idx + 1) % num_points
-                p_prev = get_spline_point(points, seg_idx - 1, is_cyclic)
-                p0 = get_spline_point(points, seg_idx, is_cyclic)
-                p1 = get_spline_point(points, seg_idx + 1, is_cyclic)
-                p_next = get_spline_point(points, seg_idx + 2, is_cyclic)
-                ps0 = get_point_setting(point_settings, global_point_idx + idx0, settings)
-                ps1 = get_point_setting(point_settings, global_point_idx + idx1, settings)
-                steps = max(1, resolution * 4)
-                end_inc = 1 if (seg_idx == seg_count - 1 and not is_cyclic) else 0
-                for step in range(steps + end_inc):
-                    t = step / steps
-                    pos = evaluate_catmull_rom_segment(p_prev, p0, p1, p_next, t)
-                    tan = safe_normalized(evaluate_catmull_rom_tangent(p_prev, p0, p1, p_next, t), p1 - p0)
-                    interp = interpolate_cross_sections(ps0, ps1, t, points[idx0], points[idx1])
-                    if interp:
-                        ring = make_ring_from_interpolated(pos, tan, interp)
-                    else:
-                        ring = [pos]
-                    rings.append(ring)
+            order = max(2, min(spline_data.get('order_u', 4), num_points))
+            degree = order - 1
+            use_endpoint = spline_data.get('use_endpoint_u', False)
+            knots = make_nurbs_knot_vector(num_points, degree, is_cyclic, use_endpoint)
+            u_start, u_end = get_nurbs_domain(num_points, degree, knots, is_cyclic)
+            sample_count = max(2, (num_points if is_cyclic else num_points - 1) * max(4, resolution * 4))
+            ring_count = sample_count if is_cyclic else sample_count + 1
+            u_range = u_end - u_start
+            tangent_delta = u_range / max(1000.0, ring_count * 10.0)
+
+            for sample_idx in range(ring_count):
+                if is_cyclic:
+                    t = sample_idx / ring_count
+                else:
+                    t = sample_idx / (ring_count - 1)
+                u = u_start + u_range * t
+                if is_cyclic and sample_idx == ring_count - 1:
+                    u = u_end - 1e-8
+
+                pos = evaluate_nurbs_curve(points, degree, u, knots, is_cyclic)
+                u_prev = max(u_start, u - tangent_delta)
+                u_next = min(u_end, u + tangent_delta)
+                if is_cyclic:
+                    u_prev = u - tangent_delta
+                    u_next = u + tangent_delta
+                    if u_prev < u_start:
+                        u_prev += u_range
+                    if u_next > u_end:
+                        u_next -= u_range
+                prev_pos = evaluate_nurbs_curve(points, degree, u_prev, knots, is_cyclic)
+                next_pos = evaluate_nurbs_curve(points, degree, u_next, knots, is_cyclic)
+                tan = safe_normalized(next_pos - prev_pos)
+                interp = interpolate_nurbs_cross_sections(
+                    point_settings, points, degree, u, knots, is_cyclic, settings, global_point_idx
+                )
+                if interp:
+                    ring = make_ring_from_interpolated(pos, tan, interp)
+                else:
+                    ring = [pos]
+                rings.append(ring)
         elif spline_data['type'] == 'POLY':
             seg_count = num_points if is_cyclic else num_points - 1
             for seg_idx in range(seg_count):
