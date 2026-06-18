@@ -297,6 +297,22 @@ def get_active_curve_point(context):
     return None
 
 
+def set_active_vertex_index_all(settings, vert_idx):
+    for point_setting in settings.point_settings:
+        if len(point_setting.cross_section_verts) == 0:
+            continue
+        point_setting.active_vert_index = max(0, min(vert_idx, len(point_setting.cross_section_verts) - 1))
+
+
+def set_cross_section_vertex_offset_all(settings, vert_idx, offset_x, offset_y):
+    for point_setting in settings.point_settings:
+        if vert_idx >= len(point_setting.cross_section_verts):
+            continue
+        point_setting.cross_section_verts[vert_idx].offset_x = offset_x
+        point_setting.cross_section_verts[vert_idx].offset_y = offset_y
+        point_setting.active_vert_index = vert_idx
+
+
 def add_cross_section_vertex(ps, settings):
     verts = ps.cross_section_verts
     n = len(verts)
@@ -582,7 +598,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
 
         if closest_idx >= 0:
             wd.drag_vert_index = closest_idx
-            ps.active_vert_index = closest_idx
+            set_active_vertex_index_all(settings, closest_idx)
             redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
@@ -590,7 +606,11 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         if 0 <= wd.drag_vert_index < len(verts) and sf > 0.001:
             effective_x = (mx - cx) / sf
             effective_y = (my - cy) / sf
-            set_vertex_from_effective_offset(verts[wd.drag_vert_index], effective_x, effective_y, curve_point, ps)
+            active_vertex = verts[wd.drag_vert_index]
+            set_vertex_from_effective_offset(active_vertex, effective_x, effective_y, curve_point, ps)
+            set_cross_section_vertex_offset_all(
+                settings, wd.drag_vert_index, active_vertex.offset_x, active_vertex.offset_y
+            )
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if inside_widget or inside_controls:
