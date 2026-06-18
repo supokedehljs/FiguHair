@@ -50,6 +50,35 @@ def evaluate_bezier_tangent(p0, h0_right, h1_left, p1, t):
     return tangent.normalized()
 
 
+def evaluate_catmull_rom_segment(p0, p1, p2, p3, t):
+    t2 = t * t
+    t3 = t2 * t
+    return 0.5 * (
+        2.0 * p1
+        + (-p0 + p2) * t
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+    )
+
+
+def evaluate_catmull_rom_tangent(p0, p1, p2, p3, t):
+    t2 = t * t
+    tangent = 0.5 * (
+        -p0 + p2
+        + 2.0 * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t
+        + 3.0 * (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t2
+    )
+    return tangent
+
+
+def get_spline_point(points, idx, is_cyclic):
+    num_points = len(points)
+    if is_cyclic:
+        return points[idx % num_points]['co']
+    clamped_idx = max(0, min(idx, num_points - 1))
+    return points[clamped_idx]['co']
+
+
 def safe_normalized(vector, fallback=None):
     if vector.length >= 1e-8:
         return vector.normalized()
@@ -234,7 +263,7 @@ def generate_pipe_mesh(curve_obj, settings):
                 p1 = points[idx1]['co']
                 ps0 = get_point_setting(point_settings, global_point_idx + idx0, settings)
                 ps1 = get_point_setting(point_settings, global_point_idx + idx1, settings)
-                steps = resolution
+                steps = max(1, resolution)
                 end_inc = 1 if (seg_idx == seg_count - 1 and not is_cyclic) else 0
                 for step in range(steps + end_inc):
                     t = step / steps
@@ -248,7 +277,30 @@ def generate_pipe_mesh(curve_obj, settings):
                     else:
                         ring = [pos]
                     rings.append(ring)
-        elif spline_data['type'] in ('POLY', 'NURBS'):
+        elif spline_data['type'] == 'NURBS':
+            seg_count = num_points if is_cyclic else num_points - 1
+            for seg_idx in range(seg_count):
+                idx0 = seg_idx
+                idx1 = (seg_idx + 1) % num_points
+                p_prev = get_spline_point(points, seg_idx - 1, is_cyclic)
+                p0 = get_spline_point(points, seg_idx, is_cyclic)
+                p1 = get_spline_point(points, seg_idx + 1, is_cyclic)
+                p_next = get_spline_point(points, seg_idx + 2, is_cyclic)
+                ps0 = get_point_setting(point_settings, global_point_idx + idx0, settings)
+                ps1 = get_point_setting(point_settings, global_point_idx + idx1, settings)
+                steps = max(1, resolution * 4)
+                end_inc = 1 if (seg_idx == seg_count - 1 and not is_cyclic) else 0
+                for step in range(steps + end_inc):
+                    t = step / steps
+                    pos = evaluate_catmull_rom_segment(p_prev, p0, p1, p_next, t)
+                    tan = safe_normalized(evaluate_catmull_rom_tangent(p_prev, p0, p1, p_next, t), p1 - p0)
+                    interp = interpolate_cross_sections(ps0, ps1, t, points[idx0], points[idx1])
+                    if interp:
+                        ring = make_ring_from_interpolated(pos, tan, interp)
+                    else:
+                        ring = [pos]
+                    rings.append(ring)
+        elif spline_data['type'] == 'POLY':
             seg_count = num_points if is_cyclic else num_points - 1
             for seg_idx in range(seg_count):
                 idx0 = seg_idx
@@ -257,7 +309,7 @@ def generate_pipe_mesh(curve_obj, settings):
                 p1 = points[idx1]['co']
                 ps0 = get_point_setting(point_settings, global_point_idx + idx0, settings)
                 ps1 = get_point_setting(point_settings, global_point_idx + idx1, settings)
-                steps = resolution
+                steps = max(1, resolution)
                 end_inc = 1 if (seg_idx == seg_count - 1 and not is_cyclic) else 0
                 for step in range(steps + end_inc):
                     t = step / steps
