@@ -74,8 +74,9 @@ def draw_widget_callback():
 
     padding = 18
     half = size / 2.0 - padding
+    alignment_angle = get_view_alignment_angle(context)
 
-    max_off = max((max(abs(get_effective_offset(v, curve_point, ps)[0]), abs(get_effective_offset(v, curve_point, ps)[1])) for v in verts), default=0.05)
+    max_off = max((max(abs(rotate_2d(*get_effective_offset(v, curve_point, ps), alignment_angle)[0]), abs(rotate_2d(*get_effective_offset(v, curve_point, ps), alignment_angle)[1])) for v in verts), default=0.05)
     if max_off < 1e-6:
         max_off = 0.05
     if wd.widget_scale_factor <= 1e-8:
@@ -85,26 +86,23 @@ def draw_widget_callback():
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
     gpu.state.blend_set('ALPHA')
 
-    x0, y0 = cx - half - padding, cy - half - padding
-    x1, y1 = cx + half + padding, cy + half + padding
-    bg = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
-    batch = batch_for_shader(shader, 'TRIS', {"pos": bg}, indices=[(0, 1, 2), (0, 2, 3)])
+    region = context.region
+    dim_w = region.width if region is not None else size * 2.0
+    dim_h = region.height if region is not None else size * 2.0
+    dim_bg = [(0.0, 0.0), (dim_w, 0.0), (dim_w, dim_h), (0.0, dim_h)]
+    batch = batch_for_shader(shader, 'TRIS', {"pos": dim_bg}, indices=[(0, 1, 2), (0, 2, 3)])
     shader.bind()
-    shader.uniform_float("color", (0.08, 0.08, 0.08, 0.94))
+    shader.uniform_float("color", (0.0, 0.0, 0.0, 0.42))
     batch.draw(shader)
 
-    gpu.state.line_width_set(1.5)
-    brd = [bg[0], bg[1], bg[1], bg[2], bg[2], bg[3], bg[3], bg[0]]
-    batch = batch_for_shader(shader, 'LINES', {"pos": brd})
-    shader.bind()
-    shader.uniform_float("color", (0.55, 0.55, 0.55, 1.0))
-    batch.draw(shader)
+    x0, y0 = cx - half - padding, cy - half - padding
+    x1, y1 = cx + half + padding, cy + half + padding
 
     gpu.state.line_width_set(1.0)
     grid = [(cx - half, cy), (cx + half, cy), (cx, cy - half), (cx, cy + half)]
     batch = batch_for_shader(shader, 'LINES', {"pos": grid})
     shader.bind()
-    shader.uniform_float("color", (0.25, 0.25, 0.25, 0.7))
+    shader.uniform_float("color", (0.35, 0.35, 0.35, 0.55))
     batch.draw(shader)
 
     ref_r = settings.default_radius * get_cross_section_effective_scale(curve_point, ps) * sf
@@ -124,8 +122,8 @@ def draw_widget_callback():
         j = (i + 1) % n
         ix, iy = get_effective_offset(verts[i], curve_point, ps)
         jx, jy = get_effective_offset(verts[j], curve_point, ps)
-        outline.append((cx + ix * sf, cy + iy * sf))
-        outline.append((cx + jx * sf, cy + jy * sf))
+        outline.append(effective_to_widget(ix, iy, cx, cy, sf, alignment_angle))
+        outline.append(effective_to_widget(jx, jy, cx, cy, sf, alignment_angle))
     gpu.state.line_width_set(2.5)
     batch = batch_for_shader(shader, 'LINES', {"pos": outline})
     shader.bind()
@@ -136,7 +134,7 @@ def draw_widget_callback():
     pts = []
     for v in verts:
         ox, oy = get_effective_offset(v, curve_point, ps)
-        pts.append((cx + ox * sf, cy + oy * sf))
+        pts.append(effective_to_widget(ox, oy, cx, cy, sf, alignment_angle))
     batch = batch_for_shader(shader, 'POINTS', {"pos": pts})
     shader.bind()
     shader.uniform_float("color", (1.0, 1.0, 1.0, 1.0))
@@ -146,28 +144,26 @@ def draw_widget_callback():
     if 0 <= aidx < n:
         gpu.state.point_size_set(18.0)
         ax, ay = get_effective_offset(verts[aidx], curve_point, ps)
-        ap = [(cx + ax * sf, cy + ay * sf)]
+        ap = [effective_to_widget(ax, ay, cx, cy, sf, alignment_angle)]
         batch = batch_for_shader(shader, 'POINTS', {"pos": ap})
         shader.bind()
         shader.uniform_float("color", (0.0, 0.95, 1.0, 1.0))
         batch.draw(shader)
 
     marker_radius = min(half * 0.82, max(ref_r, half * 0.35))
-    marker = get_view_direction_marker(context, marker_radius / max(sf, 1e-8))
-    if marker is not None:
-        marker_x = cx + marker[0] * sf
-        marker_y = cy + marker[1] * sf
-        gpu.state.line_width_set(2.0)
-        view_line = [(cx, cy), (marker_x, marker_y)]
-        batch = batch_for_shader(shader, 'LINES', {"pos": view_line})
-        shader.bind()
-        shader.uniform_float("color", (1.0, 0.05, 0.04, 0.7))
-        batch.draw(shader)
-        gpu.state.point_size_set(18.0)
-        batch = batch_for_shader(shader, 'POINTS', {"pos": [(marker_x, marker_y)]})
-        shader.bind()
-        shader.uniform_float("color", (1.0, 0.0, 0.0, 1.0))
-        batch.draw(shader)
+    marker_x = cx
+    marker_y = cy - marker_radius
+    gpu.state.line_width_set(2.0)
+    view_line = [(cx, cy), (marker_x, marker_y)]
+    batch = batch_for_shader(shader, 'LINES', {"pos": view_line})
+    shader.bind()
+    shader.uniform_float("color", (1.0, 0.05, 0.04, 0.75))
+    batch.draw(shader)
+    gpu.state.point_size_set(18.0)
+    batch = batch_for_shader(shader, 'POINTS', {"pos": [(marker_x, marker_y)]})
+    shader.bind()
+    shader.uniform_float("color", (1.0, 0.0, 0.0, 1.0))
+    batch.draw(shader)
 
     button_w = 74.0
     button_h = 28.0
@@ -216,7 +212,7 @@ def draw_widget_callback():
     blf.size(font_id, 12)
     blf.color(font_id, 0.82, 0.82, 0.82, 0.9)
     blf.position(font_id, x0 + 10.0, by1 + 8.0, 0)
-    blf.draw(font_id, "Red dot = side facing your view | Middle click edge to insert")
+    blf.draw(font_id, "Bottom red dot = side facing your view | Middle click edge to insert")
     blf.size(font_id, 14)
     blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
     blf.position(font_id, add_x0 + 17.0, by0 + 7.0, 0)
@@ -411,6 +407,13 @@ def get_active_curve_tangent(context):
 
 
 def get_view_direction_marker(context, marker_radius):
+    direction = get_view_direction_unit(context)
+    if direction is None:
+        return None
+    return direction.x * marker_radius, direction.y * marker_radius
+
+
+def get_view_direction_unit(context):
     region_data = context.region_data
     if region_data is None:
         return None
@@ -422,13 +425,35 @@ def get_view_direction_marker(context, marker_radius):
     to_camera_side = -view_direction
     tangent = get_active_curve_tangent(context)
     normal, binormal = get_cross_section_frame(tangent)
-    x = to_camera_side.dot(normal)
-    y = to_camera_side.dot(binormal)
-    projected = Vector((x, y))
+    projected = Vector((to_camera_side.dot(normal), to_camera_side.dot(binormal)))
     if projected.length < 1e-8:
         return None
     projected.normalize()
-    return projected.x * marker_radius, projected.y * marker_radius
+    return projected
+
+
+def get_view_alignment_angle(context):
+    direction = get_view_direction_unit(context)
+    if direction is None:
+        return 0.0
+    return -math.pi / 2.0 - math.atan2(direction.y, direction.x)
+
+
+def rotate_2d(x, y, angle):
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    return x * cos_a - y * sin_a, x * sin_a + y * cos_a
+
+
+def effective_to_widget(x, y, cx, cy, sf, alignment_angle):
+    rx, ry = rotate_2d(x, y, alignment_angle)
+    return cx + rx * sf, cy + ry * sf
+
+
+def widget_to_effective(mx, my, cx, cy, sf, alignment_angle):
+    sx = (mx - cx) / sf
+    sy = (my - cy) / sf
+    return rotate_2d(sx, sy, -alignment_angle)
 
 
 def add_cross_section_vertex(ps, settings):
@@ -516,7 +541,7 @@ def distance_point_to_segment(px, py, ax, ay, bx, by):
     return math.sqrt((px - cx) ** 2 + (py - cy) ** 2), cx, cy, t
 
 
-def find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf, curve_point, point_setting):
+def find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf, curve_point, point_setting, alignment_angle):
     closest_idx = -1
     closest_dist = 18.0
     closest_local = (0.0, 0.0)
@@ -526,15 +551,13 @@ def find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf, curve_point, poin
         j = (i + 1) % n
         ix, iy = get_effective_offset(verts[i], curve_point, point_setting)
         jx, jy = get_effective_offset(verts[j], curve_point, point_setting)
-        ax = cx + ix * sf
-        ay = cy + iy * sf
-        bx = cx + jx * sf
-        by = cy + jy * sf
+        ax, ay = effective_to_widget(ix, iy, cx, cy, sf, alignment_angle)
+        bx, by = effective_to_widget(jx, jy, cx, cy, sf, alignment_angle)
         dist, hit_x, hit_y, edge_t = distance_point_to_segment(mx, my, ax, ay, bx, by)
         if dist < closest_dist:
             closest_dist = dist
             closest_idx = i
-            closest_local = ((hit_x - cx) / sf, (hit_y - cy) / sf)
+            closest_local = widget_to_effective(hit_x, hit_y, cx, cy, sf, alignment_angle)
             closest_t = edge_t
     return closest_idx, closest_local, closest_t
 
@@ -663,6 +686,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     cx = wd.widget_center_x
     cy = wd.widget_center_y
     sf = wd.widget_scale_factor
+    alignment_angle = get_view_alignment_angle(context)
     mx, my = operator._get_local_mouse(event, wd)
     half = wd.widget_size / 2.0
     inside_widget = abs(mx - cx) <= half and abs(my - cy) <= half
@@ -674,7 +698,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
 
     if event.type == 'MIDDLEMOUSE' and event.value == 'PRESS':
         if inside_widget and sf > 0.001:
-            edge_idx, local_pos, edge_t = find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf, curve_point, ps)
+            edge_idx, local_pos, edge_t = find_nearest_cross_section_edge(
+                verts, mx, my, cx, cy, sf, curve_point, ps, alignment_angle
+            )
             if edge_idx >= 0:
                 insert_cross_section_vertex_on_edge_all(
                     settings, settings.active_point_index, edge_idx, local_pos[0], local_pos[1], edge_t, curve_point
@@ -707,8 +733,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         closest_dist = 24.0
         for i, v in enumerate(verts):
             ox, oy = get_effective_offset(v, curve_point, ps)
-            px = cx + ox * sf
-            py = cy + oy * sf
+            px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle)
             dist = math.sqrt((mx - px) ** 2 + (my - py) ** 2)
             if dist < closest_dist:
                 closest_dist = dist
@@ -722,8 +747,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
 
     if event.type == 'MOUSEMOVE':
         if 0 <= wd.drag_vert_index < len(verts) and sf > 0.001:
-            effective_x = (mx - cx) / sf
-            effective_y = (my - cy) / sf
+            effective_x, effective_y = widget_to_effective(mx, my, cx, cy, sf, alignment_angle)
             set_vertex_from_effective_offset(verts[wd.drag_vert_index], effective_x, effective_y, curve_point, ps)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
