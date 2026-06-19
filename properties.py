@@ -110,6 +110,35 @@ class HairPipeSettings(PropertyGroup):
         min=1,
         max=12,
     )
+    edge_flow_mode: EnumProperty(
+        name="Edge Flow Mode",
+        description="How intermediate cross-sections are rebuilt between two selected curve points",
+        items=(
+            ('LINEAR', "线性", "Even transition from first selected section to second selected section"),
+            ('EASE', "缓入缓出", "Smoothstep transition"),
+            ('SMOOTHER', "强平滑", "Smoother S-curve transition"),
+            ('START', "偏向起点", "Stay closer to the first selected section for longer"),
+            ('END', "偏向终点", "Move toward the second selected section earlier"),
+            ('SINE', "正弦", "Soft sine based transition"),
+        ),
+        default='SMOOTHER',
+    )
+    edge_flow_power: FloatProperty(
+        name="Edge Flow Power",
+        description="Controls bias strength for start/end weighted edge flow modes",
+        default=2.0,
+        min=0.1,
+        max=8.0,
+        precision=2,
+    )
+    edge_flow_blend: FloatProperty(
+        name="Edge Flow Blend",
+        description="How strongly intermediate sections are replaced by the rebuilt transition",
+        default=1.0,
+        min=0.0,
+        max=1.0,
+        precision=3,
+    )
     smooth_shading: BoolProperty(
         name="Smooth Shading",
         description="Apply smooth shading to the generated mesh",

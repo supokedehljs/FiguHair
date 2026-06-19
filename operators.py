@@ -1,7 +1,7 @@
 import bpy
 import math
 from mathutils import Matrix, Vector
-from bpy.props import IntProperty, FloatProperty
+from bpy.props import IntProperty, FloatProperty, EnumProperty
 
 
 def ensure_curve_defaults(curve_obj):
@@ -872,6 +872,32 @@ def get_selected_curve_point_index(curve_obj):
     return selected_index
 
 
+def get_selected_curve_point_indices(curve_obj):
+    if curve_obj is None or curve_obj.type != 'CURVE':
+        return []
+
+    if is_curve_edit_mode(curve_obj):
+        try:
+            curve_obj.update_from_editmode()
+        except Exception:
+            pass
+
+    selected = []
+    global_point_idx = 0
+    for spline in curve_obj.data.splines:
+        if spline.type == 'BEZIER':
+            for point in spline.bezier_points:
+                if point.select_control_point:
+                    selected.append(global_point_idx)
+                global_point_idx += 1
+        else:
+            for point in spline.points:
+                if point.select:
+                    selected.append(global_point_idx)
+                global_point_idx += 1
+    return selected
+
+
 def sync_active_point_from_selection(curve_obj):
     settings = curve_obj.hair_pipe_settings
     selected_index = get_selected_curve_point_index(curve_obj)
@@ -964,6 +990,89 @@ def get_curve_point_by_global_index(curve_obj, target_index):
     return None
 
 
+def edge_flow_t(mode, t, power):
+    t = max(0.0, min(1.0, t))
+    if mode == 'EASE':
+        return t * t * (3.0 - 2.0 * t)
+    if mode == 'SMOOTHER':
+        return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+    if mode == 'START':
+        return t ** max(0.1, power)
+    if mode == 'END':
+        return 1.0 - ((1.0 - t) ** max(0.1, power))
+    if mode == 'SINE':
+        return 0.5 - math.cos(t * math.pi) * 0.5
+    return t
+
+
+def lerp_angle(a, b, t):
+    delta = (b - a + 180.0) % 360.0 - 180.0
+    return a + delta * t
+
+
+def lerp_radians(a, b, t):
+    delta = (b - a + math.pi) % (2.0 * math.pi) - math.pi
+    return a + delta * t
+
+
+def rebuild_cross_section_between(curve_obj, settings, start_idx, end_idx, mode, power, blend):
+    if start_idx == end_idx:
+        return 0
+    if start_idx > end_idx:
+        start_idx, end_idx = end_idx, start_idx
+    if end_idx - start_idx < 2:
+        return 0
+
+    start_ps = settings.point_settings[start_idx]
+    end_ps = settings.point_settings[end_idx]
+    start_curve_point = get_curve_point_by_global_index(curve_obj, start_idx)
+    end_curve_point = get_curve_point_by_global_index(curve_obj, end_idx)
+    start_radius = getattr(start_curve_point, 'radius', 1.0) if start_curve_point is not None else 1.0
+    end_radius = getattr(end_curve_point, 'radius', 1.0) if end_curve_point is not None else 1.0
+    start_tilt = getattr(start_curve_point, 'tilt', 0.0) if start_curve_point is not None else 0.0
+    end_tilt = getattr(end_curve_point, 'tilt', 0.0) if end_curve_point is not None else 0.0
+    count = min(len(start_ps.cross_section_verts), len(end_ps.cross_section_verts))
+    if count < 3:
+        return 0
+
+    blend = max(0.0, min(1.0, blend))
+    changed = 0
+    span = end_idx - start_idx
+    for point_idx in range(start_idx + 1, end_idx):
+        ps = settings.point_settings[point_idx]
+        while len(ps.cross_section_verts) < count:
+            v = ps.cross_section_verts.add()
+            v.offset_x = 0.0
+            v.offset_y = 0.0
+            v.is_ghost = False
+        while len(ps.cross_section_verts) > count and len(ps.cross_section_verts) > 3:
+            ps.cross_section_verts.remove(len(ps.cross_section_verts) - 1)
+        raw_t = (point_idx - start_idx) / span
+        t = edge_flow_t(mode, raw_t, power)
+        for vert_idx in range(count):
+            sv = start_ps.cross_section_verts[vert_idx]
+            ev = end_ps.cross_section_verts[vert_idx]
+            cv = ps.cross_section_verts[vert_idx]
+            target_x = sv.offset_x * (1.0 - t) + ev.offset_x * t
+            target_y = sv.offset_y * (1.0 - t) + ev.offset_y * t
+            cv.offset_x = cv.offset_x * (1.0 - blend) + target_x * blend
+            cv.offset_y = cv.offset_y * (1.0 - blend) + target_y * blend
+            cv.is_ghost = False
+        ps.scale = ps.scale * (1.0 - blend) + (start_ps.scale * (1.0 - t) + end_ps.scale * t) * blend
+        target_rot = lerp_angle(start_ps.rotation, end_ps.rotation, t)
+        ps.rotation = ps.rotation * (1.0 - blend) + target_rot * blend
+        curve_point = get_curve_point_by_global_index(curve_obj, point_idx)
+        if curve_point is not None:
+            target_radius = start_radius * (1.0 - t) + end_radius * t
+            target_tilt = lerp_radians(start_tilt, end_tilt, t)
+            curve_point.radius = curve_point.radius * (1.0 - blend) + target_radius * blend
+            curve_point.tilt = curve_point.tilt * (1.0 - blend) + target_tilt * blend
+        if ps.active_vert_index >= len(ps.cross_section_verts):
+            ps.active_vert_index = len(ps.cross_section_verts) - 1
+        changed += 1
+    return changed
+
+
 class HAIRPIPE_OT_generate_pipe(bpy.types.Operator):
     """Generate pipe mesh from curve with per-point custom cross-sections"""
     bl_idname = "hair_pipe.generate_pipe"
@@ -1024,6 +1133,89 @@ class HAIRPIPE_OT_sync_points(bpy.types.Operator):
     def execute(self, context):
         sync_point_settings(context.active_object)
         self.report({'INFO'}, "Point settings synced")
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_apply_edge_flow(bpy.types.Operator):
+    """Rebuild intermediate cross-sections between exactly two selected curve control points"""
+    bl_idname = "hair_pipe.apply_edge_flow"
+    bl_label = "Apply Edge Flow"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    mode: EnumProperty(
+        name="模式",
+        description="How intermediate cross-sections are rebuilt",
+        items=(
+            ('LINEAR', "线性", "Even transition from first selected section to second selected section"),
+            ('EASE', "缓入缓出", "Smoothstep transition"),
+            ('SMOOTHER', "强平滑", "Smoother S-curve transition"),
+            ('START', "偏向起点", "Stay closer to the first selected section for longer"),
+            ('END', "偏向终点", "Move toward the second selected section earlier"),
+            ('SINE', "正弦", "Soft sine based transition"),
+        ),
+        default='SMOOTHER',
+    )
+    power: FloatProperty(
+        name="偏向强度",
+        description="Controls bias strength for start/end weighted modes",
+        default=2.0,
+        min=0.1,
+        max=8.0,
+        precision=2,
+    )
+    blend: FloatProperty(
+        name="重建强度",
+        description="How strongly intermediate sections are replaced by the rebuilt transition",
+        default=1.0,
+        min=0.0,
+        max=1.0,
+        precision=3,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        obj = get_context_curve_object(context)
+        return obj is not None and obj.type == 'CURVE'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "mode")
+        if self.mode in {'START', 'END'}:
+            layout.prop(self, "power")
+        layout.prop(self, "blend")
+
+    def execute(self, context):
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            self.report({'ERROR'}, "Select a curve or its FiguHair preview mesh")
+            return {'CANCELLED'}
+        if not is_curve_edit_mode(curve_obj):
+            self.report({'ERROR'}, "Enter curve Edit Mode and select exactly two control points")
+            return {'CANCELLED'}
+
+        sync_point_settings(curve_obj)
+        selected = get_selected_curve_point_indices(curve_obj)
+        if len(selected) != 2:
+            self.report({'ERROR'}, "Select exactly two curve control points")
+            return {'CANCELLED'}
+
+        settings = curve_obj.hair_pipe_settings
+        settings.edge_flow_mode = self.mode
+        settings.edge_flow_power = self.power
+        settings.edge_flow_blend = self.blend
+        start_idx, end_idx = sorted(selected)
+        if end_idx >= len(settings.point_settings):
+            self.report({'ERROR'}, "Selected point index is out of range")
+            return {'CANCELLED'}
+        changed = rebuild_cross_section_between(
+            curve_obj, settings, start_idx, end_idx, self.mode, self.power, self.blend
+        )
+        if changed <= 0:
+            self.report({'ERROR'}, "Selected points must have at least one point between them")
+            return {'CANCELLED'}
+        settings.active_point_index = end_idx
+        update_all_ghost_vertices(settings)
+        self.report({'INFO'}, f"Rebuilt {changed} intermediate cross-sections")
         return {'FINISHED'}
 
 
@@ -1193,6 +1385,7 @@ class HAIRPIPE_OT_copy_cs_to_all(bpy.types.Operator):
 classes = (
     HAIRPIPE_OT_generate_pipe,
     HAIRPIPE_OT_sync_points,
+    HAIRPIPE_OT_apply_edge_flow,
     HAIRPIPE_OT_reset_cross_section,
     HAIRPIPE_OT_reset_all_cross_sections,
     HAIRPIPE_OT_taper_linear,

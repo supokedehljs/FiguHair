@@ -53,6 +53,20 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         box.prop(settings, "cap_ends", text="封口")
 
         box = layout.box()
+        box.label(text="边流重建", icon='IPO_BEZIER')
+        box.label(text="编辑模式下选择两个曲线点后应用", icon='INFO')
+        box.prop(settings, "edge_flow_mode", text="模式")
+        if settings.edge_flow_mode in {'START', 'END'}:
+            box.prop(settings, "edge_flow_power", text="偏向强度")
+        box.prop(settings, "edge_flow_blend", text="重建强度")
+        row = box.row(align=True)
+        row.scale_y = 1.25
+        op = row.operator("hair_pipe.apply_edge_flow", text="应用边流")
+        op.mode = settings.edge_flow_mode
+        op.power = settings.edge_flow_power
+        op.blend = settings.edge_flow_blend
+
+        box = layout.box()
         box.label(text="常用操作", icon='TOOL_SETTINGS')
         row = box.row(align=True)
         row.operator("hair_pipe.reset_all_cross_sections", text="全部重置")
