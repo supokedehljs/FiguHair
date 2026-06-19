@@ -7,7 +7,7 @@ from .operators import (
     sync_active_point_from_selection,
     is_curve_edit_mode,
     ensure_curve_defaults,
-    get_pipe_mesh_name,
+    get_pipe_object_for_curve,
     verts_to_world_space,
     redirect_pipe_selection,
 )
@@ -36,8 +36,7 @@ def rebuild_existing_pipe(curve_obj):
     if len(settings.point_settings) == 0:
         return
 
-    mesh_name = get_pipe_mesh_name(curve_obj)
-    pipe_obj = bpy.data.objects.get(mesh_name)
+    pipe_obj = get_pipe_object_for_curve(curve_obj)
     if pipe_obj is None:
         return
 

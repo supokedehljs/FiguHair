@@ -913,8 +913,79 @@ def sync_active_point_from_selection(curve_obj):
     return True
 
 
+def get_next_figuhair_base_name():
+    used_names = {obj.name for obj in bpy.data.objects}
+    index = 1
+    while True:
+        name = f"FiguHair {index:02d}"
+        if name not in used_names:
+            return name
+        index += 1
+
+
+def get_curve_from_figuhair_root(root_obj):
+    if root_obj is None or root_obj.type != 'EMPTY':
+        return None
+    for child in root_obj.children:
+        if child.type == 'CURVE':
+            return child
+    return None
+
+
+def get_figuhair_root(curve_obj):
+    if curve_obj is None:
+        return None
+    root_name = curve_obj.get("hair_pipe_root")
+    root_obj = bpy.data.objects.get(root_name) if root_name else None
+    if root_obj is not None and root_obj.type == 'EMPTY':
+        return root_obj
+    if curve_obj.parent is not None and curve_obj.parent.type == 'EMPTY':
+        return curve_obj.parent
+    return None
+
+
+def ensure_figuhair_root(curve_obj):
+    base_name = curve_obj.get("hair_pipe_base_name")
+    if not base_name:
+        base_name = get_next_figuhair_base_name()
+        curve_obj["hair_pipe_base_name"] = base_name
+
+    root_obj = get_figuhair_root(curve_obj)
+    if root_obj is None:
+        root_obj = bpy.data.objects.new(base_name, None)
+        root_obj.empty_display_type = 'PLAIN_AXES'
+        root_obj.empty_display_size = 0.35
+        root_obj.matrix_world = Matrix.Identity(4)
+        target_collection = curve_obj.users_collection[0] if curve_obj.users_collection else bpy.context.scene.collection
+        target_collection.objects.link(root_obj)
+
+    root_obj.name = base_name
+    root_obj["hair_pipe_root"] = True
+    curve_obj["hair_pipe_root"] = root_obj.name
+    return root_obj
+
+
 def get_pipe_mesh_name(curve_obj):
     return curve_obj.name + "_FiguHair"
+
+
+def get_pipe_object_for_curve(curve_obj):
+    root_obj = get_figuhair_root(curve_obj)
+    if root_obj is not None:
+        for child in root_obj.children:
+            if child.type == 'MESH' and get_pipe_source_curve(child) == curve_obj:
+                return child
+            if child.type == 'MESH' and child.name.endswith(" Mesh"):
+                return child
+    mesh_name = get_pipe_mesh_name(curve_obj)
+    obj = bpy.data.objects.get(mesh_name)
+    if obj is not None and obj.type == 'MESH':
+        return obj
+    legacy_name = curve_obj.name + "_FiguHair"
+    obj = bpy.data.objects.get(legacy_name)
+    if obj is not None and obj.type == 'MESH':
+        return obj
+    return None
 
 
 def verts_to_world_space(verts, curve_obj):
@@ -925,6 +996,10 @@ def verts_to_world_space(verts, curve_obj):
 def get_pipe_source_curve(pipe_obj):
     if pipe_obj is None or pipe_obj.type != 'MESH':
         return None
+    if pipe_obj.parent is not None and pipe_obj.parent.type == 'EMPTY':
+        curve_obj = get_curve_from_figuhair_root(pipe_obj.parent)
+        if curve_obj is not None:
+            return curve_obj
     source_name = pipe_obj.get("hair_pipe_source_curve")
     if not source_name:
         return None
@@ -947,6 +1022,10 @@ def get_context_curve_object(context):
             continue
         if obj.type == 'CURVE':
             return obj
+        if obj.type == 'EMPTY':
+            root_curve = get_curve_from_figuhair_root(obj)
+            if root_curve is not None:
+                return root_curve
         source_curve = get_pipe_source_curve(obj)
         if source_curve is not None:
             return source_curve
@@ -954,6 +1033,10 @@ def get_context_curve_object(context):
     for obj in getattr(context, 'selected_objects', ()):
         if obj.type == 'CURVE':
             return obj
+        if obj.type == 'EMPTY':
+            root_curve = get_curve_from_figuhair_root(obj)
+            if root_curve is not None:
+                return root_curve
         source_curve = get_pipe_source_curve(obj)
         if source_curve is not None:
             return source_curve
@@ -961,11 +1044,26 @@ def get_context_curve_object(context):
     return None
 
 
+def parent_keep_world(obj, parent_obj):
+    world_matrix = obj.matrix_world.copy()
+    obj.parent = parent_obj
+    obj.matrix_world = world_matrix
+
+
 def configure_pipe_object(pipe_obj, curve_obj):
+    root_obj = ensure_figuhair_root(curve_obj)
+    base_name = curve_obj.get("hair_pipe_base_name", root_obj.name)
+
+    root_obj.name = base_name
+    curve_obj.name = base_name + " Curve"
+    curve_obj.data.name = base_name + " Curve"
+    pipe_obj.name = base_name + " Mesh"
+    pipe_obj.data.name = pipe_obj.name
+
     pipe_obj["hair_pipe_source_curve"] = curve_obj.name
-    pipe_obj.parent = None
-    pipe_obj.matrix_parent_inverse.identity()
-    pipe_obj.matrix_world = Matrix.Identity(4)
+    parent_keep_world(curve_obj, root_obj)
+    parent_keep_world(pipe_obj, root_obj)
+
     pipe_obj.show_in_front = False
     pipe_obj.hide_select = False
     pipe_obj.select_set(False)
@@ -1115,7 +1213,7 @@ class HAIRPIPE_OT_generate_pipe(bpy.types.Operator):
             return {'CANCELLED'}
         verts = verts_to_world_space(verts, curve_obj)
         mesh_name = get_pipe_mesh_name(curve_obj)
-        existing_obj = bpy.data.objects.get(mesh_name)
+        existing_obj = get_pipe_object_for_curve(curve_obj)
         if existing_obj:
             mesh = existing_obj.data
             mesh.clear_geometry()

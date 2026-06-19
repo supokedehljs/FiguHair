@@ -1,7 +1,5 @@
 import bpy
 from .operators import (
-    sync_point_settings,
-    sync_active_point_from_selection,
     is_curve_edit_mode,
     get_curve_point_by_global_index,
     get_context_curve_object,
@@ -26,11 +24,13 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
             layout.label(text="请选择曲线或 FiguHair 预览网格", icon='INFO')
             return
 
-        settings = curve_obj.hair_pipe_settings
-        sync_point_settings(curve_obj)
-        edit_mode = is_curve_edit_mode(curve_obj)
-        if edit_mode:
-            sync_active_point_from_selection(curve_obj)
+        try:
+            settings = curve_obj.hair_pipe_settings
+            edit_mode = is_curve_edit_mode(curve_obj)
+        except Exception as exc:
+            layout.label(text="FiguHair 状态初始化失败", icon='ERROR')
+            layout.label(text=str(exc)[:80], icon='INFO')
+            return
 
         box = layout.box()
         box.label(text="生成", icon='MESH_CYLINDER')
@@ -74,7 +74,10 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
 
         box = edit_box.box()
         box.label(text="横截面编辑器", icon='MOUSE_LMB')
-        widget_data = context.window_manager.hair_pipe_widget
+        widget_data = getattr(context.window_manager, "hair_pipe_widget", None)
+        if widget_data is None:
+            box.label(text="横截面编辑器未初始化，请重新加载插件", icon='ERROR')
+            return
         row = box.row(align=True)
         if widget_data.is_active:
             row.operator("hair_pipe.widget_stop", text="关闭编辑器", icon='PANEL_CLOSE')
