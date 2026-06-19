@@ -3,6 +3,7 @@ import gpu
 import math
 import blf
 from gpu_extras.batch import batch_for_shader
+from bpy_extras import view3d_utils
 from bpy.props import IntProperty, FloatProperty, BoolProperty
 from bpy.types import PropertyGroup
 from mathutils import Vector
@@ -43,6 +44,63 @@ class HairPipeWidgetSettings(PropertyGroup):
     flip_horizontal: BoolProperty(default=False)
 
 
+def get_curve_start_world_position(obj):
+    if obj is None or obj.type != 'CURVE':
+        return None
+    if len(obj.data.splines) == 0:
+        return None
+    spline = obj.data.splines[0]
+    if spline.type == 'BEZIER':
+        if len(spline.bezier_points) == 0:
+            return None
+        return obj.matrix_world @ spline.bezier_points[0].co
+    if len(spline.points) == 0:
+        return None
+    return obj.matrix_world @ Vector(spline.points[0].co[:3])
+
+
+def draw_curve_start_marker(context, obj):
+    region = context.region
+    region_data = context.region_data
+    if region is None or region_data is None:
+        return
+    start_world = get_curve_start_world_position(obj)
+    if start_world is None:
+        return
+    pos = view3d_utils.location_3d_to_region_2d(region, region_data, start_world)
+    if pos is None:
+        return
+
+    x, y = pos.x, pos.y
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    gpu.state.blend_set('ALPHA')
+    gpu.state.point_size_set(18.0)
+    batch = batch_for_shader(shader, 'POINTS', {"pos": [(x, y)]})
+    shader.bind()
+    shader.uniform_float("color", (0.1, 1.0, 0.15, 1.0))
+    batch.draw(shader)
+
+    marker_lines = [
+        (x - 10.0, y), (x + 10.0, y),
+        (x, y - 10.0), (x, y + 10.0),
+    ]
+    gpu.state.line_width_set(2.0)
+    batch = batch_for_shader(shader, 'LINES', {"pos": marker_lines})
+    shader.bind()
+    shader.uniform_float("color", (0.1, 1.0, 0.15, 1.0))
+    batch.draw(shader)
+
+    font_id = 0
+    blf.size(font_id, 14)
+    blf.color(font_id, 0.1, 1.0, 0.15, 1.0)
+    blf.position(font_id, x + 12.0, y + 8.0, 0)
+    blf.draw(font_id, "Start")
+
+    gpu.state.point_size_set(1.0)
+    gpu.state.line_width_set(1.0)
+    gpu.state.blend_set('NONE')
+
+
 def draw_widget_callback():
     """Draw the cross-section widget overlay in 3D viewport"""
     try:
@@ -76,6 +134,7 @@ def draw_widget_callback():
     wd = wm.hair_pipe_widget
     if not wd.is_active:
         return
+    draw_curve_start_marker(context, obj)
 
     cx = wd.widget_center_x
     cy = wd.widget_center_y
