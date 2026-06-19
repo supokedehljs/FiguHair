@@ -1050,6 +1050,18 @@ def parent_keep_world(obj, parent_obj):
     obj.matrix_world = world_matrix
 
 
+def ensure_pipe_subdivision_modifier(pipe_obj):
+    modifier = pipe_obj.modifiers.get("FiguHair Catmull-Clark")
+    if modifier is None:
+        modifier = pipe_obj.modifiers.new("FiguHair Catmull-Clark", 'SUBSURF')
+    modifier.subdivision_type = 'CATMULL_CLARK'
+    modifier.levels = 2
+    modifier.render_levels = 2
+    modifier.show_viewport = True
+    modifier.show_render = True
+    return modifier
+
+
 def configure_pipe_object(pipe_obj, curve_obj):
     root_obj = ensure_figuhair_root(curve_obj)
     base_name = curve_obj.get("hair_pipe_base_name", root_obj.name)
@@ -1066,6 +1078,7 @@ def configure_pipe_object(pipe_obj, curve_obj):
 
     pipe_obj.show_in_front = False
     pipe_obj.hide_select = False
+    ensure_pipe_subdivision_modifier(pipe_obj)
     pipe_obj.select_set(False)
 
 

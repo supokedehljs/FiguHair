@@ -18,7 +18,7 @@ class HairPipeWidgetSettings(PropertyGroup):
     """Runtime state for the cross-section widget"""
     widget_center_x: FloatProperty(default=0.0)
     widget_center_y: FloatProperty(default=0.0)
-    widget_size: FloatProperty(default=250.0)
+    widget_size: FloatProperty(default=320.0)
     widget_scale_factor: FloatProperty(default=1.0)
     is_active: BoolProperty(default=False)
     drag_vert_index: IntProperty(default=-1)
@@ -99,6 +99,64 @@ def draw_curve_start_marker(context, obj):
     gpu.state.point_size_set(1.0)
     gpu.state.line_width_set(1.0)
     gpu.state.blend_set('NONE')
+
+
+def rounded_rect_points(x0, y0, x1, y1, radius=8.0, segments=5):
+    radius = max(0.0, min(radius, (x1 - x0) * 0.5, (y1 - y0) * 0.5))
+    centers = (
+        (x1 - radius, y1 - radius, 0.0),
+        (x0 + radius, y1 - radius, math.pi * 0.5),
+        (x0 + radius, y0 + radius, math.pi),
+        (x1 - radius, y0 + radius, math.pi * 1.5),
+    )
+    points = []
+    for cx, cy, start_angle in centers:
+        for step in range(segments + 1):
+            angle = start_angle + step * (math.pi * 0.5 / segments)
+            points.append((cx + math.cos(angle) * radius, cy + math.sin(angle) * radius))
+    return points
+
+
+def draw_rounded_rect(shader, x0, y0, x1, y1, radius, fill_color, border_color=None):
+    points = rounded_rect_points(x0, y0, x1, y1, radius)
+    center = ((x0 + x1) * 0.5, (y0 + y1) * 0.5)
+    vertices = [center] + points
+    indices = []
+    for i in range(1, len(vertices)):
+        indices.append((0, i, 1 if i == len(vertices) - 1 else i + 1))
+    batch = batch_for_shader(shader, 'TRIS', {"pos": vertices}, indices=indices)
+    shader.bind()
+    shader.uniform_float("color", fill_color)
+    batch.draw(shader)
+
+    if border_color is not None:
+        lines = []
+        for i, point in enumerate(points):
+            lines.append(point)
+            lines.append(points[(i + 1) % len(points)])
+        gpu.state.line_width_set(1.4)
+        batch = batch_for_shader(shader, 'LINES', {"pos": lines})
+        shader.bind()
+        shader.uniform_float("color", border_color)
+        batch.draw(shader)
+
+
+def draw_widget_button(shader, x0, y0, x1, y1, fill_color=None, enabled=True, active=False):
+    if not enabled:
+        fill = (0.10, 0.105, 0.11, 0.78)
+        border = (0.28, 0.28, 0.30, 0.55)
+        inner = (1.0, 1.0, 1.0, 0.035)
+    elif active:
+        fill = (0.24, 0.31, 0.38, 0.94)
+        border = (0.62, 0.72, 0.84, 0.78)
+        inner = (1.0, 1.0, 1.0, 0.075)
+    else:
+        fill = (0.145, 0.15, 0.16, 0.90)
+        border = (0.52, 0.52, 0.54, 0.62)
+        inner = (1.0, 1.0, 1.0, 0.055)
+    radius = min((y1 - y0) * 0.5 - 1.0, 15.0)
+    draw_rounded_rect(shader, x0, y0, x1, y1, radius, fill, border)
+    draw_rounded_rect(shader, x0 + 1.5, y0 + 1.5, x1 - 1.5, y1 - 1.5, max(1.0, radius - 1.5), (0.0, 0.0, 0.0, 0.0), inner)
 
 
 def draw_widget_callback():
@@ -247,25 +305,10 @@ def draw_widget_callback():
             shader.uniform_float("color", (0.0, 0.95, 1.0, 1.0))
         batch.draw(shader)
 
-    marker_radius = min(half * 0.82, max(ref_r, half * 0.35))
-    marker_x = cx
-    marker_y = cy - marker_radius
-    gpu.state.line_width_set(2.0)
-    view_line = [(cx, cy), (marker_x, marker_y)]
-    batch = batch_for_shader(shader, 'LINES', {"pos": view_line})
-    shader.bind()
-    shader.uniform_float("color", (1.0, 0.05, 0.04, 0.75))
-    batch.draw(shader)
-    gpu.state.point_size_set(18.0)
-    batch = batch_for_shader(shader, 'POINTS', {"pos": [(marker_x, marker_y)]})
-    shader.bind()
-    shader.uniform_float("color", (1.0, 0.0, 0.0, 1.0))
-    batch.draw(shader)
-
-    button_w = 74.0
-    button_h = 28.0
+    button_w = 110.0
+    button_h = 36.0
     gap = 10.0
-    by0 = y0 - button_h - 10.0
+    by0 = y0 - button_h - 12.0
     by1 = by0 + button_h
     total_w = button_w * 4.0 + gap * 3.0
     add_x0 = cx - total_w * 0.5
@@ -293,66 +336,31 @@ def draw_widget_callback():
     wd.flip_button_x1 = flip_x1
     wd.flip_button_y1 = by1
 
-    add_bg = [(add_x0, by0), (add_x1, by0), (add_x1, by1), (add_x0, by1)]
-    batch = batch_for_shader(shader, 'TRIS', {"pos": add_bg}, indices=[(0, 1, 2), (0, 2, 3)])
-    shader.bind()
-    shader.uniform_float("color", (0.12, 0.38, 0.18, 0.95))
-    batch.draw(shader)
-
     can_remove = all(len(point_setting.cross_section_verts) > 3 for point_setting in settings.point_settings)
-    rem_bg = [(rem_x0, by0), (rem_x1, by0), (rem_x1, by1), (rem_x0, by1)]
-    batch = batch_for_shader(shader, 'TRIS', {"pos": rem_bg}, indices=[(0, 1, 2), (0, 2, 3)])
-    shader.bind()
-    shader.uniform_float("color", (0.42, 0.14, 0.12, 0.95) if can_remove else (0.18, 0.18, 0.18, 0.85))
-    batch.draw(shader)
-
     active_is_ghost = 0 <= ps.active_vert_index < n and getattr(verts[ps.active_vert_index], 'is_ghost', False)
-    tog_bg = [(tog_x0, by0), (tog_x1, by0), (tog_x1, by1), (tog_x0, by1)]
-    batch = batch_for_shader(shader, 'TRIS', {"pos": tog_bg}, indices=[(0, 1, 2), (0, 2, 3)])
-    shader.bind()
-    shader.uniform_float("color", (0.18, 0.28, 0.58, 0.95) if active_is_ghost else (0.24, 0.24, 0.24, 0.95))
-    batch.draw(shader)
-
-    flip_bg = [(flip_x0, by0), (flip_x1, by0), (flip_x1, by1), (flip_x0, by1)]
-    batch = batch_for_shader(shader, 'TRIS', {"pos": flip_bg}, indices=[(0, 1, 2), (0, 2, 3)])
-    shader.bind()
-    shader.uniform_float("color", (0.38, 0.28, 0.12, 0.95))
-    batch.draw(shader)
-
-    button_lines = [
-        (add_x0, by0), (add_x1, by0), (add_x1, by0), (add_x1, by1),
-        (add_x1, by1), (add_x0, by1), (add_x0, by1), (add_x0, by0),
-        (rem_x0, by0), (rem_x1, by0), (rem_x1, by0), (rem_x1, by1),
-        (rem_x1, by1), (rem_x0, by1), (rem_x0, by1), (rem_x0, by0),
-        (tog_x0, by0), (tog_x1, by0), (tog_x1, by0), (tog_x1, by1),
-        (tog_x1, by1), (tog_x0, by1), (tog_x0, by1), (tog_x0, by0),
-        (flip_x0, by0), (flip_x1, by0), (flip_x1, by0), (flip_x1, by1),
-        (flip_x1, by1), (flip_x0, by1), (flip_x0, by1), (flip_x0, by0),
-    ]
-    gpu.state.line_width_set(1.0)
-    batch = batch_for_shader(shader, 'LINES', {"pos": button_lines})
-    shader.bind()
-    shader.uniform_float("color", (0.75, 0.75, 0.75, 1.0))
-    batch.draw(shader)
+    draw_widget_button(shader, add_x0, by0, add_x1, by1, (0.08, 0.42, 0.28, 0.96))
+    draw_widget_button(shader, rem_x0, by0, rem_x1, by1, (0.52, 0.16, 0.14, 0.96) if can_remove else (0.16, 0.16, 0.16, 0.86), can_remove)
+    draw_widget_button(shader, tog_x0, by0, tog_x1, by1, (0.12, 0.34, 0.62, 0.96) if active_is_ghost else (0.22, 0.24, 0.30, 0.96), True, active_is_ghost)
+    draw_widget_button(shader, flip_x0, by0, flip_x1, by1, (0.46, 0.30, 0.10, 0.96) if flip_h else (0.28, 0.24, 0.18, 0.96), True, flip_h)
 
     font_id = 0
-    blf.size(font_id, 12)
-    blf.color(font_id, 0.82, 0.82, 0.82, 0.9)
-    blf.position(font_id, x0 + 10.0, by1 + 8.0, 0)
-    blf.draw(font_id, "Cyan line = subdivided preview | Blue points = ghost | Middle click edge to insert")
-    blf.size(font_id, 14)
+    blf.size(font_id, 16)
+    blf.color(font_id, 0.88, 0.94, 1.0, 0.95)
+    blf.position(font_id, 18.0, 24.0, 0)
+    blf.draw(font_id, "青色线：细分预览｜蓝色点：幽灵点｜中键点击边：插入新点")
+    blf.size(font_id, 15)
     blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
-    blf.position(font_id, add_x0 + 17.0, by0 + 7.0, 0)
-    blf.draw(font_id, "+ Add")
-    blf.color(font_id, 1.0, 1.0, 1.0, 1.0 if can_remove else 0.35)
-    blf.position(font_id, rem_x0 + 18.0, by0 + 7.0, 0)
-    blf.draw(font_id, "- Del")
+    blf.position(font_id, add_x0 + 39.0, by0 + 11.0, 0)
+    blf.draw(font_id, "添加")
+    blf.color(font_id, 1.0, 1.0, 1.0, 1.0 if can_remove else 0.38)
+    blf.position(font_id, rem_x0 + 39.0, by0 + 11.0, 0)
+    blf.draw(font_id, "删除")
     blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
-    blf.position(font_id, tog_x0 + 9.0, by0 + 7.0, 0)
-    blf.draw(font_id, "Ghost")
+    blf.position(font_id, tog_x0 + 31.0, by0 + 11.0, 0)
+    blf.draw(font_id, "幽灵点")
     blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
-    blf.position(font_id, flip_x0 + 14.0, by0 + 7.0, 0)
-    blf.draw(font_id, "Flip H")
+    blf.position(font_id, flip_x0 + 23.0, by0 + 11.0, 0)
+    blf.draw(font_id, "水平翻转")
 
     gpu.state.line_width_set(1.0)
     gpu.state.point_size_set(1.0)
@@ -391,7 +399,7 @@ def setup_widget(context):
 
     wd.region_offset_x = region.x
     wd.region_offset_y = region.y
-    wd.widget_size = min(region.width, region.height) * 0.5
+    wd.widget_size = min(region.width, region.height) * 0.62
     wd.widget_center_x = region.width / 2.0
     wd.widget_center_y = region.height / 2.0
     wd.widget_scale_factor = 0.0
