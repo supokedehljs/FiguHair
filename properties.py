@@ -74,7 +74,7 @@ class HairPipeSettings(PropertyGroup):
     pipe_resolution: IntProperty(
         name="Pipe Resolution",
         description="Generated rings between neighboring curve control points; higher values make cross-section transitions smoother",
-        default=8,
+        default=1,
         min=1,
         max=64,
     )
@@ -88,12 +88,12 @@ class HairPipeSettings(PropertyGroup):
             ('CATMULL', "柔性样条", "Catmull-Rom interpolation using neighboring cross-sections"),
             ('BLEND', "混合", "Blend between monotone and Catmull-Rom styles"),
         ),
-        default='MONOTONE',
+        default='BLEND',
     )
     transition_strength: FloatProperty(
         name="Transition Strength",
         description="Controls how strongly neighboring cross-sections influence the blend",
-        default=0.6,
+        default=2.0,
         min=0.0,
         max=2.0,
         precision=3,
@@ -101,12 +101,12 @@ class HairPipeSettings(PropertyGroup):
     strong_smoothing: BoolProperty(
         name="Strong Smoothing",
         description="Apply additional smoothing across the whole generated ring sequence",
-        default=False,
+        default=True,
     )
     strong_smoothing_iterations: IntProperty(
         name="Strong Smoothing Iterations",
         description="Number of smoothing passes applied to generated cross-section rings",
-        default=2,
+        default=8,
         min=1,
         max=12,
     )

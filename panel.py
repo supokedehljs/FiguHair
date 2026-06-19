@@ -17,7 +17,7 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return get_context_curve_object(context) is not None
+        return True
 
     def draw(self, context):
         layout = self.layout
@@ -25,9 +25,11 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         if curve_obj is None:
             layout.label(text="请选择曲线或 FiguHair 预览网格", icon='INFO')
             return
+
         settings = curve_obj.hair_pipe_settings
         sync_point_settings(curve_obj)
-        if is_curve_edit_mode(curve_obj):
+        edit_mode = is_curve_edit_mode(curve_obj)
+        if edit_mode:
             sync_active_point_from_selection(curve_obj)
 
         box = layout.box()
@@ -35,26 +37,30 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         row = box.row(align=True)
         row.scale_y = 1.35
         row.operator("hair_pipe.generate_pipe", text="生成 / 更新管线")
-        box.prop(settings, "auto_update", text="自动更新")
-        box.prop(settings, "redirect_selection", text="点击预览选择曲线")
+        mode_text = "只选曲线模式" if settings.redirect_selection else "头发网格可选模式"
+        row = box.row(align=True)
+        row.prop(settings, "redirect_selection", text=mode_text, toggle=True)
 
         box = layout.box()
         box.label(text="默认形状", icon='MESH_CIRCLE')
-        row = box.row(align=True)
-        row.prop(settings, "default_radius", text="半径")
-        row.prop(settings, "default_segments", text="段数")
         box.prop(settings, "pipe_resolution", text="过渡细分")
         box.prop(settings, "transition_mode", text="截面过渡")
         box.prop(settings, "transition_strength", text="过渡强度")
         box.prop(settings, "strong_smoothing", text="强力平滑")
         if settings.strong_smoothing:
             box.prop(settings, "strong_smoothing_iterations", text="平滑次数")
-        box.prop(settings, "smooth_shading", text="平滑")
+        box.prop(settings, "smooth_shading", text="平滑着色")
         box.prop(settings, "cap_ends", text="封口")
 
-        box = layout.box()
+        if not edit_mode:
+            return
+
+        edit_box = layout.box()
+        edit_box.label(text="编辑模式操作", icon='EDITMODE_HLT')
+
+        box = edit_box.box()
         box.label(text="边流重建", icon='IPO_BEZIER')
-        box.label(text="编辑模式下选择两个曲线点后应用", icon='INFO')
+        box.label(text="选择两个曲线点后应用", icon='INFO')
         box.prop(settings, "edge_flow_mode", text="模式")
         if settings.edge_flow_mode in {'START', 'END'}:
             box.prop(settings, "edge_flow_power", text="偏向强度")
@@ -66,76 +72,9 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         op.power = settings.edge_flow_power
         op.blend = settings.edge_flow_blend
 
-        box = layout.box()
-        box.label(text="常用操作", icon='TOOL_SETTINGS')
-        row = box.row(align=True)
-        row.operator("hair_pipe.reset_all_cross_sections", text="全部重置")
-        row.operator("hair_pipe.taper_linear", text="线性变细")
-
-
-class HAIRPIPE_PT_point_select_panel(bpy.types.Panel):
-    bl_label = "当前曲线点"
-    bl_idname = "HAIRPIPE_PT_point_select_panel"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = "FiguHair"
-    bl_parent_id = "HAIRPIPE_PT_main_panel"
-
-    @classmethod
-    def poll(cls, context):
-        return get_context_curve_object(context) is not None
-
-    def draw(self, context):
-        layout = self.layout
-        curve_obj = get_context_curve_object(context)
-        if curve_obj is None:
-            return
-        settings = curve_obj.hair_pipe_settings
-        sync_point_settings(curve_obj)
-        if is_curve_edit_mode(curve_obj):
-            sync_active_point_from_selection(curve_obj)
-
-        if len(settings.point_settings) == 0:
-            layout.label(text="没有曲线点", icon='INFO')
-            return
-
-        layout.prop(settings, "active_point_index", text="点序号")
-        if is_curve_edit_mode(curve_obj):
-            layout.label(text="编辑模式下会跟随选中的点", icon='RESTRICT_SELECT_OFF')
-
-
-class HAIRPIPE_PT_cross_section_panel(bpy.types.Panel):
-    bl_label = "横截面"
-    bl_idname = "HAIRPIPE_PT_cross_section_panel"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = "FiguHair"
-    bl_parent_id = "HAIRPIPE_PT_main_panel"
-
-    @classmethod
-    def poll(cls, context):
-        obj = get_context_curve_object(context)
-        if obj is None:
-            return False
-        s = obj.hair_pipe_settings
-        return len(s.point_settings) > 0 and s.active_point_index < len(s.point_settings)
-
-    def draw(self, context):
-        layout = self.layout
-        curve_obj = get_context_curve_object(context)
-        if curve_obj is None:
-            return
-        settings = curve_obj.hair_pipe_settings
-        if is_curve_edit_mode(curve_obj):
-            sync_active_point_from_selection(curve_obj)
-        ps = settings.point_settings[settings.active_point_index]
-        curve_point = get_curve_point_by_global_index(curve_obj, settings.active_point_index)
+        box = edit_box.box()
+        box.label(text="横截面编辑器", icon='MOUSE_LMB')
         widget_data = context.window_manager.hair_pipe_widget
-
-        layout.label(text=f"正在编辑：点 {settings.active_point_index}", icon='CURVE_DATA')
-
-        box = layout.box()
-        box.label(text="横截面编辑器", icon='EDITMODE_HLT')
         row = box.row(align=True)
         if widget_data.is_active:
             row.operator("hair_pipe.widget_stop", text="关闭编辑器", icon='PANEL_CLOSE')
@@ -143,8 +82,9 @@ class HAIRPIPE_PT_cross_section_panel(bpy.types.Panel):
             row.operator("hair_pipe.widget_interact", text="打开编辑器", icon='MOUSE_LMB')
         box.label(text="按住 Ctrl+Shift+X：临时打开，松开 X 退出", icon='INFO')
 
-        box = layout.box()
-        box.label(text="曲线点控制", icon='IPO_BEZIER')
+        box = edit_box.box()
+        box.label(text="曲线点控制", icon='CURVE_DATA')
+        curve_point = get_curve_point_by_global_index(curve_obj, settings.active_point_index)
         if curve_point is not None:
             row = box.row(align=True)
             row.prop(curve_point, "radius", text="半径")
@@ -153,37 +93,28 @@ class HAIRPIPE_PT_cross_section_panel(bpy.types.Panel):
         else:
             box.label(text="请在编辑模式中选择曲线点", icon='INFO')
 
-        box = layout.box()
-        box.label(text="额外调整", icon='MOD_SIMPLEDEFORM')
         row = box.row(align=True)
-        row.prop(ps, "scale", text="缩放")
-        row.prop(ps, "rotation", text="旋转")
-
-        box = layout.box()
-        box.label(text="形状点", icon='MESH_CIRCLE')
-        box.prop(ps, "active_vert_index", text="当前点")
-        for i, cv in enumerate(ps.cross_section_verts):
-            row = box.row(align=True)
-            row.label(text=f"{i}")
-            row.prop(cv, "offset_x", text="X")
-            row.prop(cv, "offset_y", text="Y")
-
-        row = layout.row(align=True)
-        row.operator("hair_pipe.add_cs_vert", text="添加点", icon='ADD')
-        row.operator("hair_pipe.remove_cs_vert", text="删除点", icon='REMOVE')
-        row = layout.row(align=True)
         row.operator("hair_pipe.reset_cross_section", text="重置圆形", icon='LOOP_BACK')
         row.operator("hair_pipe.copy_cs_to_all", text="复制到全部", icon='DUPLICATE')
 
 
 classes = (
     HAIRPIPE_PT_main_panel,
-    HAIRPIPE_PT_point_select_panel,
-    HAIRPIPE_PT_cross_section_panel,
 )
 
 
 def register():
+    stale_panels = (
+        getattr(bpy.types, "HAIRPIPE_PT_point_select_panel", None),
+        getattr(bpy.types, "HAIRPIPE_PT_cross_section_panel", None),
+    )
+    for cls in stale_panels:
+        if cls is not None:
+            try:
+                bpy.utils.unregister_class(cls)
+            except RuntimeError:
+                pass
+
     for cls in classes:
         bpy.utils.register_class(cls)
 

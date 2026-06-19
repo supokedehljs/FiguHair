@@ -935,12 +935,30 @@ def get_pipe_source_curve(pipe_obj):
 
 
 def get_context_curve_object(context):
-    obj = context.active_object
-    if obj is None:
-        return None
-    if obj.type == 'CURVE':
-        return obj
-    return get_pipe_source_curve(obj)
+    candidates = (
+        getattr(context, 'object', None),
+        getattr(context, 'active_object', None),
+        getattr(getattr(context, 'view_layer', None), 'objects', None).active
+        if getattr(context, 'view_layer', None) is not None else None,
+    )
+
+    for obj in candidates:
+        if obj is None:
+            continue
+        if obj.type == 'CURVE':
+            return obj
+        source_curve = get_pipe_source_curve(obj)
+        if source_curve is not None:
+            return source_curve
+
+    for obj in getattr(context, 'selected_objects', ()):
+        if obj.type == 'CURVE':
+            return obj
+        source_curve = get_pipe_source_curve(obj)
+        if source_curve is not None:
+            return source_curve
+
+    return None
 
 
 def configure_pipe_object(pipe_obj, curve_obj):
