@@ -6,6 +6,7 @@ from gpu_extras.batch import batch_for_shader
 from bpy.props import IntProperty, FloatProperty, BoolProperty
 from bpy.types import PropertyGroup
 from mathutils import Vector
+from .operators import get_selected_curve_point_indices
 
 
 _draw_handle = None
@@ -433,6 +434,32 @@ def set_vertex_from_effective_offset(vertex, effective_x, effective_y, curve_poi
     local_y = -effective_x * sin_r + effective_y * cos_r
     vertex.offset_x = local_x / scale
     vertex.offset_y = local_y / scale
+
+
+def apply_active_vertex_edit_to_selected_points(context, source_ps, vert_idx):
+    obj = context.active_object
+    if obj is None or obj.type != 'CURVE':
+        return
+    settings = obj.hair_pipe_settings
+    selected = get_selected_curve_point_indices(obj)
+    if len(selected) <= 1:
+        return
+    active_idx = settings.active_point_index
+    if vert_idx < 0 or vert_idx >= len(source_ps.cross_section_verts):
+        return
+    src_vert = source_ps.cross_section_verts[vert_idx]
+    for point_idx in selected:
+        if point_idx == active_idx or point_idx >= len(settings.point_settings):
+            continue
+        target_ps = settings.point_settings[point_idx]
+        if vert_idx >= len(target_ps.cross_section_verts):
+            continue
+        target_vert = target_ps.cross_section_verts[vert_idx]
+        target_vert.offset_x = src_vert.offset_x
+        target_vert.offset_y = src_vert.offset_y
+        target_vert.is_ghost = getattr(src_vert, 'is_ghost', False)
+        target_ps.active_vert_index = min(source_ps.active_vert_index, len(target_ps.cross_section_verts) - 1)
+        update_ghost_vertices(target_ps)
 
 
 def get_active_curve_point(context):
@@ -999,6 +1026,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             effective_x, effective_y = widget_to_effective(mx, my, cx, cy, sf, alignment_angle)
             set_vertex_from_effective_offset(verts[wd.drag_vert_index], effective_x, effective_y, curve_point, ps)
             update_ghost_vertices(ps)
+            apply_active_vertex_edit_to_selected_points(context, ps, wd.drag_vert_index)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if inside_widget or inside_controls:

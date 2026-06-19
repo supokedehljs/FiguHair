@@ -1,7 +1,7 @@
 import bpy
 import math
 from mathutils import Matrix, Vector
-from bpy.props import IntProperty, FloatProperty, EnumProperty
+from bpy.props import IntProperty, FloatProperty, EnumProperty, BoolProperty
 
 
 def ensure_curve_defaults(curve_obj):
@@ -1369,6 +1369,118 @@ class HAIRPIPE_OT_select_point(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def copy_point_cross_section(src, dst, rotation_offset=0.0):
+    dst.cross_section_verts.clear()
+    angle = math.radians(rotation_offset)
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    for sv in src.cross_section_verts:
+        v = dst.cross_section_verts.add()
+        x = sv.offset_x
+        y = sv.offset_y
+        v.offset_x = x * cos_a - y * sin_a
+        v.offset_y = x * sin_a + y * cos_a
+        v.is_ghost = getattr(sv, 'is_ghost', False)
+    dst.active_vert_index = min(src.active_vert_index, max(0, len(dst.cross_section_verts) - 1))
+    dst.scale = src.scale
+    dst.rotation = src.rotation
+
+
+_HAIRPIPE_CROSS_SECTION_CLIPBOARD = None
+
+
+class HAIRPIPE_OT_copy_cross_section(bpy.types.Operator):
+    """Copy the active point cross-section to the FiguHair clipboard"""
+    bl_idname = "hair_pipe.copy_cross_section"
+    bl_label = "复制横截面"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        if obj is None or obj.type != 'CURVE':
+            return False
+        s = obj.hair_pipe_settings
+        return s.active_point_index < len(s.point_settings)
+
+    def execute(self, context):
+        global _HAIRPIPE_CROSS_SECTION_CLIPBOARD
+        settings = context.active_object.hair_pipe_settings
+        src = settings.point_settings[settings.active_point_index]
+        _HAIRPIPE_CROSS_SECTION_CLIPBOARD = {
+            "verts": [
+                (v.offset_x, v.offset_y, getattr(v, 'is_ghost', False))
+                for v in src.cross_section_verts
+            ],
+            "scale": src.scale,
+            "rotation": src.rotation,
+            "active_vert_index": src.active_vert_index,
+        }
+        self.report({'INFO'}, "已复制横截面")
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_paste_cross_section(bpy.types.Operator):
+    """Paste the copied cross-section to active or selected curve points"""
+    bl_idname = "hair_pipe.paste_cross_section"
+    bl_label = "粘贴横截面"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    rotation_offset: FloatProperty(
+        name="粘贴后旋转",
+        description="Rotate pasted cross-section around its center in degrees",
+        default=0.0,
+        min=-360.0,
+        max=360.0,
+        precision=2,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        if obj is None or obj.type != 'CURVE':
+            return False
+        if _HAIRPIPE_CROSS_SECTION_CLIPBOARD is None:
+            return False
+        s = obj.hair_pipe_settings
+        return s.active_point_index < len(s.point_settings)
+
+    def draw(self, context):
+        self.layout.prop(self, "rotation_offset")
+
+    def execute(self, context):
+        settings = context.active_object.hair_pipe_settings
+        sync_point_settings(context.active_object)
+        selected = get_selected_curve_point_indices(context.active_object) if is_curve_edit_mode(context.active_object) else []
+        target_indices = selected if selected else [settings.active_point_index]
+        target_indices = [idx for idx in target_indices if idx < len(settings.point_settings)]
+        if not target_indices:
+            return {'CANCELLED'}
+
+        class ClipboardPointSetting:
+            pass
+
+        src = ClipboardPointSetting()
+        src.cross_section_verts = []
+        for x, y, is_ghost in _HAIRPIPE_CROSS_SECTION_CLIPBOARD["verts"]:
+            class ClipboardVert:
+                pass
+            v = ClipboardVert()
+            v.offset_x = x
+            v.offset_y = y
+            v.is_ghost = is_ghost
+            src.cross_section_verts.append(v)
+        src.scale = _HAIRPIPE_CROSS_SECTION_CLIPBOARD["scale"]
+        src.rotation = _HAIRPIPE_CROSS_SECTION_CLIPBOARD["rotation"]
+        src.active_vert_index = _HAIRPIPE_CROSS_SECTION_CLIPBOARD["active_vert_index"]
+
+        for idx in target_indices:
+            copy_point_cross_section(src, settings.point_settings[idx], self.rotation_offset)
+        update_all_ghost_vertices(settings)
+        self.report({'INFO'}, f"已粘贴到 {len(target_indices)} 个曲线点")
+        return {'FINISHED'}
+
+
 class HAIRPIPE_OT_copy_cs_to_all(bpy.types.Operator):
     """Copy active point's cross-section to all other points"""
     bl_idname = "hair_pipe.copy_cs_to_all"
@@ -1389,12 +1501,8 @@ class HAIRPIPE_OT_copy_cs_to_all(bpy.types.Operator):
         for i, ps in enumerate(settings.point_settings):
             if i == settings.active_point_index:
                 continue
-            ps.cross_section_verts.clear()
-            for sv in src.cross_section_verts:
-                v = ps.cross_section_verts.add()
-                v.offset_x = sv.offset_x
-                v.offset_y = sv.offset_y
-                v.is_ghost = getattr(sv, 'is_ghost', False)
+            copy_point_cross_section(src, ps)
+        update_all_ghost_vertices(settings)
         self.report({'INFO'}, "Cross-section copied to all points")
         return {'FINISHED'}
 
@@ -1409,6 +1517,8 @@ classes = (
     HAIRPIPE_OT_add_cs_vert,
     HAIRPIPE_OT_remove_cs_vert,
     HAIRPIPE_OT_select_point,
+    HAIRPIPE_OT_copy_cross_section,
+    HAIRPIPE_OT_paste_cross_section,
     HAIRPIPE_OT_copy_cs_to_all,
 )
 

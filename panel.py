@@ -94,6 +94,10 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
             box.label(text="请在编辑模式中选择曲线点", icon='INFO')
 
         row = box.row(align=True)
+        row.operator("hair_pipe.copy_cross_section", text="复制", icon='COPYDOWN')
+        row.operator("hair_pipe.paste_cross_section", text="粘贴", icon='PASTEDOWN')
+
+        row = box.row(align=True)
         row.operator("hair_pipe.reset_cross_section", text="重置圆形", icon='LOOP_BACK')
         row.operator("hair_pipe.copy_cs_to_all", text="复制到全部", icon='DUPLICATE')
 
