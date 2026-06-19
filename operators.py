@@ -1115,18 +1115,17 @@ class HAIRPIPE_OT_generate_pipe(bpy.types.Operator):
             return {'CANCELLED'}
         verts = verts_to_world_space(verts, curve_obj)
         mesh_name = get_pipe_mesh_name(curve_obj)
-        mesh = bpy.data.meshes.new(mesh_name)
-        mesh.from_pydata(verts, [], faces)
-        mesh.update()
         existing_obj = bpy.data.objects.get(mesh_name)
         if existing_obj:
-            old_mesh = existing_obj.data
-            existing_obj.data = mesh
-            mesh.name = mesh_name
-            if old_mesh and old_mesh.users == 0:
-                bpy.data.meshes.remove(old_mesh)
+            mesh = existing_obj.data
+            mesh.clear_geometry()
+            mesh.from_pydata(verts, [], faces)
+            mesh.update()
             pipe_obj = existing_obj
         else:
+            mesh = bpy.data.meshes.new(mesh_name)
+            mesh.from_pydata(verts, [], faces)
+            mesh.update()
             pipe_obj = bpy.data.objects.new(mesh_name, mesh)
             context.collection.objects.link(pipe_obj)
         if settings.smooth_shading:
