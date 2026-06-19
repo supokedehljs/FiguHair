@@ -8,6 +8,8 @@ from .operators import (
     is_curve_edit_mode,
     ensure_curve_defaults,
     get_pipe_object_for_curve,
+    update_tail_mesh_for_curve,
+    ensure_tail_modifier_stack,
     verts_to_world_space,
     redirect_pipe_selection,
 )
@@ -50,6 +52,8 @@ def rebuild_existing_pipe(curve_obj):
         verts = verts_to_world_space(verts, curve_obj)
 
         update_mesh_data_in_place(pipe_obj.data, verts, faces, settings.smooth_shading)
+        tail_obj = update_tail_mesh_for_curve(curve_obj, settings, verts)
+        ensure_tail_modifier_stack(pipe_obj, tail_obj)
         _last_rebuild_time = time.perf_counter()
     finally:
         _rebuild_guard = False

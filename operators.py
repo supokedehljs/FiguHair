@@ -800,9 +800,7 @@ def generate_pipe_mesh(curve_obj, settings):
                 all_faces.append((v0, v1, v2, v3))
         if settings.cap_ends and not is_cyclic and num_rings > 0:
             cap_s = list(range(vert_offset, vert_offset + segments))
-            cap_e = list(range(vert_offset + (num_rings-1)*segments, vert_offset + num_rings*segments))
             all_faces.append(tuple(reversed(cap_s)))
-            all_faces.append(tuple(cap_e))
         vert_offset += num_rings * segments
 
     return all_verts, all_faces
@@ -969,6 +967,10 @@ def get_pipe_mesh_name(curve_obj):
     return curve_obj.name + "_FiguHair"
 
 
+def get_tail_mesh_name(curve_obj):
+    return curve_obj.name + "_FiguHairTail"
+
+
 def get_pipe_object_for_curve(curve_obj):
     root_obj = get_figuhair_root(curve_obj)
     if root_obj is not None:
@@ -983,6 +985,21 @@ def get_pipe_object_for_curve(curve_obj):
         return obj
     legacy_name = curve_obj.name + "_FiguHair"
     obj = bpy.data.objects.get(legacy_name)
+    if obj is not None and obj.type == 'MESH':
+        return obj
+    return None
+
+
+def get_tail_object_for_curve(curve_obj):
+    root_obj = get_figuhair_root(curve_obj)
+    if root_obj is not None:
+        for child in root_obj.children:
+            if child.type == 'MESH' and child.get("hair_pipe_tail_source_curve") == curve_obj.name:
+                return child
+            if child.type == 'MESH' and child.name.endswith(" Tail"):
+                return child
+    tail_name = get_tail_mesh_name(curve_obj)
+    obj = bpy.data.objects.get(tail_name)
     if obj is not None and obj.type == 'MESH':
         return obj
     return None
@@ -1009,6 +1026,19 @@ def get_pipe_source_curve(pipe_obj):
     return None
 
 
+def get_tail_source_curve(tail_obj):
+    if tail_obj is None or tail_obj.type != 'MESH':
+        return None
+    source_name = tail_obj.get("hair_pipe_tail_source_curve")
+    if source_name:
+        curve_obj = bpy.data.objects.get(source_name)
+        if curve_obj is not None and curve_obj.type == 'CURVE':
+            return curve_obj
+    if tail_obj.parent is not None and tail_obj.parent.type == 'EMPTY':
+        return get_curve_from_figuhair_root(tail_obj.parent)
+    return None
+
+
 def get_context_curve_object(context):
     candidates = (
         getattr(context, 'object', None),
@@ -1029,6 +1059,9 @@ def get_context_curve_object(context):
         source_curve = get_pipe_source_curve(obj)
         if source_curve is not None:
             return source_curve
+        source_curve = get_tail_source_curve(obj)
+        if source_curve is not None:
+            return source_curve
 
     for obj in getattr(context, 'selected_objects', ()):
         if obj.type == 'CURVE':
@@ -1038,6 +1071,9 @@ def get_context_curve_object(context):
             if root_curve is not None:
                 return root_curve
         source_curve = get_pipe_source_curve(obj)
+        if source_curve is not None:
+            return source_curve
+        source_curve = get_tail_source_curve(obj)
         if source_curve is not None:
             return source_curve
 
@@ -1060,6 +1096,415 @@ def ensure_pipe_subdivision_modifier(pipe_obj):
     modifier.show_viewport = True
     modifier.show_render = True
     return modifier
+
+
+def move_modifier_before(pipe_obj, modifier, before_modifier):
+    if modifier is None or before_modifier is None or modifier == before_modifier:
+        return
+    names = [mod.name for mod in pipe_obj.modifiers]
+    if modifier.name not in names or before_modifier.name not in names:
+        return
+    from_index = names.index(modifier.name)
+    to_index = names.index(before_modifier.name)
+    if from_index > to_index:
+        pipe_obj.modifiers.move(from_index, to_index)
+
+
+def ensure_tail_join_geometry_nodes(pipe_obj, tail_obj):
+    if pipe_obj is None or tail_obj is None:
+        return None
+    modifier = pipe_obj.modifiers.get("FiguHair Join Tail")
+    if modifier is None:
+        modifier = pipe_obj.modifiers.new("FiguHair Join Tail", 'NODES')
+
+    group = modifier.node_group
+    if group is None or not group.get("figuhair_tail_join") or group.get("figuhair_tail_join_version", 0) < 2:
+        group = bpy.data.node_groups.new(pipe_obj.name + " Tail Join", 'GeometryNodeTree')
+        group["figuhair_tail_join"] = True
+        group["figuhair_tail_join_version"] = 2
+        try:
+            group.interface.new_socket(name="Geometry", in_out='INPUT', socket_type='NodeSocketGeometry')
+            group.interface.new_socket(name="Geometry", in_out='OUTPUT', socket_type='NodeSocketGeometry')
+        except Exception:
+            pass
+
+        nodes = group.nodes
+        links = group.links
+        nodes.clear()
+        group_input = nodes.new('NodeGroupInput')
+        group_input.location = (-520, 0)
+        object_info = nodes.new('GeometryNodeObjectInfo')
+        object_info.location = (-520, -180)
+        join_geometry = nodes.new('GeometryNodeJoinGeometry')
+        join_geometry.location = (-250, -70)
+        merge_by_distance = nodes.new('GeometryNodeMergeByDistance')
+        merge_by_distance.location = (40, -70)
+        group_output = nodes.new('NodeGroupOutput')
+        group_output.location = (340, -70)
+        try:
+            object_info.inputs['Object'].default_value = tail_obj
+        except Exception:
+            pass
+        try:
+            object_info.inputs['As Instance'].default_value = False
+        except Exception:
+            pass
+        try:
+            merge_by_distance.inputs['Distance'].default_value = 0.0001
+        except Exception:
+            pass
+        try:
+            links.new(group_input.outputs['Geometry'], join_geometry.inputs['Geometry'])
+            links.new(object_info.outputs['Geometry'], join_geometry.inputs['Geometry'])
+            links.new(join_geometry.outputs['Geometry'], merge_by_distance.inputs['Geometry'])
+            links.new(merge_by_distance.outputs['Geometry'], group_output.inputs['Geometry'])
+        except Exception:
+            pass
+        modifier.node_group = group
+    else:
+        for node in group.nodes:
+            if node.bl_idname == 'GeometryNodeObjectInfo':
+                try:
+                    node.inputs['Object'].default_value = tail_obj
+                except Exception:
+                    pass
+    return modifier
+
+
+def ensure_tail_modifier_stack(pipe_obj, tail_obj):
+    join_modifier = ensure_tail_join_geometry_nodes(pipe_obj, tail_obj)
+    subdiv_modifier = ensure_pipe_subdivision_modifier(pipe_obj)
+    move_modifier_before(pipe_obj, join_modifier, subdiv_modifier)
+    return join_modifier, subdiv_modifier
+
+
+def get_last_ring_from_pipe_vertices(verts, settings):
+    if not verts or len(settings.point_settings) == 0:
+        return None
+    last_setting = settings.point_settings[-1]
+    segments = len(last_setting.cross_section_verts)
+    if segments < 3 or len(verts) < segments:
+        return None
+    return list(verts[-segments:]), segments
+
+
+def estimate_tail_direction_from_vertices(verts, segments):
+    if len(verts) >= segments * 2:
+        last_center = sum((Vector(v) for v in verts[-segments:]), Vector((0.0, 0.0, 0.0))) / segments
+        prev_center = sum((Vector(v) for v in verts[-segments * 2:-segments]), Vector((0.0, 0.0, 0.0))) / segments
+        direction = last_center - prev_center
+        if direction.length > 1e-8:
+            return direction.normalized()
+    return Vector((0.0, 0.0, 1.0))
+
+
+def create_tail_mesh_geometry(last_ring, direction):
+    segments = len(last_ring)
+    center = sum((Vector(v) for v in last_ring), Vector((0.0, 0.0, 0.0))) / segments
+    radius = max((Vector(v) - center).length for v in last_ring) if segments > 0 else 0.05
+    length = max(radius * 1.8, 0.05)
+    tip_ring = [Vector(v) + direction * length for v in last_ring]
+    verts = [Vector(v) for v in last_ring] + tip_ring
+    faces = []
+    for i in range(segments):
+        j = (i + 1) % segments
+        faces.append((i, j, segments + j, segments + i))
+    faces.append(tuple(range(segments, segments * 2)))
+    return verts, faces
+
+
+def flatten_ring_points(ring):
+    values = []
+    for point in ring:
+        vector = Vector(point)
+        values.extend((vector.x, vector.y, vector.z))
+    return values
+
+
+def get_stored_tail_connection_ring(tail_obj, segments):
+    values = tail_obj.get("hair_pipe_tail_connection_ring")
+    if values is None or len(values) != segments * 3:
+        return None
+    return [Vector((values[i], values[i + 1], values[i + 2])) for i in range(0, len(values), 3)]
+
+
+def store_tail_connection_state(tail_obj, last_ring, direction):
+    tail_obj["hair_pipe_tail_direction"] = tuple(direction)
+    tail_obj["hair_pipe_tail_connection_ring"] = flatten_ring_points(last_ring)
+
+
+def build_tail_connection_basis(ring, direction):
+    count = len(ring)
+    center = sum((Vector(v) for v in ring), Vector((0.0, 0.0, 0.0))) / count
+    z_axis = direction.normalized() if direction.length > 1e-8 else Vector((0.0, 0.0, 1.0))
+    x_axis = Vector(ring[0]) - center
+    x_axis = x_axis - z_axis * x_axis.dot(z_axis)
+    if x_axis.length < 1e-8:
+        for point in ring[1:]:
+            x_axis = Vector(point) - center
+            x_axis = x_axis - z_axis * x_axis.dot(z_axis)
+            if x_axis.length >= 1e-8:
+                break
+    if x_axis.length < 1e-8:
+        x_axis = z_axis.cross(Vector((0.0, 0.0, 1.0)))
+        if x_axis.length < 1e-8:
+            x_axis = z_axis.cross(Vector((0.0, 1.0, 0.0)))
+    x_axis.normalize()
+    y_axis = z_axis.cross(x_axis)
+    if y_axis.length < 1e-8:
+        y_axis = Vector((0.0, 1.0, 0.0))
+    y_axis.normalize()
+    avg_radius = sum((Vector(v) - center).length for v in ring) / count
+    return center, x_axis, y_axis, z_axis, max(avg_radius, 1e-8)
+
+
+def transform_tail_vertices_by_connection(vertices, old_ring, new_ring, old_direction, new_direction):
+    old_center, old_x, old_y, old_z, old_radius = build_tail_connection_basis(old_ring, old_direction)
+    new_center, new_x, new_y, new_z, new_radius = build_tail_connection_basis(new_ring, new_direction)
+    scale = new_radius / old_radius
+    transformed = []
+    for vertex in vertices:
+        offset = Vector(vertex) - old_center
+        local_x = offset.dot(old_x)
+        local_y = offset.dot(old_y)
+        local_z = offset.dot(old_z)
+        transformed.append(new_center + new_x * local_x * scale + new_y * local_y * scale + new_z * local_z * scale)
+    return transformed
+
+
+def resample_ring_points(ring, new_count):
+    old_count = len(ring)
+    if old_count == new_count:
+        return [Vector(v) for v in ring]
+    result = []
+    for i in range(new_count):
+        pos = i * old_count / new_count
+        idx0 = int(math.floor(pos)) % old_count
+        idx1 = (idx0 + 1) % old_count
+        t = pos - math.floor(pos)
+        result.append(Vector(ring[idx0]).lerp(Vector(ring[idx1]), t))
+    return result
+
+
+def rebuild_tail_grid(mesh, transformed_vertices, old_segments, new_segments, last_ring):
+    if old_segments < 3 or new_segments < 3:
+        return False
+    if len(transformed_vertices) % old_segments != 0:
+        return False
+    ring_count = len(transformed_vertices) // old_segments
+    if ring_count < 2:
+        return False
+
+    new_verts = []
+    for ring_idx in range(ring_count):
+        old_ring = transformed_vertices[ring_idx * old_segments:(ring_idx + 1) * old_segments]
+        if ring_idx == 0:
+            new_ring = [Vector(v) for v in last_ring]
+        else:
+            new_ring = resample_ring_points(old_ring, new_segments)
+        new_verts.extend(new_ring)
+
+    faces = []
+    for ring_idx in range(ring_count - 1):
+        base = ring_idx * new_segments
+        next_base = (ring_idx + 1) * new_segments
+        for i in range(new_segments):
+            j = (i + 1) % new_segments
+            faces.append((base + i, base + j, next_base + j, next_base + i))
+    faces.append(tuple(range((ring_count - 1) * new_segments, ring_count * new_segments)))
+    mesh.clear_geometry()
+    mesh.from_pydata(new_verts, [], faces)
+    mesh.update()
+    shade_mesh_smooth(mesh)
+    return True
+
+
+def get_tail_pose_rotation(tail_obj, mesh, old_segments, new_direction):
+    old_direction = None
+    stored_direction = tail_obj.get("hair_pipe_tail_direction")
+    if stored_direction is not None and len(stored_direction) == 3:
+        direction = Vector(stored_direction)
+        if direction.length > 1e-8:
+            old_direction = direction.normalized()
+    if old_direction is None and len(mesh.vertices) > old_segments:
+        old_center = sum((v.co.copy() for v in mesh.vertices[:old_segments]), Vector((0.0, 0.0, 0.0))) / old_segments
+        tail_center = sum((v.co.copy() for v in mesh.vertices[old_segments:]), Vector((0.0, 0.0, 0.0))) / (len(mesh.vertices) - old_segments)
+        direction = tail_center - old_center
+        if direction.length > 1e-8:
+            old_direction = direction.normalized()
+    if old_direction is not None and new_direction.length > 1e-8:
+        try:
+            return old_direction.rotation_difference(new_direction.normalized()).to_matrix()
+        except Exception:
+            return None
+    return None
+
+
+def shade_mesh_smooth(mesh):
+    for polygon in mesh.polygons:
+        polygon.use_smooth = True
+
+
+def make_tail_bridge_faces(new_segments, old_segments):
+    faces = []
+    lower_base = new_segments
+    upper_idx = 0
+    lower_idx = 0
+    max_steps = new_segments + old_segments + 2
+    steps = 0
+    while (upper_idx < new_segments or lower_idx < old_segments) and steps < max_steps:
+        steps += 1
+        next_upper_t = (upper_idx + 1) / new_segments if upper_idx < new_segments else float('inf')
+        next_lower_t = (lower_idx + 1) / old_segments if lower_idx < old_segments else float('inf')
+        upper_a = upper_idx % new_segments
+        lower_a = lower_base + (lower_idx % old_segments)
+
+        if abs(next_upper_t - next_lower_t) < 1e-8 and upper_idx < new_segments and lower_idx < old_segments:
+            upper_b = (upper_idx + 1) % new_segments
+            lower_b = lower_base + ((lower_idx + 1) % old_segments)
+            faces.append((upper_a, upper_b, lower_b, lower_a))
+            upper_idx += 1
+            lower_idx += 1
+        elif next_upper_t < next_lower_t and upper_idx < new_segments:
+            upper_b = (upper_idx + 1) % new_segments
+            faces.append((upper_a, upper_b, lower_a))
+            upper_idx += 1
+        elif lower_idx < old_segments:
+            lower_b = lower_base + ((lower_idx + 1) % old_segments)
+            faces.append((upper_a, lower_b, lower_a))
+            lower_idx += 1
+        else:
+            break
+    return [tuple(face) for face in faces if len(set(face)) >= 3]
+
+
+def face_uses_first_ring(face, old_segments):
+    return any(index < old_segments for index in face)
+
+
+def remap_tail_face_after_connection_change(face, old_segments, new_segments):
+    remapped = []
+    for index in face:
+        if index < old_segments:
+            return None
+        remapped.append(index - old_segments + new_segments)
+    return tuple(remapped) if len(set(remapped)) >= 3 else None
+
+
+def retopologize_tail_connection(tail_obj, last_ring, old_segments, new_segments, new_direction):
+    mesh = tail_obj.data
+    if len(mesh.vertices) < old_segments or old_segments < 3 or new_segments < 3:
+        return False
+    old_ring = get_stored_tail_connection_ring(tail_obj, old_segments)
+    if old_ring is None:
+        old_ring = [v.co.copy() for v in mesh.vertices[:old_segments]]
+    stored_direction = tail_obj.get("hair_pipe_tail_direction")
+    old_direction = Vector(stored_direction) if stored_direction is not None and len(stored_direction) == 3 else new_direction
+    transformed_old_vertices = transform_tail_vertices_by_connection(
+        [v.co.copy() for v in mesh.vertices],
+        old_ring,
+        last_ring,
+        old_direction,
+        new_direction,
+    )
+    preserved_vertices = transformed_old_vertices[old_segments:]
+    old_faces = [tuple(poly.vertices) for poly in mesh.polygons]
+    preserved_faces = []
+    for face in old_faces:
+        remapped = remap_tail_face_after_connection_change(face, old_segments, new_segments)
+        if remapped is not None:
+            preserved_faces.append(remapped)
+    new_verts = [Vector(v) for v in last_ring] + preserved_vertices
+    bridge_faces = make_tail_bridge_faces(new_segments, old_segments)
+    mesh.clear_geometry()
+    mesh.from_pydata(new_verts, [], bridge_faces + preserved_faces)
+    mesh.update()
+    shade_mesh_smooth(mesh)
+    return True
+
+
+def update_tail_mesh_connection(tail_obj, last_ring, segments, new_direction):
+    mesh = tail_obj.data
+    if len(mesh.vertices) < segments or tail_obj.get("hair_pipe_tail_ring_count", 0) != segments:
+        return False
+    old_ring = get_stored_tail_connection_ring(tail_obj, segments)
+    if old_ring is None:
+        old_ring = [v.co.copy() for v in mesh.vertices[:segments]]
+    stored_direction = tail_obj.get("hair_pipe_tail_direction")
+    old_direction = Vector(stored_direction) if stored_direction is not None and len(stored_direction) == 3 else new_direction
+    transformed = transform_tail_vertices_by_connection(
+        [v.co.copy() for v in mesh.vertices],
+        old_ring,
+        last_ring,
+        old_direction,
+        new_direction,
+    )
+    for vertex, co in zip(mesh.vertices, transformed):
+        vertex.co = co
+    for idx, co in enumerate(last_ring):
+        mesh.vertices[idx].co = Vector(co)
+    mesh.update()
+    shade_mesh_smooth(mesh)
+    return True
+
+
+def update_tail_mesh_for_curve(curve_obj, settings, pipe_verts):
+    ring_data = get_last_ring_from_pipe_vertices(pipe_verts, settings)
+    if ring_data is None:
+        return None
+    last_ring, segments = ring_data
+    root_obj = ensure_figuhair_root(curve_obj)
+    base_name = curve_obj.get("hair_pipe_base_name", root_obj.name)
+    tail_obj = get_tail_object_for_curve(curve_obj)
+    direction = estimate_tail_direction_from_vertices(pipe_verts, segments)
+
+    if tail_obj is not None:
+        old_segments = int(tail_obj.get("hair_pipe_tail_ring_count", segments))
+        if old_segments != segments and retopologize_tail_connection(tail_obj, last_ring, old_segments, segments, direction):
+            tail_obj.name = base_name + " Tail"
+            tail_obj.data.name = tail_obj.name
+            tail_obj["hair_pipe_tail_source_curve"] = curve_obj.name
+            tail_obj["hair_pipe_tail_ring_count"] = segments
+            store_tail_connection_state(tail_obj, last_ring, direction)
+            tail_obj.display_type = 'WIRE'
+            tail_obj.show_in_front = True
+            tail_obj.hide_render = True
+            parent_keep_world(tail_obj, root_obj)
+            return tail_obj
+
+    if tail_obj is not None and update_tail_mesh_connection(tail_obj, last_ring, segments, direction):
+        tail_obj.name = base_name + " Tail"
+        tail_obj.data.name = tail_obj.name
+        tail_obj["hair_pipe_tail_source_curve"] = curve_obj.name
+        store_tail_connection_state(tail_obj, last_ring, direction)
+        tail_obj.display_type = 'WIRE'
+        tail_obj.show_in_front = True
+        tail_obj.hide_render = True
+        parent_keep_world(tail_obj, root_obj)
+        return tail_obj
+
+    verts, faces = create_tail_mesh_geometry(last_ring, direction)
+    if tail_obj is None:
+        mesh = bpy.data.meshes.new(base_name + " Tail")
+        tail_obj = bpy.data.objects.new(base_name + " Tail", mesh)
+        target_collection = curve_obj.users_collection[0] if curve_obj.users_collection else bpy.context.scene.collection
+        target_collection.objects.link(tail_obj)
+    else:
+        mesh = tail_obj.data
+    mesh.clear_geometry()
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    shade_mesh_smooth(mesh)
+    tail_obj.name = base_name + " Tail"
+    tail_obj.data.name = tail_obj.name
+    tail_obj["hair_pipe_tail_source_curve"] = curve_obj.name
+    tail_obj["hair_pipe_tail_ring_count"] = segments
+    store_tail_connection_state(tail_obj, last_ring, direction)
+    tail_obj.display_type = 'WIRE'
+    tail_obj.show_in_front = True
+    tail_obj.hide_render = True
+    parent_keep_world(tail_obj, root_obj)
+    return tail_obj
 
 
 def configure_pipe_object(pipe_obj, curve_obj):
@@ -1243,6 +1688,8 @@ class HAIRPIPE_OT_generate_pipe(bpy.types.Operator):
             for poly in mesh.polygons:
                 poly.use_smooth = True
         configure_pipe_object(pipe_obj, curve_obj)
+        tail_obj = update_tail_mesh_for_curve(curve_obj, settings, verts)
+        ensure_tail_modifier_stack(pipe_obj, tail_obj)
         self.report({'INFO'}, f"Generated pipe with {len(verts)} vertices")
         return {'FINISHED'}
 
