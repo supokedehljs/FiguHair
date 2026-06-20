@@ -42,6 +42,50 @@ class HairPipeWidgetSettings(PropertyGroup):
     flip_button_x1: FloatProperty(default=0.0)
     flip_button_y1: FloatProperty(default=0.0)
     flip_horizontal: BoolProperty(default=False)
+    selected_verts: bpy.props.StringProperty(default="")
+    box_select_active: BoolProperty(default=False)
+    box_x0: FloatProperty(default=0.0)
+    box_y0: FloatProperty(default=0.0)
+    box_x1: FloatProperty(default=0.0)
+    box_y1: FloatProperty(default=0.0)
+    transform_mode: bpy.props.StringProperty(default="")
+    transform_start_x: FloatProperty(default=0.0)
+    transform_start_y: FloatProperty(default=0.0)
+    transform_initial_offsets: bpy.props.StringProperty(default="")
+
+
+
+def get_selected_widget_verts(wd):
+    raw = wd.selected_verts.strip()
+    if not raw:
+        return set()
+    return set(int(x) for x in raw.split(",") if x.strip().isdigit())
+
+
+def set_selected_widget_verts(wd, indices):
+    wd.selected_verts = ",".join(str(i) for i in sorted(indices))
+
+
+def store_transform_offsets(wd, verts, indices):
+    parts = []
+    for i in indices:
+        if i < len(verts):
+            parts.append(str(verts[i].offset_x) + ":" + str(verts[i].offset_y))
+        else:
+            parts.append("0:0")
+    wd.transform_initial_offsets = ";".join(parts)
+
+
+def get_transform_offsets(wd):
+    raw = wd.transform_initial_offsets.strip()
+    if not raw:
+        return []
+    result = []
+    for part in raw.split(";"):
+        xy = part.split(":")
+        if len(xy) == 2:
+            result.append((float(xy[0]), float(xy[1])))
+    return result
 
 
 def get_curve_start_world_position(obj):
@@ -303,6 +347,37 @@ def draw_widget_callback():
             shader.uniform_float("color", (0.55, 0.75, 1.0, 0.95))
         else:
             shader.uniform_float("color", (0.0, 0.95, 1.0, 1.0))
+        batch.draw(shader)
+
+    sel_indices = get_selected_widget_verts(wd)
+    if sel_indices:
+        sel_pts = []
+        for si in sel_indices:
+            if 0 <= si < n:
+                sx, sy = get_effective_offset(verts[si], curve_point, ps)
+                sel_pts.append(effective_to_widget(sx, sy, cx, cy, sf, alignment_angle, flip_h))
+        if sel_pts:
+            gpu.state.point_size_set(22.0)
+            batch = batch_for_shader(shader, 'POINTS', {"pos": sel_pts})
+            shader.bind()
+            shader.uniform_float("color", (1.0, 0.5, 0.0, 0.7))
+            batch.draw(shader)
+
+    if wd.box_select_active:
+        bx0r = min(wd.box_x0, wd.box_x1)
+        by0r = min(wd.box_y0, wd.box_y1)
+        bx1r = max(wd.box_x0, wd.box_x1)
+        by1r = max(wd.box_y0, wd.box_y1)
+        box_lines = [
+            (bx0r, by0r), (bx1r, by0r),
+            (bx1r, by0r), (bx1r, by1r),
+            (bx1r, by1r), (bx0r, by1r),
+            (bx0r, by1r), (bx0r, by0r),
+        ]
+        gpu.state.line_width_set(1.5)
+        batch = batch_for_shader(shader, 'LINES', {"pos": box_lines})
+        shader.bind()
+        shader.uniform_float("color", (1.0, 1.0, 1.0, 0.8))
         batch.draw(shader)
 
     button_w = 110.0
@@ -1109,6 +1184,15 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         )
         if closest_idx >= 0:
             ps.active_vert_index = closest_idx
+            if event.shift:
+                sel = get_selected_widget_verts(wd)
+                if closest_idx in sel:
+                    sel.discard(closest_idx)
+                else:
+                    sel.add(closest_idx)
+                set_selected_widget_verts(wd, sel)
+            else:
+                set_selected_widget_verts(wd, {closest_idx})
             if getattr(verts[closest_idx], 'is_ghost', False):
                 wd.drag_vert_index = -1
             else:
@@ -1145,6 +1229,130 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         return {'FINISHED'}
 
     if (inside_widget or inside_controls) and event.type in {'LEFTMOUSE', 'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
+        return {'RUNNING_MODAL'}
+
+    # B - Box Select
+    if event.type == 'B' and event.value == 'PRESS' and inside_widget and not wd.transform_mode:
+        wd.box_select_active = True
+        wd.box_x0 = mx
+        wd.box_y0 = my
+        wd.box_x1 = mx
+        wd.box_y1 = my
+        redraw_view3d(context)
+        return {'RUNNING_MODAL'}
+
+    if wd.box_select_active:
+        if event.type == 'MOUSEMOVE':
+            wd.box_x1 = mx
+            wd.box_y1 = my
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            bx0 = min(wd.box_x0, wd.box_x1)
+            by0 = min(wd.box_y0, wd.box_y1)
+            bx1 = max(wd.box_x0, wd.box_x1)
+            by1 = max(wd.box_y0, wd.box_y1)
+            selected = set()
+            for i, v in enumerate(verts):
+                ox, oy = get_effective_offset(v, curve_point, ps)
+                px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
+                if bx0 <= px <= bx1 and by0 <= py <= by1:
+                    selected.add(i)
+            if event.shift:
+                selected = selected | get_selected_widget_verts(wd)
+            set_selected_widget_verts(wd, selected)
+            wd.box_select_active = False
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.type in {'RIGHTMOUSE', 'ESC'}:
+            wd.box_select_active = False
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        return {'RUNNING_MODAL'}
+
+    # G - Grab selected
+    if event.type == 'G' and event.value == 'PRESS' and not wd.transform_mode:
+        sel = get_selected_widget_verts(wd)
+        if not sel and 0 <= ps.active_vert_index < len(verts):
+            sel = {ps.active_vert_index}
+            set_selected_widget_verts(wd, sel)
+        if sel:
+            wd.transform_mode = "GRAB"
+            wd.transform_start_x = mx
+            wd.transform_start_y = my
+            store_transform_offsets(wd, verts, sorted(sel))
+            return {'RUNNING_MODAL'}
+
+    # R - Rotate selected
+    if event.type == 'R' and event.value == 'PRESS' and not wd.transform_mode:
+        sel = get_selected_widget_verts(wd)
+        if not sel and 0 <= ps.active_vert_index < len(verts):
+            sel = {ps.active_vert_index}
+            set_selected_widget_verts(wd, sel)
+        if sel:
+            wd.transform_mode = "ROTATE"
+            wd.transform_start_x = mx
+            wd.transform_start_y = my
+            store_transform_offsets(wd, verts, sorted(sel))
+            return {'RUNNING_MODAL'}
+
+    # Transform in progress
+    if wd.transform_mode:
+        sel = sorted(get_selected_widget_verts(wd))
+        initial = get_transform_offsets(wd)
+        if event.type == 'MOUSEMOVE':
+            if wd.transform_mode == "GRAB":
+                dx_w = mx - wd.transform_start_x
+                dy_w = my - wd.transform_start_y
+                dx_e, dy_e = widget_to_effective(cx + dx_w, cy + dy_w, cx, cy, sf, alignment_angle, flip_h)
+                for ip, vi in enumerate(sel):
+                    if vi < len(verts) and ip < len(initial) and not getattr(verts[vi], 'is_ghost', False):
+                        verts[vi].offset_x = initial[ip][0] + dx_e
+                        verts[vi].offset_y = initial[ip][1] + dy_e
+            elif wd.transform_mode == "ROTATE":
+                a_start = math.atan2(wd.transform_start_y - cy, wd.transform_start_x - cx)
+                a_now = math.atan2(my - cy, mx - cx)
+                angle = a_now - a_start
+                cos_a = math.cos(angle)
+                sin_a = math.sin(angle)
+                cnt = max(1, len(initial))
+                ctr_x = sum(o[0] for o in initial) / cnt
+                ctr_y = sum(o[1] for o in initial) / cnt
+                for ip, vi in enumerate(sel):
+                    if vi < len(verts) and ip < len(initial) and not getattr(verts[vi], 'is_ghost', False):
+                        rx = initial[ip][0] - ctr_x
+                        ry = initial[ip][1] - ctr_y
+                        verts[vi].offset_x = ctr_x + rx * cos_a - ry * sin_a
+                        verts[vi].offset_y = ctr_y + rx * sin_a + ry * cos_a
+            update_ghost_vertices(ps)
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            wd.transform_mode = ""
+            for vi in sel:
+                if vi < len(verts):
+                    apply_active_vertex_edit_to_selected_points(context, ps, vi)
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.type in {'RIGHTMOUSE', 'ESC'}:
+            for ip, vi in enumerate(sel):
+                if vi < len(verts) and ip < len(initial):
+                    verts[vi].offset_x = initial[ip][0]
+                    verts[vi].offset_y = initial[ip][1]
+            wd.transform_mode = ""
+            update_ghost_vertices(ps)
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        return {'RUNNING_MODAL'}
+
+    # A - Select All / Deselect All
+    if event.type == 'A' and event.value == 'PRESS' and inside_widget:
+        sel = get_selected_widget_verts(wd)
+        if len(sel) == len(verts):
+            set_selected_widget_verts(wd, set())
+        else:
+            set_selected_widget_verts(wd, set(range(len(verts))))
+        redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
     return {'PASS_THROUGH'}
