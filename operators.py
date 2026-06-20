@@ -1788,7 +1788,12 @@ def configure_pipe_object(pipe_obj, curve_obj):
 
     pipe_obj.show_in_front = False
     pipe_obj.hide_select = False
-    ensure_pipe_subdivision_modifier(pipe_obj)
+    if curve_obj.hair_pipe_settings.default_subdiv:
+        ensure_pipe_subdivision_modifier(pipe_obj)
+    else:
+        existing = pipe_obj.modifiers.get("FiguHair Catmull-Clark")
+        if existing is not None:
+            pipe_obj.modifiers.remove(existing)
     pipe_obj.select_set(False)
 
 

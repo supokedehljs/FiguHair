@@ -97,6 +97,139 @@ def get_rotate_offsets(wd):
     return result
 
 
+
+def get_neighbor_point_indices(settings):
+    """Return (prev_idx, current_idx, next_idx) for point settings."""
+    current = settings.active_point_index
+    total = len(settings.point_settings)
+    if total <= 1:
+        return -1, current, -1
+    prev_idx = current - 1 if current > 0 else -1
+    next_idx = current + 1 if current < total - 1 else -1
+    return prev_idx, current, next_idx
+
+
+def get_curve_point_by_index(context, idx):
+    """Get curve point by global index."""
+    obj = context.active_object
+    if obj is None or obj.type != 'CURVE':
+        return None
+    global_idx = 0
+    for spline in obj.data.splines:
+        points = spline.bezier_points if spline.type == 'BEZIER' else spline.points
+        for point in points:
+            if global_idx == idx:
+                return point
+            global_idx += 1
+    return None
+
+
+def draw_single_cross_section(shader, verts, ps, curve_point, settings,
+                               panel_cx, panel_cy, panel_sf, alignment_angle,
+                               flip_h, panel_half, is_active, wd=None):
+    """Draw one cross-section panel at given center with given scale."""
+    n = len(verts)
+    if n < 3:
+        return
+
+    alpha_mult = 1.0 if is_active else 0.5
+
+    gpu.state.line_width_set(1.0)
+    grid = [(panel_cx - panel_half, panel_cy), (panel_cx + panel_half, panel_cy),
+            (panel_cx, panel_cy - panel_half), (panel_cx, panel_cy + panel_half)]
+    batch = batch_for_shader(shader, 'LINES', {"pos": grid})
+    shader.bind()
+    shader.uniform_float("color", (0.35, 0.35, 0.35, 0.4 * alpha_mult))
+    batch.draw(shader)
+
+    ref_r = settings.default_radius * get_cross_section_effective_scale(curve_point, ps) * panel_sf
+    circ = []
+    for i in range(64):
+        a0 = 2 * math.pi * i / 64
+        a1 = 2 * math.pi * ((i + 1) % 64) / 64
+        circ.append((panel_cx + math.cos(a0) * ref_r, panel_cy + math.sin(a0) * ref_r))
+        circ.append((panel_cx + math.cos(a1) * ref_r, panel_cy + math.sin(a1) * ref_r))
+    batch = batch_for_shader(shader, 'LINES', {"pos": circ})
+    shader.bind()
+    shader.uniform_float("color", (0.45, 0.45, 0.2, 0.35 * alpha_mult))
+    batch.draw(shader)
+
+    outline = []
+    for i in range(n):
+        j = (i + 1) % n
+        ix, iy = get_effective_offset(verts[i], curve_point, ps)
+        jx, jy = get_effective_offset(verts[j], curve_point, ps)
+        outline.append(effective_to_widget(ix, iy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h))
+        outline.append(effective_to_widget(jx, jy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h))
+    gpu.state.line_width_set(2.0 if is_active else 1.5)
+    batch = batch_for_shader(shader, 'LINES', {"pos": outline})
+    shader.bind()
+    shader.uniform_float("color", (1.0, 0.8, 0.05, 1.0 * alpha_mult))
+    batch.draw(shader)
+
+    effective_points = [get_effective_offset(v, curve_point, ps) for v in verts]
+    smooth_effective = chaikin_closed(effective_points, 3)
+    smooth_widget_points = [effective_to_widget(x, y, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h) for x, y in smooth_effective]
+    smooth_lines = make_smooth_preview_lines(smooth_widget_points)
+    if smooth_lines:
+        gpu.state.line_width_set(1.5 if is_active else 1.0)
+        batch = batch_for_shader(shader, 'LINES', {"pos": smooth_lines})
+        shader.bind()
+        shader.uniform_float("color", (0.0, 0.95, 1.0, 0.8 * alpha_mult))
+        batch.draw(shader)
+
+    normal_pts = []
+    ghost_pts = []
+    for v in verts:
+        ox, oy = get_effective_offset(v, curve_point, ps)
+        point = effective_to_widget(ox, oy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h)
+        if getattr(v, 'is_ghost', False):
+            ghost_pts.append(point)
+        else:
+            normal_pts.append(point)
+    if ghost_pts:
+        gpu.state.point_size_set(8.0 if is_active else 6.0)
+        batch = batch_for_shader(shader, 'POINTS', {"pos": ghost_pts})
+        shader.bind()
+        shader.uniform_float("color", (0.45, 0.65, 1.0, 0.45 * alpha_mult))
+        batch.draw(shader)
+    if normal_pts:
+        gpu.state.point_size_set(10.0 if is_active else 7.0)
+        batch = batch_for_shader(shader, 'POINTS', {"pos": normal_pts})
+        shader.bind()
+        shader.uniform_float("color", (1.0, 1.0, 1.0, 0.9 * alpha_mult))
+        batch.draw(shader)
+
+    if is_active:
+        aidx = ps.active_vert_index
+        if 0 <= aidx < n:
+            gpu.state.point_size_set(18.0)
+            ax, ay = get_effective_offset(verts[aidx], curve_point, ps)
+            ap = [effective_to_widget(ax, ay, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h)]
+            batch = batch_for_shader(shader, 'POINTS', {"pos": ap})
+            shader.bind()
+            if getattr(verts[aidx], 'is_ghost', False):
+                shader.uniform_float("color", (0.55, 0.75, 1.0, 0.95))
+            else:
+                shader.uniform_float("color", (0.0, 0.95, 1.0, 1.0))
+            batch.draw(shader)
+
+        if wd is not None:
+            sel_indices = get_selected_widget_verts(wd)
+            if sel_indices:
+                sel_pts = []
+                for si in sel_indices:
+                    if 0 <= si < n:
+                        sx, sy = get_effective_offset(verts[si], curve_point, ps)
+                        sel_pts.append(effective_to_widget(sx, sy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h))
+                if sel_pts:
+                    gpu.state.point_size_set(22.0)
+                    batch = batch_for_shader(shader, 'POINTS', {"pos": sel_pts})
+                    shader.bind()
+                    shader.uniform_float("color", (1.0, 0.5, 0.0, 0.7))
+                    batch.draw(shader)
+
+
 def get_curve_start_world_position(obj):
     if obj is None or obj.type != 'CURVE':
         return None
@@ -213,7 +346,7 @@ def draw_widget_button(shader, x0, y0, x1, y1, fill_color=None, enabled=True, ac
 
 
 def draw_widget_callback():
-    """Draw the cross-section widget overlay in 3D viewport"""
+    """Draw the cross-section widget overlay with 3 panels (prev, current, next)."""
     try:
         context = bpy.context
     except Exception:
@@ -277,137 +410,72 @@ def draw_widget_callback():
     shader.uniform_float("color", (0.0, 0.0, 0.0, 0.42))
     batch.draw(shader)
 
+    prev_idx, current_idx, next_idx = get_neighbor_point_indices(settings)
+
+    side_scale = 0.55
+    side_half = half * side_scale
+    side_sf = sf * side_scale
+    side_offset_x = half + side_half + 40
+
+    if prev_idx >= 0:
+        prev_ps = settings.point_settings[prev_idx]
+        update_ghost_vertices(prev_ps)
+        prev_cp = get_curve_point_by_index(context, prev_idx)
+        prev_verts = prev_ps.cross_section_verts
+        left_cx = cx - side_offset_x
+        left_cy = cy
+        draw_single_cross_section(shader, prev_verts, prev_ps, prev_cp, settings,
+                                   left_cx, left_cy, side_sf, alignment_angle,
+                                   flip_h, side_half, False)
+        font_id = 0
+        blf.size(font_id, 13)
+        blf.color(font_id, 0.7, 0.7, 0.7, 0.8)
+        blf.position(font_id, left_cx - 20, left_cy + side_half + 8, 0)
+        blf.draw(font_id, str(prev_idx))
+
+    if next_idx >= 0:
+        next_ps = settings.point_settings[next_idx]
+        update_ghost_vertices(next_ps)
+        next_cp = get_curve_point_by_index(context, next_idx)
+        next_verts = next_ps.cross_section_verts
+        right_cx = cx + side_offset_x
+        right_cy = cy
+        draw_single_cross_section(shader, next_verts, next_ps, next_cp, settings,
+                                   right_cx, right_cy, side_sf, alignment_angle,
+                                   flip_h, side_half, False)
+        font_id = 0
+        blf.size(font_id, 13)
+        blf.color(font_id, 0.7, 0.7, 0.7, 0.8)
+        blf.position(font_id, right_cx - 20, right_cy + side_half + 8, 0)
+        blf.draw(font_id, str(next_idx))
+
+    draw_single_cross_section(shader, verts, ps, curve_point, settings,
+                               cx, cy, sf, alignment_angle, flip_h, half, True, wd)
+
+    font_id = 0
+    blf.size(font_id, 14)
+    blf.color(font_id, 1.0, 0.9, 0.3, 0.9)
+    blf.position(font_id, cx - 20, cy + half + 8, 0)
+    blf.draw(font_id, str(current_idx))
+
+    if wd.box_select_active:
+        bx0r = min(wd.box_x0, wd.box_x1)
+        by0r = min(wd.box_y0, wd.box_y1)
+        bx1r = max(wd.box_x0, wd.box_x1)
+        by1r = max(wd.box_y0, wd.box_y1)
+        box_lines = [
+            (bx0r, by0r), (bx1r, by0r),
+            (bx1r, by0r), (bx1r, by1r),
+            (bx1r, by1r), (bx0r, by1r),
+            (bx0r, by1r), (bx0r, by0r),
+        ]
+        gpu.state.line_width_set(1.5)
+        batch = batch_for_shader(shader, 'LINES', {"pos": box_lines})
+        shader.bind()
+        shader.uniform_float("color", (1.0, 1.0, 1.0, 0.8))
+        batch.draw(shader)
+
     x0, y0 = cx - half - padding, cy - half - padding
-    x1, y1 = cx + half + padding, cy + half + padding
-
-    gpu.state.line_width_set(1.0)
-    grid = [(cx - half, cy), (cx + half, cy), (cx, cy - half), (cx, cy + half)]
-    batch = batch_for_shader(shader, 'LINES', {"pos": grid})
-    shader.bind()
-    shader.uniform_float("color", (0.35, 0.35, 0.35, 0.55))
-    batch.draw(shader)
-
-    ref_r = settings.default_radius * get_cross_section_effective_scale(curve_point, ps) * sf
-    circ = []
-    for i in range(64):
-        a0 = 2 * math.pi * i / 64
-        a1 = 2 * math.pi * ((i + 1) % 64) / 64
-        circ.append((cx + math.cos(a0) * ref_r, cy + math.sin(a0) * ref_r))
-        circ.append((cx + math.cos(a1) * ref_r, cy + math.sin(a1) * ref_r))
-    batch = batch_for_shader(shader, 'LINES', {"pos": circ})
-    shader.bind()
-    shader.uniform_float("color", (0.45, 0.45, 0.2, 0.45))
-    batch.draw(shader)
-
-    outline = []
-    for i in range(n):
-        j = (i + 1) % n
-        ix, iy = get_effective_offset(verts[i], curve_point, ps)
-        jx, jy = get_effective_offset(verts[j], curve_point, ps)
-        outline.append(effective_to_widget(ix, iy, cx, cy, sf, alignment_angle, flip_h))
-        outline.append(effective_to_widget(jx, jy, cx, cy, sf, alignment_angle, flip_h))
-    gpu.state.line_width_set(2.5)
-    batch = batch_for_shader(shader, 'LINES', {"pos": outline})
-    shader.bind()
-    shader.uniform_float("color", (1.0, 0.8, 0.05, 1.0))
-    batch.draw(shader)
-
-    effective_points = [get_effective_offset(v, curve_point, ps) for v in verts]
-    smooth_effective = chaikin_closed(effective_points, 3)
-    smooth_widget_points = [effective_to_widget(x, y, cx, cy, sf, alignment_angle, flip_h) for x, y in smooth_effective]
-    smooth_lines = make_smooth_preview_lines(smooth_widget_points)
-    if smooth_lines:
-        gpu.state.line_width_set(2.0)
-        batch = batch_for_shader(shader, 'LINES', {"pos": smooth_lines})
-        shader.bind()
-        shader.uniform_float("color", (0.0, 0.95, 1.0, 0.9))
-        batch.draw(shader)
-
-    normal_pts = []
-    ghost_pts = []
-    for v in verts:
-        ox, oy = get_effective_offset(v, curve_point, ps)
-        point = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
-        if getattr(v, 'is_ghost', False):
-            ghost_pts.append(point)
-        else:
-            normal_pts.append(point)
-    if ghost_pts:
-        gpu.state.point_size_set(10.0)
-        batch = batch_for_shader(shader, 'POINTS', {"pos": ghost_pts})
-        shader.bind()
-        shader.uniform_float("color", (0.45, 0.65, 1.0, 0.55))
-        batch.draw(shader)
-    if normal_pts:
-        gpu.state.point_size_set(12.0)
-        batch = batch_for_shader(shader, 'POINTS', {"pos": normal_pts})
-        shader.bind()
-        shader.uniform_float("color", (1.0, 1.0, 1.0, 1.0))
-        batch.draw(shader)
-
-    aidx = ps.active_vert_index
-    if 0 <= aidx < n:
-        gpu.state.point_size_set(18.0)
-        ax, ay = get_effective_offset(verts[aidx], curve_point, ps)
-        ap = [effective_to_widget(ax, ay, cx, cy, sf, alignment_angle, flip_h)]
-        batch = batch_for_shader(shader, 'POINTS', {"pos": ap})
-        shader.bind()
-        if getattr(verts[aidx], 'is_ghost', False):
-            shader.uniform_float("color", (0.55, 0.75, 1.0, 0.95))
-        else:
-            shader.uniform_float("color", (0.0, 0.95, 1.0, 1.0))
-        batch.draw(shader)
-
-    sel_indices = get_selected_widget_verts(wd)
-    if sel_indices:
-        sel_pts = []
-        for si in sel_indices:
-            if 0 <= si < n:
-                sx, sy = get_effective_offset(verts[si], curve_point, ps)
-                sel_pts.append(effective_to_widget(sx, sy, cx, cy, sf, alignment_angle, flip_h))
-        if sel_pts:
-            gpu.state.point_size_set(22.0)
-            batch = batch_for_shader(shader, 'POINTS', {"pos": sel_pts})
-            shader.bind()
-            shader.uniform_float("color", (1.0, 0.5, 0.0, 0.7))
-            batch.draw(shader)
-
-    if wd.box_select_active:
-        bx0r = min(wd.box_x0, wd.box_x1)
-        by0r = min(wd.box_y0, wd.box_y1)
-        bx1r = max(wd.box_x0, wd.box_x1)
-        by1r = max(wd.box_y0, wd.box_y1)
-        box_lines = [
-            (bx0r, by0r), (bx1r, by0r),
-            (bx1r, by0r), (bx1r, by1r),
-            (bx1r, by1r), (bx0r, by1r),
-            (bx0r, by1r), (bx0r, by0r),
-        ]
-        gpu.state.line_width_set(1.5)
-        batch = batch_for_shader(shader, 'LINES', {"pos": box_lines})
-        shader.bind()
-        shader.uniform_float("color", (1.0, 1.0, 1.0, 0.8))
-        batch.draw(shader)
-
-    if wd.box_select_active:
-        bx0r = min(wd.box_x0, wd.box_x1)
-        by0r = min(wd.box_y0, wd.box_y1)
-        bx1r = max(wd.box_x0, wd.box_x1)
-        by1r = max(wd.box_y0, wd.box_y1)
-        box_lines = [
-            (bx0r, by0r), (bx1r, by0r),
-            (bx1r, by0r), (bx1r, by1r),
-            (bx1r, by1r), (bx0r, by1r),
-            (bx0r, by1r), (bx0r, by0r),
-        ]
-        gpu.state.line_width_set(1.5)
-        batch = batch_for_shader(shader, 'LINES', {"pos": box_lines})
-        shader.bind()
-        shader.uniform_float("color", (1.0, 1.0, 1.0, 0.8))
-        batch.draw(shader)
-
-
-
     button_w = 110.0
     button_h = 36.0
     gap = 10.0
@@ -445,7 +513,7 @@ def draw_widget_callback():
     wd.rotate_button_x1 = rot_x1
     wd.rotate_button_y1 = by1
 
-    can_remove = all(len(point_setting.cross_section_verts) > 3 for point_setting in settings.point_settings)
+    can_remove = all(len(pset.cross_section_verts) > 3 for pset in settings.point_settings)
     active_is_ghost = 0 <= ps.active_vert_index < n and getattr(verts[ps.active_vert_index], 'is_ghost', False)
     draw_widget_button(shader, add_x0, by0, add_x1, by1, (0.08, 0.42, 0.28, 0.96))
     draw_widget_button(shader, rem_x0, by0, rem_x1, by1, (0.52, 0.16, 0.14, 0.96) if can_remove else (0.16, 0.16, 0.16, 0.86), can_remove)
@@ -455,26 +523,27 @@ def draw_widget_callback():
     draw_widget_button(shader, rot_x0, by0, rot_x1, by1, (0.38, 0.18, 0.52, 0.96) if has_sel else (0.18, 0.16, 0.20, 0.96), has_sel, wd.rotate_active)
 
     font_id = 0
-    blf.size(font_id, 16)
-    blf.color(font_id, 0.88, 0.94, 1.0, 0.95)
-    blf.position(font_id, 18.0, 24.0, 0)
-    blf.draw(font_id, "青色线：细分预览｜蓝色点：幽灵点｜中键点击边：插入新点")
     blf.size(font_id, 15)
     blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
     blf.position(font_id, add_x0 + 39.0, by0 + 11.0, 0)
-    blf.draw(font_id, "添加")
+    blf.draw(font_id, "\u6dfb\u52a0")
     blf.color(font_id, 1.0, 1.0, 1.0, 1.0 if can_remove else 0.38)
     blf.position(font_id, rem_x0 + 39.0, by0 + 11.0, 0)
-    blf.draw(font_id, "删除")
+    blf.draw(font_id, "\u5220\u9664")
     blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
     blf.position(font_id, tog_x0 + 31.0, by0 + 11.0, 0)
-    blf.draw(font_id, "幽灵点")
+    blf.draw(font_id, "\u5e7d\u7075\u70b9")
     blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
     blf.position(font_id, flip_x0 + 23.0, by0 + 11.0, 0)
-    blf.draw(font_id, "水平翻转")
+    blf.draw(font_id, "\u6c34\u5e73\u7ffb\u8f6c")
     blf.color(font_id, 1.0, 1.0, 1.0, 1.0 if has_sel else 0.38)
     blf.position(font_id, rot_x0 + 39.0, by0 + 11.0, 0)
-    blf.draw(font_id, "旋转")
+    blf.draw(font_id, "\u65cb\u8f6c")
+
+    blf.size(font_id, 13)
+    blf.color(font_id, 0.7, 0.8, 0.9, 0.7)
+    blf.position(font_id, 18.0, 24.0, 0)
+    blf.draw(font_id, "\u5de6\u53f3\u4fa7:\u76f8\u90bb\u622a\u9762 | \u70b9\u51fb\u4fa7\u9762\u53ef\u5207\u6362\u7f16\u8f91")
 
     gpu.state.line_width_set(1.0)
     gpu.state.point_size_set(1.0)
@@ -1368,6 +1437,25 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 wd.drag_vert_index = -1
             else:
                 wd.drag_vert_index = closest_idx
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+
+        prev_idx, current_idx, next_idx = get_neighbor_point_indices(settings)
+        side_scale = 0.55
+        side_half_size = half * side_scale
+        side_offset_x = half + side_half_size + 40
+        left_cx = cx - side_offset_x
+        right_cx = cx + side_offset_x
+        clicked_side = None
+        if prev_idx >= 0 and abs(mx - left_cx) <= side_half_size and abs(my - cy) <= side_half_size:
+            clicked_side = prev_idx
+        elif next_idx >= 0 and abs(mx - right_cx) <= side_half_size and abs(my - cy) <= side_half_size:
+            clicked_side = next_idx
+        if clicked_side is not None:
+            settings.active_point_index = clicked_side
+            wd.drag_vert_index = -1
+            wd.widget_scale_factor = 0.0
+            set_selected_widget_verts(wd, set())
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
 

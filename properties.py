@@ -154,6 +154,11 @@ class HairPipeSettings(PropertyGroup):
         description="Close the ends of the pipe",
         default=False,
     )
+    default_subdiv: BoolProperty(
+        name="Default Subdivision",
+        description="Add a level 2 subdivision surface modifier when creating the pipe mesh",
+        default=True,
+    )
     redirect_selection: BoolProperty(
         name="Select Curve From Preview",
         description="Selecting the generated preview mesh automatically selects this source curve",
