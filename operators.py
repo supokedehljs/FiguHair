@@ -1507,6 +1507,69 @@ def make_tail_bridge_faces(new_segments, old_segments, old_ring=None, new_ring=N
     return [tuple(face) for face in faces if len(set(face)) >= 3]
 
 
+def remap_index_after_connection_change(index, old_segments, new_segments, inserted_index=None):
+    if index >= old_segments:
+        return index - old_segments + new_segments
+    if inserted_index is None:
+        return index
+    return index if index < inserted_index else index + 1
+
+
+def split_face_for_inserted_connection_point(face, before_new, after_new, inserted_index):
+    count = len(face)
+    if count < 3:
+        return []
+    for i, current in enumerate(face):
+        nxt = face[(i + 1) % count]
+        if current == before_new and nxt == after_new:
+            expanded = list(face)
+            expanded.insert(i + 1, inserted_index)
+            if len(face) == 4:
+                lower_a = face[(i - 1) % count]
+                lower_b = face[(i + 2) % count]
+                return [
+                    (before_new, inserted_index, lower_a),
+                    (inserted_index, after_new, lower_b, lower_a),
+                ]
+            return [tuple(expanded)]
+        if current == after_new and nxt == before_new:
+            expanded = list(face)
+            expanded.insert(i + 1, inserted_index)
+            if len(face) == 4:
+                lower_a = face[(i - 1) % count]
+                lower_b = face[(i + 2) % count]
+                return [
+                    (after_new, inserted_index, lower_a),
+                    (inserted_index, before_new, lower_b, lower_a),
+                ]
+            return [tuple(expanded)]
+    return [tuple(face)]
+
+
+def remap_bridge_faces_for_single_insert(old_faces, old_segments, new_segments, old_ring, new_ring):
+    inserted_index = infer_inserted_ring_index(old_ring, new_ring)
+    before_old = (inserted_index - 1) % old_segments
+    after_old = before_old + 1
+    if after_old >= old_segments:
+        after_old = 0
+    before_new = remap_index_after_connection_change(before_old, old_segments, new_segments, inserted_index)
+    after_new = remap_index_after_connection_change(after_old, old_segments, new_segments, inserted_index)
+
+    faces = []
+    for old_face in old_faces:
+        remapped = []
+        has_connection_vertex = False
+        for index in old_face:
+            if index < old_segments:
+                has_connection_vertex = True
+            remapped.append(remap_index_after_connection_change(index, old_segments, new_segments, inserted_index))
+        if has_connection_vertex:
+            faces.extend(split_face_for_inserted_connection_point(remapped, before_new, after_new, inserted_index))
+        else:
+            faces.append(tuple(remapped))
+    return [tuple(face) for face in faces if len(set(face)) >= 3]
+
+
 def face_uses_first_ring(face, old_segments):
     return any(index < old_segments for index in face)
 
@@ -1557,14 +1620,18 @@ def retopologize_tail_connection(tail_obj, last_ring, old_segments, new_segments
     if len(preserved_vertices) < lower_segments:
         return False
     old_faces = [tuple(poly.vertices) for poly in mesh.polygons]
-    preserved_faces = []
-    for face in old_faces:
-        remapped = remap_tail_face_after_connection_change(face, old_segments, new_segments)
-        if remapped is not None:
-            preserved_faces.append(remapped)
     new_verts = [Vector(v) for v in last_ring] + preserved_vertices
-    bridge_faces = make_tail_bridge_faces(new_segments, lower_segments)
-    rebuild_mesh_safely(mesh, new_verts, bridge_faces + preserved_faces)
+    if new_segments == old_segments + 1:
+        new_faces = remap_bridge_faces_for_single_insert(old_faces, old_segments, new_segments, old_ring, last_ring)
+    else:
+        preserved_faces = []
+        for face in old_faces:
+            remapped = remap_tail_face_after_connection_change(face, old_segments, new_segments)
+            if remapped is not None:
+                preserved_faces.append(remapped)
+        bridge_faces = make_tail_bridge_faces(new_segments, lower_segments)
+        new_faces = bridge_faces + preserved_faces
+    rebuild_mesh_safely(mesh, new_verts, new_faces)
     tail_obj["hair_pipe_tail_lower_ring_count"] = lower_segments
     return True
 
