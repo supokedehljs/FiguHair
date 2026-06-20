@@ -48,10 +48,19 @@ class HairPipeWidgetSettings(PropertyGroup):
     box_y0: FloatProperty(default=0.0)
     box_x1: FloatProperty(default=0.0)
     box_y1: FloatProperty(default=0.0)
-    transform_mode: bpy.props.StringProperty(default="")
-    transform_start_x: FloatProperty(default=0.0)
-    transform_start_y: FloatProperty(default=0.0)
-    transform_initial_offsets: bpy.props.StringProperty(default="")
+    box_select_active: BoolProperty(default=False)
+    box_x0: FloatProperty(default=0.0)
+    box_y0: FloatProperty(default=0.0)
+    box_x1: FloatProperty(default=0.0)
+    box_y1: FloatProperty(default=0.0)
+    rotate_active: BoolProperty(default=False)
+    rotate_start_x: FloatProperty(default=0.0)
+    rotate_start_y: FloatProperty(default=0.0)
+    rotate_initial_offsets: bpy.props.StringProperty(default="")
+    rotate_button_x0: FloatProperty(default=0.0)
+    rotate_button_y0: FloatProperty(default=0.0)
+    rotate_button_x1: FloatProperty(default=0.0)
+    rotate_button_y1: FloatProperty(default=0.0)
 
 
 
@@ -66,18 +75,18 @@ def set_selected_widget_verts(wd, indices):
     wd.selected_verts = ",".join(str(i) for i in sorted(indices))
 
 
-def store_transform_offsets(wd, verts, indices):
+def store_rotate_offsets(wd, verts, indices):
     parts = []
     for i in indices:
         if i < len(verts):
             parts.append(str(verts[i].offset_x) + ":" + str(verts[i].offset_y))
         else:
             parts.append("0:0")
-    wd.transform_initial_offsets = ";".join(parts)
+    wd.rotate_initial_offsets = ";".join(parts)
 
 
-def get_transform_offsets(wd):
-    raw = wd.transform_initial_offsets.strip()
+def get_rotate_offsets(wd):
+    raw = wd.rotate_initial_offsets.strip()
     if not raw:
         return []
     result = []
@@ -380,12 +389,31 @@ def draw_widget_callback():
         shader.uniform_float("color", (1.0, 1.0, 1.0, 0.8))
         batch.draw(shader)
 
+    if wd.box_select_active:
+        bx0r = min(wd.box_x0, wd.box_x1)
+        by0r = min(wd.box_y0, wd.box_y1)
+        bx1r = max(wd.box_x0, wd.box_x1)
+        by1r = max(wd.box_y0, wd.box_y1)
+        box_lines = [
+            (bx0r, by0r), (bx1r, by0r),
+            (bx1r, by0r), (bx1r, by1r),
+            (bx1r, by1r), (bx0r, by1r),
+            (bx0r, by1r), (bx0r, by0r),
+        ]
+        gpu.state.line_width_set(1.5)
+        batch = batch_for_shader(shader, 'LINES', {"pos": box_lines})
+        shader.bind()
+        shader.uniform_float("color", (1.0, 1.0, 1.0, 0.8))
+        batch.draw(shader)
+
+
+
     button_w = 110.0
     button_h = 36.0
     gap = 10.0
     by0 = y0 - button_h - 12.0
     by1 = by0 + button_h
-    total_w = button_w * 4.0 + gap * 3.0
+    total_w = button_w * 5.0 + gap * 4.0
     add_x0 = cx - total_w * 0.5
     add_x1 = add_x0 + button_w
     rem_x0 = add_x1 + gap
@@ -410,6 +438,12 @@ def draw_widget_callback():
     wd.flip_button_y0 = by0
     wd.flip_button_x1 = flip_x1
     wd.flip_button_y1 = by1
+    rot_x0 = flip_x1 + gap
+    rot_x1 = rot_x0 + button_w
+    wd.rotate_button_x0 = rot_x0
+    wd.rotate_button_y0 = by0
+    wd.rotate_button_x1 = rot_x1
+    wd.rotate_button_y1 = by1
 
     can_remove = all(len(point_setting.cross_section_verts) > 3 for point_setting in settings.point_settings)
     active_is_ghost = 0 <= ps.active_vert_index < n and getattr(verts[ps.active_vert_index], 'is_ghost', False)
@@ -417,6 +451,8 @@ def draw_widget_callback():
     draw_widget_button(shader, rem_x0, by0, rem_x1, by1, (0.52, 0.16, 0.14, 0.96) if can_remove else (0.16, 0.16, 0.16, 0.86), can_remove)
     draw_widget_button(shader, tog_x0, by0, tog_x1, by1, (0.12, 0.34, 0.62, 0.96) if active_is_ghost else (0.22, 0.24, 0.30, 0.96), True, active_is_ghost)
     draw_widget_button(shader, flip_x0, by0, flip_x1, by1, (0.46, 0.30, 0.10, 0.96) if flip_h else (0.28, 0.24, 0.18, 0.96), True, flip_h)
+    has_sel = bool(get_selected_widget_verts(wd))
+    draw_widget_button(shader, rot_x0, by0, rot_x1, by1, (0.38, 0.18, 0.52, 0.96) if has_sel else (0.18, 0.16, 0.20, 0.96), has_sel, wd.rotate_active)
 
     font_id = 0
     blf.size(font_id, 16)
@@ -436,6 +472,9 @@ def draw_widget_callback():
     blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
     blf.position(font_id, flip_x0 + 23.0, by0 + 11.0, 0)
     blf.draw(font_id, "水平翻转")
+    blf.color(font_id, 1.0, 1.0, 1.0, 1.0 if has_sel else 0.38)
+    blf.position(font_id, rot_x0 + 39.0, by0 + 11.0, 0)
+    blf.draw(font_id, "旋转")
 
     gpu.state.line_width_set(1.0)
     gpu.state.point_size_set(1.0)
@@ -1038,11 +1077,21 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
         return len(ps.cross_section_verts) >= 3
 
     def invoke(self, context, event):
-        if not setup_widget(context):
-            self.report({'ERROR'}, "未找到 3D 视图")
-            return {'CANCELLED'}
         wd = context.window_manager.hair_pipe_widget
+        if wd.is_active:
+            wd.is_active = False
+            wd.drag_vert_index = -1
+            redraw_view3d(context)
+            return {'FINISHED'}
+        if not setup_widget(context):
+            self.report({'ERROR'}, "No 3D View")
+            return {'CANCELLED'}
         wd.hold_key_mode = False
+        self._trigger_key = event.type
+        self._trigger_ctrl = event.ctrl
+        self._trigger_shift = event.shift
+        self._trigger_alt = event.alt
+        self._just_opened = True
         context.window_manager.modal_handler_add(self)
         return {'RUNNING_MODAL'}
 
@@ -1050,6 +1099,17 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
         return event.mouse_x - wd.region_offset_x, event.mouse_y - wd.region_offset_y
 
     def modal(self, context, event):
+        if hasattr(self, '_just_opened') and self._just_opened:
+            if event.type == self._trigger_key and event.value == 'RELEASE':
+                self._just_opened = False
+            return {'RUNNING_MODAL'}
+        if (hasattr(self, '_trigger_key') and event.type == self._trigger_key
+                and event.value == 'PRESS'
+                and event.ctrl == getattr(self, '_trigger_ctrl', False)
+                and event.shift == getattr(self, '_trigger_shift', False)
+                and event.alt == getattr(self, '_trigger_alt', False)):
+            self._finish(context)
+            return {'FINISHED'}
         return handle_widget_modal(self, context, event, close_on_key_release=False)
 
     def _finish(self, context):
@@ -1074,6 +1134,7 @@ class HAIRPIPE_OT_widget_hold(bpy.types.Operator):
             return {'CANCELLED'}
         wd = context.window_manager.hair_pipe_widget
         wd.hold_key_mode = True
+        self._hold_key = event.type
         context.window_manager.modal_handler_add(self)
         return {'RUNNING_MODAL'}
 
@@ -1098,7 +1159,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         operator._finish(context)
         return {'FINISHED'}
 
-    if close_on_key_release and event.type == 'X' and event.value == 'RELEASE':
+    if close_on_key_release and event.value == 'RELEASE' and event.type not in {'LEFTMOUSE', 'RIGHTMOUSE', 'MIDDLEMOUSE', 'MOUSEMOVE'}:
         operator._finish(context)
         return {'FINISHED'}
 
@@ -1129,17 +1190,113 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     half = wd.widget_size / 2.0
     inside_widget = abs(mx - cx) <= half and abs(my - cy) <= half
     inside_add_button = is_inside_rect(mx, my, wd.add_button_x0, wd.add_button_y0, wd.add_button_x1, wd.add_button_y1)
-    inside_remove_button = is_inside_rect(
-        mx, my, wd.remove_button_x0, wd.remove_button_y0, wd.remove_button_x1, wd.remove_button_y1
-    )
-    inside_toggle_button = is_inside_rect(
-        mx, my, wd.toggle_button_x0, wd.toggle_button_y0, wd.toggle_button_x1, wd.toggle_button_y1
-    )
-    inside_flip_button = is_inside_rect(
-        mx, my, wd.flip_button_x0, wd.flip_button_y0, wd.flip_button_x1, wd.flip_button_y1
-    )
-    inside_controls = inside_add_button or inside_remove_button or inside_toggle_button or inside_flip_button
+    inside_remove_button = is_inside_rect(mx, my, wd.remove_button_x0, wd.remove_button_y0, wd.remove_button_x1, wd.remove_button_y1)
+    inside_toggle_button = is_inside_rect(mx, my, wd.toggle_button_x0, wd.toggle_button_y0, wd.toggle_button_x1, wd.toggle_button_y1)
+    inside_flip_button = is_inside_rect(mx, my, wd.flip_button_x0, wd.flip_button_y0, wd.flip_button_x1, wd.flip_button_y1)
+    inside_rotate_button = is_inside_rect(mx, my, wd.rotate_button_x0, wd.rotate_button_y0, wd.rotate_button_x1, wd.rotate_button_y1)
+    inside_controls = inside_add_button or inside_remove_button or inside_toggle_button or inside_flip_button or inside_rotate_button
 
+    # Rotate mode active
+    if wd.rotate_active:
+        sel = sorted(get_selected_widget_verts(wd))
+        initial = get_rotate_offsets(wd)
+        if event.type == 'MOUSEMOVE':
+            a_start = math.atan2(wd.rotate_start_y - cy, wd.rotate_start_x - cx)
+            a_now = math.atan2(my - cy, mx - cx)
+            angle = a_now - a_start
+            cos_a = math.cos(angle)
+            sin_a = math.sin(angle)
+            cnt = max(1, len(initial))
+            ctr_x = sum(o[0] for o in initial) / cnt
+            ctr_y = sum(o[1] for o in initial) / cnt
+            for ip, vi in enumerate(sel):
+                if vi < len(verts) and ip < len(initial) and not getattr(verts[vi], 'is_ghost', False):
+                    rx = initial[ip][0] - ctr_x
+                    ry = initial[ip][1] - ctr_y
+                    verts[vi].offset_x = ctr_x + rx * cos_a - ry * sin_a
+                    verts[vi].offset_y = ctr_y + rx * sin_a + ry * cos_a
+            update_ghost_vertices(ps)
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
+            wd.rotate_active = False
+            for vi in sel:
+                if vi < len(verts):
+                    apply_active_vertex_edit_to_selected_points(context, ps, vi)
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.type in {'RIGHTMOUSE', 'ESC'}:
+            for ip, vi in enumerate(sel):
+                if vi < len(verts) and ip < len(initial):
+                    verts[vi].offset_x = initial[ip][0]
+                    verts[vi].offset_y = initial[ip][1]
+            wd.rotate_active = False
+            update_ghost_vertices(ps)
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        return {'RUNNING_MODAL'}
+
+    # Box select active (right-click drag)
+    if wd.box_select_active:
+        if event.type == 'MOUSEMOVE':
+            wd.box_x1 = mx
+            wd.box_y1 = my
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.type == 'RIGHTMOUSE' and event.value == 'RELEASE':
+            bx0 = min(wd.box_x0, wd.box_x1)
+            by0 = min(wd.box_y0, wd.box_y1)
+            bx1 = max(wd.box_x0, wd.box_x1)
+            by1 = max(wd.box_y0, wd.box_y1)
+            selected = set()
+            for i, v in enumerate(verts):
+                ox, oy = get_effective_offset(v, curve_point, ps)
+                px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
+                if bx0 <= px <= bx1 and by0 <= py <= by1:
+                    selected.add(i)
+            if event.shift:
+                selected = selected | get_selected_widget_verts(wd)
+            set_selected_widget_verts(wd, selected)
+            wd.box_select_active = False
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.type == 'ESC':
+            wd.box_select_active = False
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        return {'RUNNING_MODAL'}
+
+    # Box select active (right-click drag)
+    if wd.box_select_active:
+        if event.type == 'MOUSEMOVE':
+            wd.box_x1 = mx
+            wd.box_y1 = my
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.type == 'RIGHTMOUSE' and event.value == 'RELEASE':
+            bx0 = min(wd.box_x0, wd.box_x1)
+            by0 = min(wd.box_y0, wd.box_y1)
+            bx1 = max(wd.box_x0, wd.box_x1)
+            by1 = max(wd.box_y0, wd.box_y1)
+            selected = set()
+            for i, v in enumerate(verts):
+                ox, oy = get_effective_offset(v, curve_point, ps)
+                px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
+                if bx0 <= px <= bx1 and by0 <= py <= by1:
+                    selected.add(i)
+            if event.shift:
+                selected = selected | get_selected_widget_verts(wd)
+            set_selected_widget_verts(wd, selected)
+            wd.box_select_active = False
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.type == 'ESC':
+            wd.box_select_active = False
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        return {'RUNNING_MODAL'}
+
+    # Middle mouse - insert vertex on edge
     if event.type == 'MIDDLEMOUSE' and event.value == 'PRESS':
         if inside_widget and sf > 0.001:
             edge_idx, local_pos, edge_t = find_nearest_cross_section_edge(
@@ -1155,7 +1312,21 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         if inside_widget or inside_controls:
             return {'RUNNING_MODAL'}
 
+    # Left mouse press
     if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+        if inside_rotate_button:
+            sel = get_selected_widget_verts(wd)
+            if not sel and 0 <= ps.active_vert_index < len(verts):
+                sel = {ps.active_vert_index}
+                set_selected_widget_verts(wd, sel)
+            if sel:
+                wd.rotate_active = True
+                wd.rotate_start_x = mx
+                wd.rotate_start_y = my
+                store_rotate_offsets(wd, verts, sorted(sel))
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+
         if inside_add_button:
             add_cross_section_vertex(ps, settings)
             wd.drag_vert_index = -1
@@ -1205,34 +1376,49 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 return {'RUNNING_MODAL'}
             operator._finish(context)
             return {'FINISHED'}
-
         return {'RUNNING_MODAL'}
 
+    # Mouse move - drag selected points together
     if event.type == 'MOUSEMOVE':
         if 0 <= wd.drag_vert_index < len(verts) and sf > 0.001 and not getattr(verts[wd.drag_vert_index], 'is_ghost', False):
             effective_x, effective_y = widget_to_effective(mx, my, cx, cy, sf, alignment_angle, flip_h)
-            set_vertex_from_effective_offset(verts[wd.drag_vert_index], effective_x, effective_y, curve_point, ps)
+            drag_v = verts[wd.drag_vert_index]
+            old_x, old_y = drag_v.offset_x, drag_v.offset_y
+            set_vertex_from_effective_offset(drag_v, effective_x, effective_y, curve_point, ps)
+            dx = drag_v.offset_x - old_x
+            dy = drag_v.offset_y - old_y
+            sel = get_selected_widget_verts(wd)
+            for si in sel:
+                if si != wd.drag_vert_index and 0 <= si < len(verts) and not getattr(verts[si], 'is_ghost', False):
+                    verts[si].offset_x += dx
+                    verts[si].offset_y += dy
             update_ghost_vertices(ps)
-            apply_active_vertex_edit_to_selected_points(context, ps, wd.drag_vert_index)
+            for si in sel:
+                if si < len(verts):
+                    apply_active_vertex_edit_to_selected_points(context, ps, si)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if inside_widget or inside_controls:
             return {'RUNNING_MODAL'}
 
+    # Left mouse release
     if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
         wd.drag_vert_index = -1
         redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
-    if event.type in {'RIGHTMOUSE', 'ESC'}:
-        operator._finish(context)
-        return {'FINISHED'}
-
-    if (inside_widget or inside_controls) and event.type in {'LEFTMOUSE', 'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
+    # A - Select All / Deselect All
+    if event.type == 'A' and event.value == 'PRESS':
+        sel = get_selected_widget_verts(wd)
+        if len(sel) == len(verts):
+            set_selected_widget_verts(wd, set())
+        else:
+            set_selected_widget_verts(wd, set(range(len(verts))))
+        redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
-    # B - Box Select
-    if event.type == 'B' and event.value == 'PRESS' and inside_widget and not wd.transform_mode:
+    # Right click - start box select
+    if event.type == 'RIGHTMOUSE' and event.value == 'PRESS':
         wd.box_select_active = True
         wd.box_x0 = mx
         wd.box_y0 = my
@@ -1241,118 +1427,12 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
-    if wd.box_select_active:
-        if event.type == 'MOUSEMOVE':
-            wd.box_x1 = mx
-            wd.box_y1 = my
-            redraw_view3d(context)
-            return {'RUNNING_MODAL'}
-        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
-            bx0 = min(wd.box_x0, wd.box_x1)
-            by0 = min(wd.box_y0, wd.box_y1)
-            bx1 = max(wd.box_x0, wd.box_x1)
-            by1 = max(wd.box_y0, wd.box_y1)
-            selected = set()
-            for i, v in enumerate(verts):
-                ox, oy = get_effective_offset(v, curve_point, ps)
-                px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
-                if bx0 <= px <= bx1 and by0 <= py <= by1:
-                    selected.add(i)
-            if event.shift:
-                selected = selected | get_selected_widget_verts(wd)
-            set_selected_widget_verts(wd, selected)
-            wd.box_select_active = False
-            redraw_view3d(context)
-            return {'RUNNING_MODAL'}
-        if event.type in {'RIGHTMOUSE', 'ESC'}:
-            wd.box_select_active = False
-            redraw_view3d(context)
-            return {'RUNNING_MODAL'}
-        return {'RUNNING_MODAL'}
+    # ESC - close editor
+    if event.type == 'ESC':
+        operator._finish(context)
+        return {'FINISHED'}
 
-    # G - Grab selected
-    if event.type == 'G' and event.value == 'PRESS' and not wd.transform_mode:
-        sel = get_selected_widget_verts(wd)
-        if not sel and 0 <= ps.active_vert_index < len(verts):
-            sel = {ps.active_vert_index}
-            set_selected_widget_verts(wd, sel)
-        if sel:
-            wd.transform_mode = "GRAB"
-            wd.transform_start_x = mx
-            wd.transform_start_y = my
-            store_transform_offsets(wd, verts, sorted(sel))
-            return {'RUNNING_MODAL'}
-
-    # R - Rotate selected
-    if event.type == 'R' and event.value == 'PRESS' and not wd.transform_mode:
-        sel = get_selected_widget_verts(wd)
-        if not sel and 0 <= ps.active_vert_index < len(verts):
-            sel = {ps.active_vert_index}
-            set_selected_widget_verts(wd, sel)
-        if sel:
-            wd.transform_mode = "ROTATE"
-            wd.transform_start_x = mx
-            wd.transform_start_y = my
-            store_transform_offsets(wd, verts, sorted(sel))
-            return {'RUNNING_MODAL'}
-
-    # Transform in progress
-    if wd.transform_mode:
-        sel = sorted(get_selected_widget_verts(wd))
-        initial = get_transform_offsets(wd)
-        if event.type == 'MOUSEMOVE':
-            if wd.transform_mode == "GRAB":
-                dx_w = mx - wd.transform_start_x
-                dy_w = my - wd.transform_start_y
-                dx_e, dy_e = widget_to_effective(cx + dx_w, cy + dy_w, cx, cy, sf, alignment_angle, flip_h)
-                for ip, vi in enumerate(sel):
-                    if vi < len(verts) and ip < len(initial) and not getattr(verts[vi], 'is_ghost', False):
-                        verts[vi].offset_x = initial[ip][0] + dx_e
-                        verts[vi].offset_y = initial[ip][1] + dy_e
-            elif wd.transform_mode == "ROTATE":
-                a_start = math.atan2(wd.transform_start_y - cy, wd.transform_start_x - cx)
-                a_now = math.atan2(my - cy, mx - cx)
-                angle = a_now - a_start
-                cos_a = math.cos(angle)
-                sin_a = math.sin(angle)
-                cnt = max(1, len(initial))
-                ctr_x = sum(o[0] for o in initial) / cnt
-                ctr_y = sum(o[1] for o in initial) / cnt
-                for ip, vi in enumerate(sel):
-                    if vi < len(verts) and ip < len(initial) and not getattr(verts[vi], 'is_ghost', False):
-                        rx = initial[ip][0] - ctr_x
-                        ry = initial[ip][1] - ctr_y
-                        verts[vi].offset_x = ctr_x + rx * cos_a - ry * sin_a
-                        verts[vi].offset_y = ctr_y + rx * sin_a + ry * cos_a
-            update_ghost_vertices(ps)
-            redraw_view3d(context)
-            return {'RUNNING_MODAL'}
-        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
-            wd.transform_mode = ""
-            for vi in sel:
-                if vi < len(verts):
-                    apply_active_vertex_edit_to_selected_points(context, ps, vi)
-            redraw_view3d(context)
-            return {'RUNNING_MODAL'}
-        if event.type in {'RIGHTMOUSE', 'ESC'}:
-            for ip, vi in enumerate(sel):
-                if vi < len(verts) and ip < len(initial):
-                    verts[vi].offset_x = initial[ip][0]
-                    verts[vi].offset_y = initial[ip][1]
-            wd.transform_mode = ""
-            update_ghost_vertices(ps)
-            redraw_view3d(context)
-            return {'RUNNING_MODAL'}
-        return {'RUNNING_MODAL'}
-
-    # A - Select All / Deselect All
-    if event.type == 'A' and event.value == 'PRESS' and inside_widget:
-        sel = get_selected_widget_verts(wd)
-        if len(sel) == len(verts):
-            set_selected_widget_verts(wd, set())
-        else:
-            set_selected_widget_verts(wd, set(range(len(verts))))
-        redraw_view3d(context)
+    if (inside_widget or inside_controls) and event.type in {'LEFTMOUSE', 'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
         return {'RUNNING_MODAL'}
 
     return {'PASS_THROUGH'}
@@ -1381,19 +1461,11 @@ classes = (
 
 
 def register_keymaps():
-    wm = bpy.context.window_manager
-    kc = wm.keyconfigs.addon
-    if kc is None:
-        return
-    km = kc.keymaps.new(name='3D View', space_type='VIEW_3D')
-    kmi = km.keymap_items.new('hair_pipe.widget_hold', 'X', 'PRESS', ctrl=True, shift=True)
-    _addon_keymaps.append((km, kmi))
+    pass
 
 
 def unregister_keymaps():
-    for km, kmi in _addon_keymaps:
-        km.keymap_items.remove(kmi)
-    _addon_keymaps.clear()
+    pass
 
 
 def register():

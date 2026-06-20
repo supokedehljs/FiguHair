@@ -2333,6 +2333,26 @@ class HAIRPIPE_OT_copy_cs_to_all(bpy.types.Operator):
 
 
 
+
+class HAIRPIPE_OT_toggle_redirect_selection(bpy.types.Operator):
+    """Toggle between curve-only and mesh-selectable mode"""
+    bl_idname = "hair_pipe.toggle_redirect_selection"
+    bl_label = "\u5207\u6362\u9009\u62e9\u6a21\u5f0f"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return get_context_curve_object(context) is not None
+
+    def execute(self, context):
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            return {'CANCELLED'}
+        settings = curve_obj.hair_pipe_settings
+        settings.redirect_selection = not settings.redirect_selection
+        return {'FINISHED'}
+
+
 class HAIRPIPE_OT_equalize_point_distance(bpy.types.Operator):
     """Redistribute selected curve points to be equally spaced along the curve"""
     bl_idname = "hair_pipe.equalize_point_distance"
@@ -2579,6 +2599,7 @@ classes = (
     HAIRPIPE_OT_copy_cross_section,
     HAIRPIPE_OT_paste_cross_section,
     HAIRPIPE_OT_copy_cs_to_all,
+    HAIRPIPE_OT_toggle_redirect_selection,
     HAIRPIPE_OT_equalize_point_distance,
     HAIRPIPE_OT_create_tail_mesh,
     HAIRPIPE_OT_remove_tail_mesh,

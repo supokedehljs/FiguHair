@@ -1,15 +1,17 @@
 bl_info = {} 
  
-from . import operators, panel, properties, handler, widget_operator 
+from . import operators, panel, properties, handler, widget_operator, preferences 
  
-def register(): 
+def register():
+    preferences.register() 
     properties.register() 
     widget_operator.register() 
     operators.register() 
     panel.register() 
     handler.register_handler() 
  
-def unregister(): 
+def unregister():
+    preferences.unregister() 
     handler.unregister_handler() 
     panel.unregister() 
     operators.unregister() 
