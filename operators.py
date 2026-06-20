@@ -1086,6 +1086,38 @@ def parent_keep_world(obj, parent_obj):
     obj.matrix_world = world_matrix
 
 
+def ensure_tail_edit_proxy(tail_obj):
+    proxy_name = tail_obj.name + " Edit"
+    proxy_obj = bpy.data.objects.get(proxy_name)
+    if proxy_obj is not None and proxy_obj.data == tail_obj.data:
+        proxy_obj["hair_pipe_tail_edit_proxy_source"] = tail_obj.name
+        proxy_obj.parent = None
+        proxy_obj.matrix_world = Matrix.Identity(4)
+        proxy_obj.display_type = 'TEXTURED'
+        proxy_obj.show_in_front = False
+        proxy_obj.hide_render = True
+        return proxy_obj
+    for obj in bpy.data.objects:
+        if obj.get("hair_pipe_tail_edit_proxy_source") == tail_obj.name and obj.data == tail_obj.data:
+            obj.name = proxy_name
+            obj.parent = None
+            obj.matrix_world = Matrix.Identity(4)
+            obj.display_type = 'TEXTURED'
+            obj.show_in_front = False
+            obj.hide_render = True
+            return obj
+    proxy_obj = bpy.data.objects.new(proxy_name, tail_obj.data)
+    target_collection = tail_obj.users_collection[0] if tail_obj.users_collection else bpy.context.scene.collection
+    target_collection.objects.link(proxy_obj)
+    proxy_obj["hair_pipe_tail_edit_proxy_source"] = tail_obj.name
+    proxy_obj.parent = None
+    proxy_obj.matrix_world = Matrix.Identity(4)
+    proxy_obj.display_type = 'TEXTURED'
+    proxy_obj.show_in_front = False
+    proxy_obj.hide_render = True
+    return proxy_obj
+
+
 def ensure_pipe_subdivision_modifier(pipe_obj):
     modifier = pipe_obj.modifiers.get("FiguHair Catmull-Clark")
     if modifier is None:
@@ -1921,8 +1953,10 @@ class HAIRPIPE_OT_generate_pipe(bpy.types.Operator):
             for poly in mesh.polygons:
                 poly.use_smooth = True
         configure_pipe_object(pipe_obj, curve_obj)
-        tail_obj = update_tail_mesh_for_curve(curve_obj, settings, verts)
-        ensure_tail_modifier_stack(pipe_obj, tail_obj)
+        tail_obj = get_tail_object_for_curve(curve_obj)
+        if tail_obj is not None:
+            update_tail_mesh_for_curve(curve_obj, settings, verts)
+            ensure_tail_modifier_stack(pipe_obj, tail_obj)
         self.report({'INFO'}, f"Generated pipe with {len(verts)} vertices")
         return {'FINISHED'}
 
@@ -2298,6 +2332,240 @@ class HAIRPIPE_OT_copy_cs_to_all(bpy.types.Operator):
         return {'FINISHED'}
 
 
+
+class HAIRPIPE_OT_equalize_point_distance(bpy.types.Operator):
+    """Redistribute selected curve points to be equally spaced along the curve"""
+    bl_idname = "hair_pipe.equalize_point_distance"
+    bl_label = "\u8ddd\u79bb\u5e73\u5747\u5316"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        if obj is None or obj.type != 'CURVE':
+            return False
+        if obj.mode != 'EDIT':
+            return False
+        return True
+
+    def execute(self, context):
+        curve_obj = context.active_object
+        curve_data = curve_obj.data
+        for spline in curve_data.splines:
+            if spline.type == 'BEZIER':
+                points = spline.bezier_points
+                selected_indices = [i for i, p in enumerate(points) if p.select_control_point]
+            else:
+                points = spline.points
+                selected_indices = [i for i, p in enumerate(points) if p.select]
+            if len(selected_indices) < 3:
+                continue
+            selected_indices.sort()
+            first = selected_indices[0]
+            last = selected_indices[-1]
+            if last - first < 2:
+                continue
+            segment_lengths = []
+            total_length = 0.0
+            for i in range(first, last):
+                if spline.type == 'BEZIER':
+                    p0 = points[i].co
+                    p1 = points[i + 1].co
+                else:
+                    p0 = points[i].co.xyz
+                    p1 = points[i + 1].co.xyz
+                seg_len = (p1 - p0).length
+                segment_lengths.append(seg_len)
+                total_length += seg_len
+            if total_length < 1e-8:
+                continue
+            num_segments = last - first
+            target_spacing = total_length / num_segments
+            cumulative = [0.0]
+            for seg_len in segment_lengths:
+                cumulative.append(cumulative[-1] + seg_len)
+            for idx in range(first + 1, last):
+                target_dist = (idx - first) * target_spacing
+                seg_idx = 0
+                for s in range(len(cumulative) - 1):
+                    if cumulative[s + 1] >= target_dist - 1e-10:
+                        seg_idx = s
+                        break
+                else:
+                    seg_idx = len(cumulative) - 2
+                local_t = 0.0
+                seg_len = cumulative[seg_idx + 1] - cumulative[seg_idx]
+                if seg_len > 1e-10:
+                    local_t = (target_dist - cumulative[seg_idx]) / seg_len
+                local_t = max(0.0, min(1.0, local_t))
+                real_idx_a = first + seg_idx
+                real_idx_b = first + seg_idx + 1
+                if spline.type == 'BEZIER':
+                    co_a = points[real_idx_a].co
+                    co_b = points[real_idx_b].co
+                    new_co = co_a.lerp(co_b, local_t)
+                    old_co = points[idx].co.copy()
+                    offset = new_co - old_co
+                    points[idx].co = new_co
+                    points[idx].handle_left += offset
+                    points[idx].handle_right += offset
+                else:
+                    co_a = points[real_idx_a].co.xyz
+                    co_b = points[real_idx_b].co.xyz
+                    new_co = co_a.lerp(co_b, local_t)
+                    points[idx].co.x = new_co.x
+                    points[idx].co.y = new_co.y
+                    points[idx].co.z = new_co.z
+        curve_data.update_tag()
+        self.report({'INFO'}, "\u5df2\u5e73\u5747\u5316\u66f2\u7ebf\u70b9\u8ddd\u79bb")
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_create_tail_mesh(bpy.types.Operator):
+    """Create a tail mesh at the end of the curve"""
+    bl_idname = "hair_pipe.create_tail_mesh"
+    bl_label = "\u751f\u6210\u672b\u7aef\u7f51\u683c"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            return False
+        pipe_obj = get_pipe_object_for_curve(curve_obj)
+        if pipe_obj is None:
+            return False
+        return get_tail_object_for_curve(curve_obj) is None
+
+    def execute(self, context):
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            self.report({'ERROR'}, "\u672a\u627e\u5230\u66f2\u7ebf")
+            return {'CANCELLED'}
+        settings = curve_obj.hair_pipe_settings
+        ensure_curve_defaults(curve_obj)
+        sync_point_settings(curve_obj)
+        verts, faces = generate_pipe_mesh(curve_obj, settings)
+        if verts is None:
+            self.report({'ERROR'}, "\u8bf7\u5148\u751f\u6210\u7ba1\u7ebf")
+            return {'CANCELLED'}
+        verts = verts_to_world_space(verts, curve_obj)
+        tail_obj = update_tail_mesh_for_curve(curve_obj, settings, verts)
+        if tail_obj is None:
+            self.report({'ERROR'}, "\u65e0\u6cd5\u521b\u5efa\u672b\u7aef\u7f51\u683c")
+            return {'CANCELLED'}
+        pipe_obj = get_pipe_object_for_curve(curve_obj)
+        if pipe_obj is not None:
+            ensure_tail_modifier_stack(pipe_obj, tail_obj)
+        self.report({'INFO'}, "\u5df2\u521b\u5efa\u672b\u7aef\u7f51\u683c")
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_remove_tail_mesh(bpy.types.Operator):
+    """Remove the tail mesh"""
+    bl_idname = "hair_pipe.remove_tail_mesh"
+    bl_label = "\u5220\u9664\u672b\u7aef\u7f51\u683c"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            return False
+        return get_tail_object_for_curve(curve_obj) is not None
+
+    def execute(self, context):
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            return {'CANCELLED'}
+        tail_obj = get_tail_object_for_curve(curve_obj)
+        if tail_obj is None:
+            return {'CANCELLED'}
+        pipe_obj = get_pipe_object_for_curve(curve_obj)
+        if pipe_obj is not None:
+            modifier = pipe_obj.modifiers.get("FiguHair Join Tail")
+            if modifier is not None:
+                pipe_obj.modifiers.remove(modifier)
+        proxy_name = tail_obj.name + " Edit"
+        proxy_obj = bpy.data.objects.get(proxy_name)
+        if proxy_obj is not None and proxy_obj.data == tail_obj.data:
+            bpy.data.objects.remove(proxy_obj, do_unlink=True)
+        for obj in list(bpy.data.objects):
+            if obj.get("hair_pipe_tail_edit_proxy_source") == tail_obj.name:
+                bpy.data.objects.remove(obj, do_unlink=True)
+        mesh_data = tail_obj.data
+        bpy.data.objects.remove(tail_obj, do_unlink=True)
+        if mesh_data is not None and mesh_data.users == 0:
+            bpy.data.meshes.remove(mesh_data)
+        self.report({'INFO'}, "\u5df2\u5220\u9664\u672b\u7aef\u7f51\u683c")
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_toggle_tail_visibility(bpy.types.Operator):
+    """Toggle tail mesh visibility"""
+    bl_idname = "hair_pipe.toggle_tail_visibility"
+    bl_label = "隐藏/显示末端网格"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            return False
+        return get_tail_object_for_curve(curve_obj) is not None
+
+    def execute(self, context):
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            return {'CANCELLED'}
+        tail_obj = get_tail_object_for_curve(curve_obj)
+        if tail_obj is None:
+            return {'CANCELLED'}
+        new_hidden = not tail_obj.hide_viewport
+        tail_obj.hide_viewport = new_hidden
+        tail_obj.hide_render = True
+        proxy_name = tail_obj.name + " Edit"
+        proxy_obj = bpy.data.objects.get(proxy_name)
+        if proxy_obj is not None and proxy_obj.data == tail_obj.data:
+            proxy_obj.hide_viewport = new_hidden
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_edit_tail_mesh(bpy.types.Operator):
+    """Enter edit mode on the tail mesh proxy (upright at origin)"""
+    bl_idname = "hair_pipe.edit_tail_mesh"
+    bl_label = "编辑末端网格"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            return False
+        return get_tail_object_for_curve(curve_obj) is not None
+
+    def execute(self, context):
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            return {'CANCELLED'}
+        tail_obj = get_tail_object_for_curve(curve_obj)
+        if tail_obj is None:
+            return {'CANCELLED'}
+        proxy_obj = ensure_tail_edit_proxy(tail_obj)
+        if proxy_obj is None:
+            self.report({'ERROR'}, "无法创建编辑代理")
+            return {'CANCELLED'}
+        proxy_obj.hide_viewport = False
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        proxy_obj.select_set(True)
+        context.view_layer.objects.active = proxy_obj
+        bpy.ops.object.mode_set(mode='EDIT')
+        return {'FINISHED'}
+
+
 classes = (
     HAIRPIPE_OT_generate_pipe,
     HAIRPIPE_OT_sync_points,
@@ -2311,6 +2579,11 @@ classes = (
     HAIRPIPE_OT_copy_cross_section,
     HAIRPIPE_OT_paste_cross_section,
     HAIRPIPE_OT_copy_cs_to_all,
+    HAIRPIPE_OT_equalize_point_distance,
+    HAIRPIPE_OT_create_tail_mesh,
+    HAIRPIPE_OT_remove_tail_mesh,
+    HAIRPIPE_OT_toggle_tail_visibility,
+    HAIRPIPE_OT_edit_tail_mesh,
 )
 
 

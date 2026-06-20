@@ -52,6 +52,20 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         box.prop(settings, "smooth_shading", text="平滑着色")
         box.prop(settings, "cap_ends", text="封口")
 
+        from .operators import get_tail_object_for_curve
+        tail_box = layout.box()
+        tail_box.label(text="末端网格", icon='MESH_CONE')
+        tail_obj = get_tail_object_for_curve(curve_obj)
+        if tail_obj is None:
+            row = tail_box.row(align=True)
+            row.scale_y = 1.2
+            row.operator("hair_pipe.create_tail_mesh", text="生成末端网格", icon='ADD')
+        else:
+            row = tail_box.row(align=True)
+            row.operator("hair_pipe.edit_tail_mesh", text="编辑", icon='EDITMODE_HLT')
+            row.operator("hair_pipe.toggle_tail_visibility", text="", icon='HIDE_OFF' if not tail_obj.hide_viewport else 'HIDE_ON')
+            row.operator("hair_pipe.remove_tail_mesh", text="", icon='TRASH')
+
         if not edit_mode:
             return
 
@@ -71,6 +85,12 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         op.mode = settings.edge_flow_mode
         op.power = settings.edge_flow_power
         op.blend = settings.edge_flow_blend
+
+        box = edit_box.box()
+        box.label(text="曲线工具", icon='CURVE_BEZCURVE')
+        row = box.row(align=True)
+        row.scale_y = 1.2
+        row.operator("hair_pipe.equalize_point_distance", text="距离平均化", icon='ALIGN_JUSTIFY')
 
         box = edit_box.box()
         box.label(text="横截面编辑器", icon='MOUSE_LMB')
