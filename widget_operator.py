@@ -22,6 +22,7 @@ class HairPipeWidgetSettings(PropertyGroup):
     widget_scale_factor: FloatProperty(default=1.0)
     is_active: BoolProperty(default=False)
     drag_vert_index: IntProperty(default=-1)
+    drag_panel: IntProperty(default=0)
     region_offset_x: IntProperty(default=0)
     region_offset_y: IntProperty(default=0)
     hold_key_mode: BoolProperty(default=False)
@@ -41,6 +42,10 @@ class HairPipeWidgetSettings(PropertyGroup):
     flip_button_y0: FloatProperty(default=0.0)
     flip_button_x1: FloatProperty(default=0.0)
     flip_button_y1: FloatProperty(default=0.0)
+    idx_button_x0: FloatProperty(default=0.0)
+    idx_button_y0: FloatProperty(default=0.0)
+    idx_button_x1: FloatProperty(default=0.0)
+    idx_button_y1: FloatProperty(default=0.0)
     flip_horizontal: BoolProperty(default=False)
     selected_verts: bpy.props.StringProperty(default="")
     box_select_active: BoolProperty(default=False)
@@ -54,6 +59,7 @@ class HairPipeWidgetSettings(PropertyGroup):
     box_x1: FloatProperty(default=0.0)
     box_y1: FloatProperty(default=0.0)
     rotate_active: BoolProperty(default=False)
+    show_vert_indices: BoolProperty(default=False)
     rotate_start_x: FloatProperty(default=0.0)
     rotate_start_y: FloatProperty(default=0.0)
     rotate_initial_offsets: bpy.props.StringProperty(default="")
@@ -124,15 +130,15 @@ def get_curve_point_by_index(context, idx):
     return None
 
 
-def draw_single_cross_section(shader, verts, ps, curve_point, settings,
+def draw_single_cross_section(shader, verts, ps, settings,
                                panel_cx, panel_cy, panel_sf, alignment_angle,
                                flip_h, panel_half, is_active, wd=None):
-    """Draw one cross-section panel at given center with given scale."""
+    """Draw one cross-section panel using raw offsets (uniform size)."""
     n = len(verts)
     if n < 3:
         return
 
-    alpha_mult = 1.0 if is_active else 0.5
+    alpha_mult = 1.0 if is_active else 0.6
 
     gpu.state.line_width_set(1.0)
     grid = [(panel_cx - panel_half, panel_cy), (panel_cx + panel_half, panel_cy),
@@ -142,7 +148,7 @@ def draw_single_cross_section(shader, verts, ps, curve_point, settings,
     shader.uniform_float("color", (0.35, 0.35, 0.35, 0.4 * alpha_mult))
     batch.draw(shader)
 
-    ref_r = settings.default_radius * get_cross_section_effective_scale(curve_point, ps) * panel_sf
+    ref_r = settings.default_radius * panel_sf
     circ = []
     for i in range(64):
         a0 = 2 * math.pi * i / 64
@@ -157,8 +163,8 @@ def draw_single_cross_section(shader, verts, ps, curve_point, settings,
     outline = []
     for i in range(n):
         j = (i + 1) % n
-        ix, iy = get_effective_offset(verts[i], curve_point, ps)
-        jx, jy = get_effective_offset(verts[j], curve_point, ps)
+        ix, iy = get_raw_offset(verts[i])
+        jx, jy = get_raw_offset(verts[j])
         outline.append(effective_to_widget(ix, iy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h))
         outline.append(effective_to_widget(jx, jy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h))
     gpu.state.line_width_set(2.0 if is_active else 1.5)
@@ -167,9 +173,9 @@ def draw_single_cross_section(shader, verts, ps, curve_point, settings,
     shader.uniform_float("color", (1.0, 0.8, 0.05, 1.0 * alpha_mult))
     batch.draw(shader)
 
-    effective_points = [get_effective_offset(v, curve_point, ps) for v in verts]
-    smooth_effective = chaikin_closed(effective_points, 3)
-    smooth_widget_points = [effective_to_widget(x, y, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h) for x, y in smooth_effective]
+    raw_points = [get_raw_offset(v) for v in verts]
+    smooth_raw = chaikin_closed(raw_points, 3)
+    smooth_widget_points = [effective_to_widget(x, y, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h) for x, y in smooth_raw]
     smooth_lines = make_smooth_preview_lines(smooth_widget_points)
     if smooth_lines:
         gpu.state.line_width_set(1.5 if is_active else 1.0)
@@ -181,7 +187,7 @@ def draw_single_cross_section(shader, verts, ps, curve_point, settings,
     normal_pts = []
     ghost_pts = []
     for v in verts:
-        ox, oy = get_effective_offset(v, curve_point, ps)
+        ox, oy = get_raw_offset(v)
         point = effective_to_widget(ox, oy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h)
         if getattr(v, 'is_ghost', False):
             ghost_pts.append(point)
@@ -200,11 +206,21 @@ def draw_single_cross_section(shader, verts, ps, curve_point, settings,
         shader.uniform_float("color", (1.0, 1.0, 1.0, 0.9 * alpha_mult))
         batch.draw(shader)
 
+    if is_active and wd is not None and getattr(wd, 'show_vert_indices', False):
+        font_id = 0
+        blf.size(font_id, 12)
+        for vi in range(n):
+            vx, vy = get_raw_offset(verts[vi])
+            px, py = effective_to_widget(vx, vy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h)
+            blf.color(font_id, 0.9, 0.9, 0.2, 0.9)
+            blf.position(font_id, px + 6, py + 4, 0)
+            blf.draw(font_id, str(vi))
+
     if is_active:
         aidx = ps.active_vert_index
         if 0 <= aidx < n:
             gpu.state.point_size_set(18.0)
-            ax, ay = get_effective_offset(verts[aidx], curve_point, ps)
+            ax, ay = get_raw_offset(verts[aidx])
             ap = [effective_to_widget(ax, ay, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h)]
             batch = batch_for_shader(shader, 'POINTS', {"pos": ap})
             shader.bind()
@@ -220,7 +236,7 @@ def draw_single_cross_section(shader, verts, ps, curve_point, settings,
                 sel_pts = []
                 for si in sel_indices:
                     if 0 <= si < n:
-                        sx, sy = get_effective_offset(verts[si], curve_point, ps)
+                        sx, sy = get_raw_offset(verts[si])
                         sel_pts.append(effective_to_widget(sx, sy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h))
                 if sel_pts:
                     gpu.state.point_size_set(22.0)
@@ -228,6 +244,27 @@ def draw_single_cross_section(shader, verts, ps, curve_point, settings,
                     shader.bind()
                     shader.uniform_float("color", (1.0, 0.5, 0.0, 0.7))
                     batch.draw(shader)
+
+
+
+
+def select_curve_point_by_index(obj, target_idx):
+    """Select a specific curve point by global index, deselecting others."""
+    if obj is None or obj.type != 'CURVE':
+        return
+    global_idx = 0
+    for spline in obj.data.splines:
+        if spline.type == 'BEZIER':
+            for point in spline.bezier_points:
+                is_target = (global_idx == target_idx)
+                point.select_control_point = is_target
+                point.select_left_handle = is_target
+                point.select_right_handle = is_target
+                global_idx += 1
+        else:
+            for point in spline.points:
+                point.select = (global_idx == target_idx)
+                global_idx += 1
 
 
 def get_curve_start_world_position(obj):
@@ -346,7 +383,7 @@ def draw_widget_button(shader, x0, y0, x1, y1, fill_color=None, enabled=True, ac
 
 
 def draw_widget_callback():
-    """Draw the cross-section widget overlay with 3 panels (prev, current, next)."""
+    """Draw the cross-section widget with thumbnail strip at top."""
     try:
         context = bpy.context
     except Exception:
@@ -391,7 +428,7 @@ def draw_widget_callback():
     alignment_angle = get_view_alignment_angle(context)
     flip_h = wd.flip_horizontal
 
-    base_radius = settings.default_radius * get_cross_section_effective_scale(curve_point, ps)
+    base_radius = settings.default_radius
     if base_radius < 1e-6:
         base_radius = 0.05
     if wd.widget_scale_factor <= 1e-8:
@@ -410,54 +447,84 @@ def draw_widget_callback():
     shader.uniform_float("color", (0.0, 0.0, 0.0, 0.42))
     batch.draw(shader)
 
-    prev_idx, current_idx, next_idx = get_neighbor_point_indices(settings)
+    # Active point marker (red dot on curve)
+    region_data_m = context.region_data
+    if region_data_m is not None:
+        active_wp = get_active_curve_point_world_position(context)
+        if active_wp is not None:
+            act_2d = view3d_utils.location_3d_to_region_2d(region, region_data_m, active_wp)
+            if act_2d is not None:
+                gpu.state.point_size_set(16.0)
+                batch = batch_for_shader(shader, 'POINTS', {"pos": [(act_2d.x, act_2d.y)]})
+                shader.bind()
+                shader.uniform_float("color", (1.0, 0.15, 0.1, 1.0))
+                batch.draw(shader)
+                font_id = 0
+                blf.size(font_id, 13)
+                blf.color(font_id, 1.0, 0.3, 0.2, 1.0)
+                blf.position(font_id, act_2d.x + 10, act_2d.y + 6, 0)
+                blf.draw(font_id, "Edit:" + str(settings.active_point_index))
+                gpu.state.point_size_set(1.0)
 
-    side_scale = 0.55
-    side_half = half * side_scale
-    side_sf = sf * side_scale
-    side_offset_x = half + side_half + 40
+    # --- Thumbnail strip at top ---
+    total_points = len(settings.point_settings)
+    thumb_size = 140.0
+    thumb_gap = 10.0
+    thumb_total_w = total_points * thumb_size + (total_points - 1) * thumb_gap
+    thumb_start_x = cx - thumb_total_w * 0.5
+    thumb_y = cy + half + padding + 30.0
+    thumb_sf = thumb_size * 0.28 / max(base_radius, 0.01)
 
-    if prev_idx >= 0:
-        prev_ps = settings.point_settings[prev_idx]
-        update_ghost_vertices(prev_ps)
-        prev_cp = get_curve_point_by_index(context, prev_idx)
-        prev_verts = prev_ps.cross_section_verts
-        left_cx = cx - side_offset_x
-        left_cy = cy
-        draw_single_cross_section(shader, prev_verts, prev_ps, prev_cp, settings,
-                                   left_cx, left_cy, side_sf, alignment_angle,
-                                   flip_h, side_half, False)
+    for pt_idx in range(total_points):
+        tx = thumb_start_x + pt_idx * (thumb_size + thumb_gap) + thumb_size * 0.5
+        ty = thumb_y
+        is_current = (pt_idx == settings.active_point_index)
+
+        th = thumb_size * 0.5
+
+        pt_ps = settings.point_settings[pt_idx]
+        pt_verts = pt_ps.cross_section_verts
+        ptn = len(pt_verts)
+        if ptn >= 3:
+            thumb_outline = []
+            for i in range(ptn):
+                j = (i + 1) % ptn
+                ix, iy = get_raw_offset(pt_verts[i])
+                jx, jy = get_raw_offset(pt_verts[j])
+                thumb_outline.append(effective_to_widget(ix, iy, tx, ty, thumb_sf, alignment_angle, flip_h))
+                thumb_outline.append(effective_to_widget(jx, jy, tx, ty, thumb_sf, alignment_angle, flip_h))
+            gpu.state.line_width_set(1.5 if is_current else 1.0)
+            batch = batch_for_shader(shader, 'LINES', {"pos": thumb_outline})
+            shader.bind()
+            line_color = (1.0, 0.9, 0.2, 1.0) if is_current else (0.8, 0.7, 0.3, 0.7)
+            shader.uniform_float("color", line_color)
+            batch.draw(shader)
+
         font_id = 0
-        blf.size(font_id, 13)
-        blf.color(font_id, 0.7, 0.7, 0.7, 0.8)
-        blf.position(font_id, left_cx - 20, left_cy + side_half + 8, 0)
-        blf.draw(font_id, str(prev_idx))
+        blf.size(font_id, 15)
+        if is_current:
+            blf.color(font_id, 1.0, 0.4, 0.2, 1.0)
+        else:
+            blf.color(font_id, 0.7, 0.7, 0.7, 0.6)
+        blf.position(font_id, tx - 6, ty - th - 20, 0)
+        blf.draw(font_id, str(pt_idx))
+        if is_current:
+            gpu.state.line_width_set(2.0)
+            underline = [(tx - 10, ty - th - 22), (tx + 10, ty - th - 22)]
+            batch = batch_for_shader(shader, 'LINES', {"pos": underline})
+            shader.bind()
+            shader.uniform_float("color", (1.0, 0.4, 0.2, 1.0))
+            batch.draw(shader)
 
-    if next_idx >= 0:
-        next_ps = settings.point_settings[next_idx]
-        update_ghost_vertices(next_ps)
-        next_cp = get_curve_point_by_index(context, next_idx)
-        next_verts = next_ps.cross_section_verts
-        right_cx = cx + side_offset_x
-        right_cy = cy
-        draw_single_cross_section(shader, next_verts, next_ps, next_cp, settings,
-                                   right_cx, right_cy, side_sf, alignment_angle,
-                                   flip_h, side_half, False)
-        font_id = 0
-        blf.size(font_id, 13)
-        blf.color(font_id, 0.7, 0.7, 0.7, 0.8)
-        blf.position(font_id, right_cx - 20, right_cy + side_half + 8, 0)
-        blf.draw(font_id, str(next_idx))
+    # Store thumbnail bounds for click detection
+    wd.region_offset_x = wd.region_offset_x  # keep existing
+    # We'll store strip info via computed values in modal
 
-    draw_single_cross_section(shader, verts, ps, curve_point, settings,
+    # --- Main editor panel (center) ---
+    draw_single_cross_section(shader, verts, ps, settings,
                                cx, cy, sf, alignment_angle, flip_h, half, True, wd)
 
-    font_id = 0
-    blf.size(font_id, 14)
-    blf.color(font_id, 1.0, 0.9, 0.3, 0.9)
-    blf.position(font_id, cx - 20, cy + half + 8, 0)
-    blf.draw(font_id, str(current_idx))
-
+    # Box select rect
     if wd.box_select_active:
         bx0r = min(wd.box_x0, wd.box_x1)
         by0r = min(wd.box_y0, wd.box_y1)
@@ -475,13 +542,14 @@ def draw_widget_callback():
         shader.uniform_float("color", (1.0, 1.0, 1.0, 0.8))
         batch.draw(shader)
 
+    # --- Buttons ---
     x0, y0 = cx - half - padding, cy - half - padding
     button_w = 110.0
     button_h = 36.0
     gap = 10.0
     by0 = y0 - button_h - 12.0
     by1 = by0 + button_h
-    total_w = button_w * 5.0 + gap * 4.0
+    total_w = button_w * 6.0 + gap * 5.0
     add_x0 = cx - total_w * 0.5
     add_x1 = add_x0 + button_w
     rem_x0 = add_x1 + gap
@@ -512,6 +580,12 @@ def draw_widget_callback():
     wd.rotate_button_y0 = by0
     wd.rotate_button_x1 = rot_x1
     wd.rotate_button_y1 = by1
+    idx_x0 = rot_x1 + gap
+    idx_x1 = idx_x0 + button_w
+    wd.idx_button_x0 = idx_x0
+    wd.idx_button_y0 = by0
+    wd.idx_button_x1 = idx_x1
+    wd.idx_button_y1 = by1
 
     can_remove = all(len(pset.cross_section_verts) > 3 for pset in settings.point_settings)
     active_is_ghost = 0 <= ps.active_vert_index < n and getattr(verts[ps.active_vert_index], 'is_ghost', False)
@@ -521,6 +595,7 @@ def draw_widget_callback():
     draw_widget_button(shader, flip_x0, by0, flip_x1, by1, (0.46, 0.30, 0.10, 0.96) if flip_h else (0.28, 0.24, 0.18, 0.96), True, flip_h)
     has_sel = bool(get_selected_widget_verts(wd))
     draw_widget_button(shader, rot_x0, by0, rot_x1, by1, (0.38, 0.18, 0.52, 0.96) if has_sel else (0.18, 0.16, 0.20, 0.96), has_sel, wd.rotate_active)
+    draw_widget_button(shader, idx_x0, by0, idx_x1, by1, (0.2, 0.4, 0.3, 0.96) if wd.show_vert_indices else (0.15, 0.18, 0.16, 0.96), True, wd.show_vert_indices)
 
     font_id = 0
     blf.size(font_id, 15)
@@ -539,11 +614,14 @@ def draw_widget_callback():
     blf.color(font_id, 1.0, 1.0, 1.0, 1.0 if has_sel else 0.38)
     blf.position(font_id, rot_x0 + 39.0, by0 + 11.0, 0)
     blf.draw(font_id, "\u65cb\u8f6c")
+    blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
+    blf.position(font_id, idx_x0 + 31.0, by0 + 11.0, 0)
+    blf.draw(font_id, "\u5e8f\u53f7")
 
     blf.size(font_id, 13)
     blf.color(font_id, 0.7, 0.8, 0.9, 0.7)
     blf.position(font_id, 18.0, 24.0, 0)
-    blf.draw(font_id, "\u5de6\u53f3\u4fa7:\u76f8\u90bb\u622a\u9762 | \u70b9\u51fb\u4fa7\u9762\u53ef\u5207\u6362\u7f16\u8f91")
+    blf.draw(font_id, "\u70b9\u51fb\u4e0a\u65b9\u7f29\u7565\u56fe\u5207\u6362\u622a\u9762 | \u4e2d\u952e\u63d2\u5165\u70b9 | \u53f3\u952e\u62d6\u62fd\u6846\u9009")
 
     gpu.state.line_width_set(1.0)
     gpu.state.point_size_set(1.0)
@@ -614,6 +692,12 @@ def get_cross_section_effective_transform(curve_point, point_setting):
 def get_cross_section_effective_scale(curve_point, point_setting):
     scale, _rotation = get_cross_section_effective_transform(curve_point, point_setting)
     return scale
+
+
+
+def get_raw_offset(vertex):
+    """Return raw offset_x, offset_y without radius/scale/rotation transforms."""
+    return vertex.offset_x, vertex.offset_y
 
 
 def get_effective_offset(vertex, curve_point, point_setting):
@@ -1072,6 +1156,29 @@ def distance_point_to_segment(px, py, ax, ay, bx, by):
     return math.sqrt((px - cx) ** 2 + (py - cy) ** 2), cx, cy, t
 
 
+
+def find_nearest_raw_edge(verts, mx, my, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h=False):
+    """Find nearest edge using raw offsets."""
+    closest_idx = -1
+    closest_dist = 18.0
+    closest_local = (0.0, 0.0)
+    closest_t = 0.5
+    n = len(verts)
+    for i in range(n):
+        j = (i + 1) % n
+        ix, iy = get_raw_offset(verts[i])
+        jx, jy = get_raw_offset(verts[j])
+        ax, ay = effective_to_widget(ix, iy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h)
+        bx, by = effective_to_widget(jx, jy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h)
+        dist, hit_x, hit_y, edge_t = distance_point_to_segment(mx, my, ax, ay, bx, by)
+        if dist < closest_dist:
+            closest_dist = dist
+            closest_idx = i
+            closest_local = widget_to_effective(hit_x, hit_y, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h)
+            closest_t = edge_t
+    return closest_idx, closest_local, closest_t
+
+
 def find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf, curve_point, point_setting, alignment_angle, flip_h=False):
     closest_idx = -1
     closest_dist = 18.0
@@ -1091,6 +1198,21 @@ def find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf, curve_point, poin
             closest_local = widget_to_effective(hit_x, hit_y, cx, cy, sf, alignment_angle, flip_h)
             closest_t = edge_t
     return closest_idx, closest_local, closest_t
+
+
+
+def find_nearest_raw_vertex(verts, mx, my, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h, max_dist=24.0):
+    """Find nearest vertex using raw offsets."""
+    closest_idx = -1
+    closest_dist = max_dist
+    for i, v in enumerate(verts):
+        ox, oy = get_raw_offset(v)
+        px, py = effective_to_widget(ox, oy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h)
+        dist = math.sqrt((mx - px) ** 2 + (my - py) ** 2)
+        if dist < closest_dist:
+            closest_dist = dist
+            closest_idx = i
+    return closest_idx
 
 
 def find_nearest_cross_section_vertex(verts, mx, my, cx, cy, sf, curve_point, point_setting, alignment_angle, max_dist=24.0, flip_h=False):
@@ -1263,7 +1385,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     inside_toggle_button = is_inside_rect(mx, my, wd.toggle_button_x0, wd.toggle_button_y0, wd.toggle_button_x1, wd.toggle_button_y1)
     inside_flip_button = is_inside_rect(mx, my, wd.flip_button_x0, wd.flip_button_y0, wd.flip_button_x1, wd.flip_button_y1)
     inside_rotate_button = is_inside_rect(mx, my, wd.rotate_button_x0, wd.rotate_button_y0, wd.rotate_button_x1, wd.rotate_button_y1)
-    inside_controls = inside_add_button or inside_remove_button or inside_toggle_button or inside_flip_button or inside_rotate_button
+    inside_idx_button = is_inside_rect(mx, my, wd.idx_button_x0, wd.idx_button_y0, wd.idx_button_x1, wd.idx_button_y1)
+    inside_controls = inside_add_button or inside_remove_button or inside_toggle_button or inside_flip_button or inside_rotate_button or inside_idx_button
 
     # Rotate mode active
     if wd.rotate_active:
@@ -1319,7 +1442,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             by1 = max(wd.box_y0, wd.box_y1)
             selected = set()
             for i, v in enumerate(verts):
-                ox, oy = get_effective_offset(v, curve_point, ps)
+                ox, oy = get_raw_offset(v)
                 px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
                 if bx0 <= px <= bx1 and by0 <= py <= by1:
                     selected.add(i)
@@ -1368,12 +1491,12 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     # Middle mouse - insert vertex on edge
     if event.type == 'MIDDLEMOUSE' and event.value == 'PRESS':
         if inside_widget and sf > 0.001:
-            edge_idx, local_pos, edge_t = find_nearest_cross_section_edge(
-                verts, mx, my, cx, cy, sf, curve_point, ps, alignment_angle, flip_h
+            edge_idx, local_pos, edge_t = find_nearest_raw_edge(
+                verts, mx, my, cx, cy, sf, alignment_angle, flip_h
             )
             if edge_idx >= 0:
                 insert_cross_section_vertex_on_edge_all(
-                    settings, settings.active_point_index, edge_idx, local_pos[0], local_pos[1], edge_t, curve_point
+                    settings, settings.active_point_index, edge_idx, local_pos[0], local_pos[1], edge_t, None
                 )
                 wd.drag_vert_index = -1
                 redraw_view3d(context)
@@ -1418,10 +1541,12 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             wd.drag_vert_index = -1
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
+        if inside_idx_button:
+            wd.show_vert_indices = not wd.show_vert_indices
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
 
-        closest_idx = find_nearest_cross_section_vertex(
-            verts, mx, my, cx, cy, sf, curve_point, ps, alignment_angle, flip_h=flip_h
-        )
+        closest_idx = find_nearest_raw_vertex(verts, mx, my, cx, cy, sf, alignment_angle, flip_h)
         if closest_idx >= 0:
             ps.active_vert_index = closest_idx
             if event.shift:
@@ -1437,29 +1562,30 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 wd.drag_vert_index = -1
             else:
                 wd.drag_vert_index = closest_idx
+                wd.drag_panel = 0
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
 
-        prev_idx, current_idx, next_idx = get_neighbor_point_indices(settings)
-        side_scale = 0.55
-        side_half_size = half * side_scale
-        side_offset_x = half + side_half_size + 40
-        left_cx = cx - side_offset_x
-        right_cx = cx + side_offset_x
-        clicked_side = None
-        if prev_idx >= 0 and abs(mx - left_cx) <= side_half_size and abs(my - cy) <= side_half_size:
-            clicked_side = prev_idx
-        elif next_idx >= 0 and abs(mx - right_cx) <= side_half_size and abs(my - cy) <= side_half_size:
-            clicked_side = next_idx
-        if clicked_side is not None:
-            settings.active_point_index = clicked_side
-            wd.drag_vert_index = -1
-            wd.widget_scale_factor = 0.0
-            set_selected_widget_verts(wd, set())
-            redraw_view3d(context)
-            return {'RUNNING_MODAL'}
+        total_points = len(settings.point_settings)
+        thumb_size = 140.0
+        thumb_gap = 10.0
+        thumb_total_w = total_points * thumb_size + (total_points - 1) * thumb_gap
+        thumb_start_x = cx - thumb_total_w * 0.5
+        thumb_y = cy + half + 18 + 30.0
+        thumb_th = thumb_size * 0.5
+        for pt_idx in range(total_points):
+            tx = thumb_start_x + pt_idx * (thumb_size + thumb_gap) + thumb_size * 0.5
+            if abs(mx - tx) <= thumb_th and abs(my - thumb_y) <= thumb_th:
+                settings.active_point_index = pt_idx
+                select_curve_point_by_index(obj, pt_idx)
+                wd.drag_vert_index = -1
+                set_selected_widget_verts(wd, set())
+                redraw_view3d(context)
+                return {'RUNNING_MODAL'}
 
-        if not inside_widget:
+        inside_thumb_strip = (abs(my - thumb_y) <= thumb_th + 10 and
+                              thumb_start_x - 10 <= mx <= thumb_start_x + thumb_total_w + 10)
+        if not inside_widget and not inside_thumb_strip:
             if close_on_key_release or inside_controls:
                 return {'RUNNING_MODAL'}
             operator._finish(context)
@@ -1469,21 +1595,19 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     # Mouse move - drag selected points together
     if event.type == 'MOUSEMOVE':
         if 0 <= wd.drag_vert_index < len(verts) and sf > 0.001 and not getattr(verts[wd.drag_vert_index], 'is_ghost', False):
-            effective_x, effective_y = widget_to_effective(mx, my, cx, cy, sf, alignment_angle, flip_h)
+            new_x, new_y = widget_to_effective(mx, my, cx, cy, sf, alignment_angle, flip_h)
             drag_v = verts[wd.drag_vert_index]
             old_x, old_y = drag_v.offset_x, drag_v.offset_y
-            set_vertex_from_effective_offset(drag_v, effective_x, effective_y, curve_point, ps)
-            dx = drag_v.offset_x - old_x
-            dy = drag_v.offset_y - old_y
+            drag_v.offset_x = new_x
+            drag_v.offset_y = new_y
+            dx = new_x - old_x
+            dy = new_y - old_y
             sel = get_selected_widget_verts(wd)
             for si in sel:
                 if si != wd.drag_vert_index and 0 <= si < len(verts) and not getattr(verts[si], 'is_ghost', False):
                     verts[si].offset_x += dx
                     verts[si].offset_y += dy
             update_ghost_vertices(ps)
-            for si in sel:
-                if si < len(verts):
-                    apply_active_vertex_edit_to_selected_points(context, ps, si)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if inside_widget or inside_controls:
