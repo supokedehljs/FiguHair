@@ -67,6 +67,13 @@ class HairPipeWidgetSettings(PropertyGroup):
     rotate_button_y0: FloatProperty(default=0.0)
     rotate_button_x1: FloatProperty(default=0.0)
     rotate_button_y1: FloatProperty(default=0.0)
+    corr_rot_x0: FloatProperty(default=0.0)
+    corr_rot_y0: FloatProperty(default=0.0)
+    corr_rot_x1: FloatProperty(default=0.0)
+    corr_rot_y1: FloatProperty(default=0.0)
+    corr_rot_dragging: bpy.props.BoolProperty(default=False)
+    corr_rot_drag_start_x: FloatProperty(default=0.0)
+    corr_rot_drag_start_val: FloatProperty(default=0.0)
 
 
 
@@ -425,7 +432,7 @@ def draw_widget_callback():
 
     padding = 18
     half = size / 2.0 - padding
-    alignment_angle = get_view_alignment_angle(context)
+    alignment_angle = get_view_alignment_angle(context) + math.radians(settings.widget_correct_rotation)
     flip_h = wd.flip_horizontal
 
     base_radius = settings.default_radius
@@ -617,6 +624,26 @@ def draw_widget_callback():
     blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
     blf.position(font_id, idx_x0 + 31.0, by0 + 11.0, 0)
     blf.draw(font_id, "\u5e8f\u53f7")
+
+    # Rotation correction field
+    corr_w = 160.0
+    corr_h = 32.0
+    corr_x0 = cx - corr_w * 0.5
+    corr_x1 = corr_x0 + corr_w
+    corr_y0 = by0 - corr_h - 14.0
+    corr_y1 = corr_y0 + corr_h
+    wd.corr_rot_x0 = corr_x0
+    wd.corr_rot_y0 = corr_y0
+    wd.corr_rot_x1 = corr_x1
+    wd.corr_rot_y1 = corr_y1
+    draw_widget_button(shader, corr_x0, corr_y0, corr_x1, corr_y1, enabled=True,
+                       active=abs(settings.widget_correct_rotation) > 0.01)
+    font_id = 0
+    blf.size(font_id, 14)
+    blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
+    corr_label = f"\u65cb\u8f6c\u4fee\u6b63: {settings.widget_correct_rotation:.1f}\u00b0"
+    blf.position(font_id, corr_x0 + 8.0, corr_y0 + 9.0, 0)
+    blf.draw(font_id, corr_label)
 
     blf.size(font_id, 13)
     blf.color(font_id, 0.7, 0.8, 0.9, 0.7)
@@ -931,77 +958,49 @@ def get_view_direction_marker(context, marker_radius):
 
 
 def get_active_curve_stable_frame(context):
-    """Compute cross-section frame using only the local tangent at the active point."""
+    """Compute cross-section frame from the first segment (point 0->1 tangent).
+
+    This keeps the widget coordinate system stable regardless of which point
+    is currently being edited.  Only moving the first two points changes the
+    frame, which is the expected behaviour.
+    """
     obj = context.active_object
     if obj is None or obj.type != 'CURVE':
         return None
 
-    settings = obj.hair_pipe_settings
-    target_index = settings.active_point_index
-    global_idx = 0
     world_3x3 = obj.matrix_world.to_3x3()
 
     for spline in obj.data.splines:
         if spline.type == 'BEZIER':
             points = spline.bezier_points
-            local_count = len(points)
-            if target_index < global_idx or target_index >= global_idx + local_count:
-                global_idx += local_count
+            if len(points) < 1:
                 continue
-            target_local_idx = target_index - global_idx
-            point = points[target_local_idx]
-            prev_tangent = None
-            next_tangent = None
-            if spline.use_cyclic_u or target_local_idx > 0:
-                prev_tangent = point.co - point.handle_left
-                if prev_tangent.length < 1e-8:
-                    prev_idx = (target_local_idx - 1) % local_count
-                    prev_tangent = point.co - points[prev_idx].co
-            if spline.use_cyclic_u or target_local_idx < local_count - 1:
-                next_tangent = point.handle_right - point.co
-                if next_tangent.length < 1e-8:
-                    next_idx = (target_local_idx + 1) % local_count
-                    next_tangent = points[next_idx].co - point.co
-            if prev_tangent is not None and next_tangent is not None:
-                tangent = safe_normalized(prev_tangent + next_tangent, next_tangent)
-            elif next_tangent is not None:
-                tangent = safe_normalized(next_tangent)
-            elif prev_tangent is not None:
-                tangent = safe_normalized(prev_tangent)
+            p0 = points[0]
+            # Forward tangent from point 0: use handle_right if available
+            if len(points) >= 2:
+                fwd = p0.handle_right - p0.co
+                if fwd.length < 1e-8:
+                    fwd = points[1].co - p0.co
             else:
-                tangent = Vector((0, 0, 1))
+                fwd = p0.handle_right - p0.co
+            tangent = safe_normalized(fwd)
         else:
             points = spline.points
-            local_count = len(points)
-            if target_index < global_idx or target_index >= global_idx + local_count:
-                global_idx += local_count
+            if len(points) < 1:
                 continue
-            target_local_idx = target_index - global_idx
-            co = Vector(points[target_local_idx].co[:3])
-            prev_tangent = None
-            next_tangent = None
-            if spline.use_cyclic_u or target_local_idx > 0:
-                prev_idx = (target_local_idx - 1) % local_count
-                prev_tangent = co - Vector(points[prev_idx].co[:3])
-            if spline.use_cyclic_u or target_local_idx < local_count - 1:
-                next_idx = (target_local_idx + 1) % local_count
-                next_tangent = Vector(points[next_idx].co[:3]) - co
-            if prev_tangent is not None and next_tangent is not None:
-                tangent = safe_normalized(prev_tangent + next_tangent, next_tangent)
-            elif next_tangent is not None:
-                tangent = safe_normalized(next_tangent)
-            elif prev_tangent is not None:
-                tangent = safe_normalized(prev_tangent)
+            co0 = Vector(points[0].co[:3])
+            if len(points) >= 2:
+                fwd = Vector(points[1].co[:3]) - co0
             else:
-                tangent = Vector((0, 0, 1))
+                fwd = Vector((0, 0, 1))
+            tangent = safe_normalized(fwd)
 
         normal, binormal = get_cross_section_frame(tangent)
-        world_normal = safe_normalized(world_3x3 @ normal)
+        world_normal   = safe_normalized(world_3x3 @ normal)
         world_binormal = safe_normalized(world_3x3 @ binormal)
         return world_normal, world_binormal
 
     return None
-
 
 
 def get_view_direction_unit(context):
@@ -1362,7 +1361,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     cx = wd.widget_center_x
     cy = wd.widget_center_y
     sf = wd.widget_scale_factor
-    alignment_angle = get_view_alignment_angle(context)
+    alignment_angle = get_view_alignment_angle(context) + math.radians(settings.widget_correct_rotation)
     flip_h = wd.flip_horizontal
     mx, my = operator._get_local_mouse(event, wd)
     half = wd.widget_size / 2.0
@@ -1532,6 +1531,13 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             wd.show_vert_indices = not wd.show_vert_indices
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
+        inside_corr_rot = is_inside_rect(mx, my, wd.corr_rot_x0, wd.corr_rot_y0, wd.corr_rot_x1, wd.corr_rot_y1)
+        if inside_corr_rot:
+            wd.corr_rot_dragging = True
+            wd.corr_rot_drag_start_x = mx
+            wd.corr_rot_drag_start_val = settings.widget_correct_rotation
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
 
         closest_idx = find_nearest_raw_vertex(verts, mx, my, cx, cy, sf, alignment_angle, flip_h)
         if closest_idx >= 0:
@@ -1577,6 +1583,18 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 return {'RUNNING_MODAL'}
             operator._finish(context)
             return {'FINISHED'}
+        return {'RUNNING_MODAL'}
+
+    # Rotation correction drag
+    if event.type == 'MOUSEMOVE' and wd.corr_rot_dragging:
+        delta_x = mx - wd.corr_rot_drag_start_x
+        settings.widget_correct_rotation = max(-180.0, min(180.0, wd.corr_rot_drag_start_val + delta_x * 0.5))
+        redraw_view3d(context)
+        return {'RUNNING_MODAL'}
+
+    if event.type == 'LEFTMOUSE' and event.value == 'RELEASE' and wd.corr_rot_dragging:
+        wd.corr_rot_dragging = False
+        redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
     # Mouse move - drag selected points together
@@ -1631,7 +1649,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         operator._finish(context)
         return {'FINISHED'}
 
-    if (inside_widget or inside_controls) and event.type in {'LEFTMOUSE', 'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
+    inside_corr_rot_box = is_inside_rect(mx, my, wd.corr_rot_x0, wd.corr_rot_y0, wd.corr_rot_x1, wd.corr_rot_y1)
+    if (inside_widget or inside_controls or inside_corr_rot_box) and event.type in {'LEFTMOUSE', 'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
         return {'RUNNING_MODAL'}
 
     return {'PASS_THROUGH'}

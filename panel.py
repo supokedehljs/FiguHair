@@ -37,6 +37,9 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         row = box.row(align=True)
         row.scale_y = 1.35
         row.operator("hair_pipe.generate_pipe", text="\u751f\u6210 / \u66f4\u65b0\u7ba1\u7ebf")
+        row2 = box.row(align=True)
+        row2.scale_y = 1.2
+        row2.operator("hair_pipe.duplicate_hair", text="复制头发", icon='DUPLICATE')
         mode_text = "\u53ea\u9009\u66f2\u7ebf\u6a21\u5f0f" if settings.redirect_selection else "\u5934\u53d1\u7f51\u683c\u53ef\u9009\u6a21\u5f0f"
         row = box.row(align=True)
         row.prop(settings, "redirect_selection", text=mode_text, toggle=True)

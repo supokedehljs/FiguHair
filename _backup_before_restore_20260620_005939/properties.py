@@ -73,9 +73,9 @@ class HairPipeSettings(PropertyGroup):
     )
     pipe_resolution: IntProperty(
         name="Pipe Resolution",
-        description="Intermediate rings between neighboring cross-sections. 0 = sections connect directly, 1 = one ring in between, etc.",
+        description="Generated rings between neighboring curve control points; higher values make cross-section transitions smoother",
         default=1,
-        min=0,
+        min=1,
         max=64,
     )
     transition_mode: EnumProperty(
@@ -154,11 +154,6 @@ class HairPipeSettings(PropertyGroup):
         description="Close the ends of the pipe",
         default=False,
     )
-    default_subdiv: BoolProperty(
-        name="Default Subdivision",
-        description="Add a level 2 subdivision surface modifier when creating the pipe mesh",
-        default=True,
-    )
     redirect_selection: BoolProperty(
         name="Select Curve From Preview",
         description="Selecting the generated preview mesh automatically selects this source curve",
@@ -170,15 +165,6 @@ class HairPipeSettings(PropertyGroup):
         description="Index of the currently selected curve control point",
         default=0,
         min=0,
-    )
-    widget_correct_rotation: FloatProperty(
-        name="Rotation Correction",
-        description="Manual rotation correction for the cross-section display on this curve (degrees)",
-        default=0.0,
-        min=-180.0,
-        max=180.0,
-        precision=1,
-        subtype="ANGLE",
     )
 
 
