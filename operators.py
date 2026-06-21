@@ -2545,8 +2545,9 @@ class HAIRPIPE_OT_toggle_tail_visibility(bpy.types.Operator):
         new_hidden = not tail_obj.hide_viewport
         tail_obj.hide_viewport = new_hidden
         tail_obj.hide_render = True
-        # Store the user-intended visibility so edit-mode toggle respects it
         tail_obj["hair_pipe_tail_user_hidden"] = new_hidden
+        # show_in_front mirrors visibility: True when shown, False when hidden
+        tail_obj.show_in_front = not new_hidden
         return {'FINISHED'}
 
 
@@ -2735,8 +2736,145 @@ class HAIRPIPE_OT_duplicate_hair(bpy.types.Operator):
             # Re-create a fresh independent node group pointing to new_tail_obj
             ensure_tail_join_geometry_nodes(new_pipe, new_tail_obj)
 
-        self.report({'INFO'}, f"\u5df2\u590d\u5236\u5934\u53d1: {new_base}")
+        # Give the duplicated tail a fully independent mesh datablock.
+        # Always force a copy -- shared data causes cross-hair corruption.
+        if new_tail_obj is not None:
+            independent_mesh = new_tail_obj.data.copy()
+            independent_mesh.name = new_tail_obj.name
+            new_tail_obj.data = independent_mesh
+            # Not in edit mode: show_in_front should be off
+            new_tail_obj.show_in_front = False
+            new_tail_obj.hide_render = True
+            # Mirror the visibility state of the source tail
+            if tail_obj is not None:
+                new_tail_obj.hide_viewport = tail_obj.hide_viewport
+                new_tail_obj["hair_pipe_tail_user_hidden"] = bool(
+                    tail_obj.get("hair_pipe_tail_user_hidden", tail_obj.hide_viewport)
+                )
+
         return {'FINISHED'}
+
+
+class HAIRPIPE_OT_merge_hair_for_export(bpy.types.Operator):
+    """\u5c06\u6240\u6709\u5934\u53d1\u7f51\u683c\u5408\u5e76\u4e3a\u5355\u4e00\u7f51\u683c\u7528\u4e8e\u5bfc\u51fa\uff0c\u5e76\u9690\u85cf\u539f\u59cb\u5934\u53d1"""
+    bl_idname = "hair_pipe.merge_hair_for_export"
+    bl_label = "\u5408\u5e76\u5934\u53d1\u7f51\u683c"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return any(_is_hair_pipe_mesh_obj(o) for o in bpy.data.objects)
+
+    def execute(self, context):
+        import bmesh as _bmesh
+
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        pipe_objs = [o for o in bpy.data.objects if _is_pipe_mesh_obj(o)]
+
+        if not pipe_objs:
+            self.report({'ERROR'}, "\u573a\u666f\u4e2d\u672a\u627e\u5230\u4efb\u4f55\u5934\u53d1\u7f51\u683c")
+            return {'CANCELLED'}
+
+        all_verts = []
+        all_faces = []
+
+        for pipe_obj in pipe_objs:
+            pipe_matrix = pipe_obj.matrix_world
+
+            # ── pipe raw mesh (no modifiers) ──────────────────────────────
+            pipe_mesh = pipe_obj.data
+            base = len(all_verts)
+            for v in pipe_mesh.vertices:
+                all_verts.append(pipe_matrix @ v.co)
+            for poly in pipe_mesh.polygons:
+                all_faces.append(tuple(base + i for i in poly.vertices))
+
+            # ── tail raw mesh (no modifiers, direct .data read) ───────────
+            curve_obj = get_pipe_source_curve(pipe_obj)
+            tail_obj  = get_tail_object_for_curve(curve_obj) if curve_obj else None
+            if tail_obj is not None:
+                tail_matrix = tail_obj.matrix_world
+                tail_mesh = tail_obj.data
+                tail_base = len(all_verts)
+                for v in tail_mesh.vertices:
+                    all_verts.append(tail_matrix @ v.co)
+                for poly in tail_mesh.polygons:
+                    all_faces.append(tuple(tail_base + i for i in poly.vertices))
+
+        if not all_verts:
+            self.report({'ERROR'}, "\u65e0\u6cd5\u6536\u96c6\u5230\u6709\u6548\u7684\u7f51\u683c\u6570\u636e")
+            return {'CANCELLED'}
+
+        # Build merged mesh directly from collected data
+        merged_mesh = bpy.data.meshes.new("HairMerged")
+        merged_mesh.from_pydata(all_verts, [], all_faces)
+        try:
+            merged_mesh.validate(clean_customdata=False)
+        except Exception:
+            try:
+                merged_mesh.validate()
+            except Exception:
+                pass
+        for poly in merged_mesh.polygons:
+            poly.use_smooth = True
+        merged_mesh.update()
+
+        # Place merged object in the scene collection
+        merged_obj = bpy.data.objects.new("HairMerged", merged_mesh)
+        context.scene.collection.objects.link(merged_obj)
+
+        for o in context.selected_objects:
+            o.select_set(False)
+        merged_obj.select_set(True)
+        context.view_layer.objects.active = merged_obj
+
+        self.report({'INFO'}, f"\u5df2\u5408\u5e76 {len(pipe_objs)} \u4e2a\u5934\u53d1\u7f51\u683c\u4e3a: {merged_obj.name}")
+        return {'FINISHED'}
+
+
+def _is_pipe_mesh_obj(obj):
+    """True for FiguHair pipe mesh objects (the generated tube)."""
+    if obj.type != 'MESH':
+        return False
+    if obj.get("hair_pipe_source_curve"):
+        return True
+    if obj.name.endswith(" Mesh") and obj.parent is not None and obj.parent.type == 'EMPTY':
+        return bool(obj.parent.get("hair_pipe_root"))
+    if obj.name.endswith("_FiguHair"):
+        return True
+    return False
+
+
+def _is_hair_pipe_mesh_obj(obj):
+    """True for any FiguHair mesh (pipe or tail)."""
+    return _is_pipe_mesh_obj(obj) or _is_tail_mesh_only_obj(obj)
+
+
+def _is_tail_mesh_only_obj(obj):
+    """True for FiguHair tail mesh objects."""
+    if obj.type != 'MESH':
+        return False
+    if obj.get("hair_pipe_tail_source_curve"):
+        return True
+    if obj.name.endswith(" Tail") and obj.parent is not None and obj.parent.type == 'EMPTY':
+        return bool(obj.parent.get("hair_pipe_root"))
+    if obj.name.endswith("_FiguHairTail"):
+        return True
+    return False
+
+
+def _is_figuhair_family_obj(obj):
+    """True for any object belonging to a FiguHair hair set."""
+    if _is_pipe_mesh_obj(obj) or _is_tail_mesh_only_obj(obj):
+        return True
+    if obj.type == 'CURVE' and obj.get("hair_pipe_base_name"):
+        return True
+    if obj.type == 'EMPTY' and obj.get("hair_pipe_root"):
+        return True
+    return False
+
 
 classes = (
     HAIRPIPE_OT_generate_pipe,
@@ -2758,6 +2896,7 @@ classes = (
     HAIRPIPE_OT_toggle_tail_visibility,
     HAIRPIPE_OT_edit_tail_mesh,
     HAIRPIPE_OT_duplicate_hair,
+    HAIRPIPE_OT_merge_hair_for_export,
 )
 
 
