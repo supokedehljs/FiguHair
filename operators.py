@@ -669,7 +669,7 @@ def generate_pipe_mesh(curve_obj, settings):
 
     for spline_data in splines_data:
         points = spline_data['points']
-        resolution = max(1, settings.pipe_resolution)
+        resolution = max(0, settings.pipe_resolution)
         is_cyclic = spline_data['cyclic']
         num_points = len(points)
         if num_points < 2:
@@ -692,7 +692,7 @@ def generate_pipe_mesh(curve_obj, settings):
                 idx_next = (idx1 + 1) % num_points if is_cyclic or idx1 < num_points - 1 else idx1
                 ps_prev = get_point_setting(point_settings, global_point_idx + idx_prev, settings)
                 ps_next = get_point_setting(point_settings, global_point_idx + idx_next, settings)
-                steps = max(1, resolution)
+                steps = max(1, resolution + 1)
                 end_inc = 1 if (seg_idx == seg_count - 1 and not is_cyclic) else 0
                 for step in range(steps + end_inc):
                     t = step / steps
@@ -712,8 +712,11 @@ def generate_pipe_mesh(curve_obj, settings):
             use_endpoint = spline_data.get('use_endpoint_u', False)
             knots = make_nurbs_knot_vector(num_points, degree, is_cyclic, use_endpoint)
             u_start, u_end = get_nurbs_domain(num_points, degree, knots, is_cyclic)
-            sample_count = max(2, (num_points if is_cyclic else num_points - 1) * max(4, resolution * 2))
-            ring_count = sample_count if is_cyclic else sample_count + 1
+            segs = num_points if is_cyclic else num_points - 1
+            steps_per_seg = resolution + 1
+            sample_count = segs * steps_per_seg if is_cyclic else segs * steps_per_seg + 1
+            sample_count = max(2, sample_count)
+            ring_count = sample_count
             u_range = u_end - u_start
             centers = []
             interp_offsets = []
@@ -756,7 +759,7 @@ def generate_pipe_mesh(curve_obj, settings):
                 idx_next = (idx1 + 1) % num_points if is_cyclic or idx1 < num_points - 1 else idx1
                 ps_prev = get_point_setting(point_settings, global_point_idx + idx_prev, settings)
                 ps_next = get_point_setting(point_settings, global_point_idx + idx_next, settings)
-                steps = max(1, resolution)
+                steps = max(1, resolution + 1)
                 end_inc = 1 if (seg_idx == seg_count - 1 and not is_cyclic) else 0
                 for step in range(steps + end_inc):
                     t = step / steps
@@ -2511,13 +2514,6 @@ class HAIRPIPE_OT_remove_tail_mesh(bpy.types.Operator):
             modifier = pipe_obj.modifiers.get("FiguHair Join Tail")
             if modifier is not None:
                 pipe_obj.modifiers.remove(modifier)
-        proxy_name = tail_obj.name + " Edit"
-        proxy_obj = bpy.data.objects.get(proxy_name)
-        if proxy_obj is not None and proxy_obj.data == tail_obj.data:
-            bpy.data.objects.remove(proxy_obj, do_unlink=True)
-        for obj in list(bpy.data.objects):
-            if obj.get("hair_pipe_tail_edit_proxy_source") == tail_obj.name:
-                bpy.data.objects.remove(obj, do_unlink=True)
         mesh_data = tail_obj.data
         bpy.data.objects.remove(tail_obj, do_unlink=True)
         if mesh_data is not None and mesh_data.users == 0:
@@ -2549,17 +2545,13 @@ class HAIRPIPE_OT_toggle_tail_visibility(bpy.types.Operator):
         new_hidden = not tail_obj.hide_viewport
         tail_obj.hide_viewport = new_hidden
         tail_obj.hide_render = True
-        proxy_name = tail_obj.name + " Edit"
-        proxy_obj = bpy.data.objects.get(proxy_name)
-        if proxy_obj is not None and proxy_obj.data == tail_obj.data:
-            proxy_obj.hide_viewport = new_hidden
         return {'FINISHED'}
 
 
 class HAIRPIPE_OT_edit_tail_mesh(bpy.types.Operator):
-    """Enter edit mode on the tail mesh proxy (upright at origin)"""
+    """切换末端网格编辑模式与曲线编辑模式"""
     bl_idname = "hair_pipe.edit_tail_mesh"
-    bl_label = "编辑末端网格"
+    bl_label = "\u7f16\u8f91\u672b\u7aef\u7f51\u683c"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -2576,18 +2568,45 @@ class HAIRPIPE_OT_edit_tail_mesh(bpy.types.Operator):
         tail_obj = get_tail_object_for_curve(curve_obj)
         if tail_obj is None:
             return {'CANCELLED'}
-        proxy_obj = ensure_tail_edit_proxy(tail_obj)
-        if proxy_obj is None:
-            self.report({'ERROR'}, "无法创建编辑代理")
-            return {'CANCELLED'}
-        proxy_obj.hide_viewport = False
-        if context.mode != 'OBJECT':
+
+        active = context.active_object
+        mode = context.mode
+
+        # Currently editing tail mesh -> return to curve edit mode
+        if active == tail_obj and mode == 'EDIT_MESH':
+            with context.temp_override(active_object=tail_obj, object=tail_obj):
+                bpy.ops.object.mode_set(mode='OBJECT')
+            for obj in list(context.selected_objects):
+                obj.select_set(False)
+            curve_obj.hide_set(False)
+            curve_obj.select_set(True)
+            context.view_layer.objects.active = curve_obj
+            with context.temp_override(active_object=curve_obj, object=curve_obj):
+                bpy.ops.object.mode_set(mode='EDIT')
+            return {'FINISHED'}
+
+        # Enter tail mesh edit mode
+        # 1. Exit any current mode cleanly, keeping context on the current active object
+        if mode not in ('OBJECT',):
             bpy.ops.object.mode_set(mode='OBJECT')
-        for obj in context.selected_objects:
+
+        # 2. Temporarily disable redirect_selection so handler does not fight us
+        redirect_was = curve_obj.hair_pipe_settings.redirect_selection
+        curve_obj.hair_pipe_settings.redirect_selection = False
+
+        # 3. Switch active to tail and enter edit mode
+        tail_obj.hide_set(False)
+        tail_obj.hide_viewport = False
+        for obj in list(context.selected_objects):
             obj.select_set(False)
-        proxy_obj.select_set(True)
-        context.view_layer.objects.active = proxy_obj
-        bpy.ops.object.mode_set(mode='EDIT')
+        tail_obj.select_set(True)
+        context.view_layer.objects.active = tail_obj
+        with context.temp_override(active_object=tail_obj, object=tail_obj):
+            bpy.ops.object.mode_set(mode='EDIT')
+
+        # 4. Restore redirect_selection
+        curve_obj.hair_pipe_settings.redirect_selection = redirect_was
+
         return {'FINISHED'}
 
 
