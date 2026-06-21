@@ -2634,124 +2634,135 @@ class HAIRPIPE_OT_duplicate_hair(bpy.types.Operator):
         if curve_obj is None:
             return {'CANCELLED'}
 
-        # Collect objects to duplicate
-        root_obj  = get_figuhair_root(curve_obj)
-        pipe_obj  = get_pipe_object_for_curve(curve_obj)
-        tail_obj  = get_tail_object_for_curve(curve_obj)
+        root_obj = get_figuhair_root(curve_obj)
+        pipe_obj = get_pipe_object_for_curve(curve_obj)
+        tail_obj = get_tail_object_for_curve(curve_obj)
 
-        objs_to_dup = []
-        if root_obj  is not None: objs_to_dup.append(root_obj)
-        if curve_obj is not None: objs_to_dup.append(curve_obj)
-        if pipe_obj  is not None: objs_to_dup.append(pipe_obj)
-        if tail_obj  is not None: objs_to_dup.append(tail_obj)
-
-        if not objs_to_dup:
-            return {'CANCELLED'}
-
-        # Exit edit mode if needed
         if context.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
 
-        # Deselect all, select only the hair objects
-        for o in context.selected_objects:
-            o.select_set(False)
-        for o in objs_to_dup:
-            o.select_set(True)
-        context.view_layer.objects.active = curve_obj
+        # Capture world matrices NOW, before creating anything
+        src_root_matrix  = root_obj.matrix_world.copy()  if root_obj  else Matrix.Identity(4)
+        src_curve_matrix = curve_obj.matrix_world.copy()
+        src_pipe_matrix  = pipe_obj.matrix_world.copy()  if pipe_obj  else None
+        src_tail_matrix  = tail_obj.matrix_world.copy()  if tail_obj  else None
 
-        # Duplicate (linked=False keeps data independent)
-        bpy.ops.object.duplicate(linked=False)
+        new_base   = get_next_figuhair_base_name()
+        target_col = (
+            curve_obj.users_collection[0]
+            if curve_obj.users_collection
+            else context.scene.collection
+        )
 
-        # After duplicate, newly created objects are selected
-        new_objs = list(context.selected_objects)
+        # ── 1. Root empty ──────────────────────────────────────────────────
+        new_root = bpy.data.objects.new(new_base, None)
+        new_root.empty_display_type = 'PLAIN_AXES'
+        new_root.empty_display_size = 0.35
+        new_root["hair_pipe_root"] = True
+        target_col.objects.link(new_root)
+        new_root.matrix_world = src_root_matrix
 
-        # Find the new curve (it is the duplicate of curve_obj)
-        new_curve = None
-        for o in new_objs:
-            if o.type == 'CURVE':
-                new_curve = o
-                break
+        # ── 2. Curve (independent copy of curve data) ──────────────────────
+        new_curve_data       = curve_obj.data.copy()
+        new_curve_data.name  = new_base + " Curve"
+        new_curve            = bpy.data.objects.new(new_base + " Curve", new_curve_data)
+        new_curve["hair_pipe_base_name"] = new_base
+        new_curve["hair_pipe_root"]      = new_root.name
+        target_col.objects.link(new_curve)
+        new_curve.parent      = new_root
+        new_curve.matrix_world = src_curve_matrix
 
-        if new_curve is None:
-            return {'CANCELLED'}
+        # Deep-copy hair_pipe_settings
+        src_s = curve_obj.hair_pipe_settings
+        dst_s = new_curve.hair_pipe_settings
+        for attr in (
+            'default_radius', 'default_segments', 'pipe_resolution',
+            'transition_mode', 'transition_strength',
+            'strong_smoothing', 'strong_smoothing_iterations',
+            'smooth_shading', 'auto_update', 'cap_ends', 'default_subdiv',
+            'redirect_selection', 'edge_flow_mode', 'edge_flow_power',
+            'edge_flow_blend', 'active_point_index',
+        ):
+            try:
+                setattr(dst_s, attr, getattr(src_s, attr))
+            except (AttributeError, TypeError):
+                pass
+        dst_s.point_settings.clear()
+        for src_ps in src_s.point_settings:
+            dst_ps = dst_s.point_settings.add()
+            dst_ps.scale             = src_ps.scale
+            dst_ps.rotation          = src_ps.rotation
+            dst_ps.active_vert_index = src_ps.active_vert_index
+            dst_ps.cross_section_verts.clear()
+            for sv in src_ps.cross_section_verts:
+                dv = dst_ps.cross_section_verts.add()
+                dv.offset_x = sv.offset_x
+                dv.offset_y = sv.offset_y
+                dv.is_ghost  = sv.is_ghost
 
-        # Get a fresh base name
-        new_base = get_next_figuhair_base_name()
+        # ── 3. Pipe mesh ──────────────────────────────────────────────────
+        new_pipe = None
+        if pipe_obj is not None:
+            new_pipe_data       = pipe_obj.data.copy()
+            new_pipe_data.name  = new_base + " Mesh"
+            new_pipe            = bpy.data.objects.new(new_base + " Mesh", new_pipe_data)
+            new_pipe["hair_pipe_source_curve"] = new_curve.name
+            new_pipe.show_in_front = pipe_obj.show_in_front
+            new_pipe.hide_select   = pipe_obj.hide_select
+            new_pipe.hide_viewport = pipe_obj.hide_viewport
+            new_pipe.display_type  = pipe_obj.display_type
+            target_col.objects.link(new_pipe)
+            new_pipe.parent       = new_root
+            new_pipe.matrix_world = src_pipe_matrix
 
-        # Rename each duplicate according to its role
-        for o in new_objs:
-            if o.type == 'EMPTY':
-                o.name = new_base
-                o["hair_pipe_root"] = True
-            elif o.type == 'CURVE':
-                o.name = new_base + " Curve"
-                o["hair_pipe_base_name"] = new_base
-                o["hair_pipe_root"]      = o.parent.name if o.parent else ""
-            elif o.type == 'MESH':
-                if o.get("hair_pipe_tail_source_curve"):
-                    o.name = new_base + " Tail"
-                    o["hair_pipe_tail_source_curve"] = new_curve.name
-                else:
-                    o.name = new_base + " Mesh"
-                    o["hair_pipe_source_curve"] = new_curve.name
+            # Copy modifiers except Join-Tail GeoNodes (rebuilt in step 4)
+            for mod in pipe_obj.modifiers:
+                if mod.name == "FiguHair Join Tail":
+                    continue
+                new_mod = new_pipe.modifiers.new(mod.name, mod.type)
+                for attr in dir(mod):
+                    if attr.startswith('_') or attr in {
+                        'bl_rna', 'rna_type', 'name', 'type', 'node_group'
+                    }:
+                        continue
+                    try:
+                        setattr(new_mod, attr, getattr(mod, attr))
+                    except (AttributeError, TypeError):
+                        pass
 
-        # Update the curve's root pointer
-        new_root = None
-        for o in new_objs:
-            if o.type == 'EMPTY':
-                new_root = o
-                break
-        if new_root is not None:
-            new_curve["hair_pipe_root"] = new_root.name
-            new_root.name = new_base
+        # ── 4. Tail mesh ──────────────────────────────────────────────────
+        new_tail = None
+        if tail_obj is not None:
+            new_tail_data       = tail_obj.data.copy()
+            new_tail_data.name  = new_base + " Tail"
+            new_tail            = bpy.data.objects.new(new_base + " Tail", new_tail_data)
+            new_tail["hair_pipe_tail_source_curve"] = new_curve.name
+            new_tail["hair_pipe_tail_ring_count"]   = tail_obj.get("hair_pipe_tail_ring_count", 0)
+            for key in (
+                "hair_pipe_tail_direction", "hair_pipe_tail_connection_ring",
+                "hair_pipe_tail_lower_ring_count", "hair_pipe_tail_user_hidden",
+            ):
+                val = tail_obj.get(key)
+                if val is not None:
+                    new_tail[key] = val
+            new_tail.show_in_front = False
+            new_tail.hide_render   = True
+            new_tail.hide_viewport = tail_obj.hide_viewport
+            new_tail.display_type  = tail_obj.display_type
+            target_col.objects.link(new_tail)
+            new_tail.parent       = new_root
+            new_tail.matrix_world = src_tail_matrix
 
-        # Select only the new curve and make it active
+            if new_pipe is not None:
+                ensure_tail_modifier_stack(new_pipe, new_tail)
+
+        # ── 5. Activate the new curve ─────────────────────────────────────
         for o in context.selected_objects:
             o.select_set(False)
         new_curve.select_set(True)
         context.view_layer.objects.active = new_curve
 
-
-        # Fix geometry node group: ensure new pipe has its own node group
-        # pointing to new_tail, not sharing with the original pipe
-        new_pipe = None
-        new_tail_obj = None
-        for o in new_objs:
-            if o.type == 'MESH' and not o.get("hair_pipe_tail_source_curve"):
-                new_pipe = o
-            elif o.type == 'MESH' and o.get("hair_pipe_tail_source_curve"):
-                new_tail_obj = o
-        if new_pipe is not None and new_tail_obj is not None:
-            old_modifier = new_pipe.modifiers.get("FiguHair Join Tail")
-            if old_modifier is not None:
-                # Remove the shared node group from the copied modifier
-                old_group = old_modifier.node_group
-                new_pipe.modifiers.remove(old_modifier)
-                # If no other user, clean up the shared group to avoid orphans
-                if old_group is not None and old_group.users <= 1:
-                    try:
-                        bpy.data.node_groups.remove(old_group)
-                    except Exception:
-                        pass
-            # Re-create a fresh independent node group pointing to new_tail_obj
-            ensure_tail_join_geometry_nodes(new_pipe, new_tail_obj)
-
-        # Give the duplicated tail a fully independent mesh datablock.
-        # Always force a copy -- shared data causes cross-hair corruption.
-        if new_tail_obj is not None:
-            independent_mesh = new_tail_obj.data.copy()
-            independent_mesh.name = new_tail_obj.name
-            new_tail_obj.data = independent_mesh
-            # Not in edit mode: show_in_front should be off
-            new_tail_obj.show_in_front = False
-            new_tail_obj.hide_render = True
-            # Mirror the visibility state of the source tail
-            if tail_obj is not None:
-                new_tail_obj.hide_viewport = tail_obj.hide_viewport
-                new_tail_obj["hair_pipe_tail_user_hidden"] = bool(
-                    tail_obj.get("hair_pipe_tail_user_hidden", tail_obj.hide_viewport)
-                )
-
+        self.report({'INFO'}, f"\u5df2\u590d\u5236\u5934\u53d1: {new_base}")
         return {'FINISHED'}
 
 
