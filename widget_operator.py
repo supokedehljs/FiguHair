@@ -336,6 +336,116 @@ def draw_curve_start_marker(context, obj):
     gpu.state.blend_set('NONE')
 
 
+def draw_transition_point_markers(context, obj, settings):
+    if not is_curve_edit_mode(obj):
+        return
+    region = context.region
+    region_data = context.region_data
+    if region is None or region_data is None:
+        return
+
+    marker_points = []
+    marker_labels = []
+    global_idx = 0
+    for spline in obj.data.splines:
+        points = spline.bezier_points if spline.type == 'BEZIER' else spline.points
+        for point in points:
+            if global_idx < len(settings.point_settings) and is_transition_point(settings.point_settings[global_idx]):
+                co = Vector(point.co[:3]) if hasattr(point, 'co') and len(point.co) == 4 else point.co
+                pos = view3d_utils.location_3d_to_region_2d(region, region_data, obj.matrix_world @ co)
+                if pos is not None:
+                    marker_points.append((pos.x, pos.y))
+                    marker_labels.append((global_idx, pos.x, pos.y))
+            global_idx += 1
+
+    if not marker_points:
+        return
+
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    gpu.state.blend_set('ALPHA')
+    gpu.state.point_size_set(22.0)
+    batch = batch_for_shader(shader, 'POINTS', {"pos": marker_points})
+    shader.bind()
+    shader.uniform_float("color", (0.0, 0.85, 1.0, 1.0))
+    batch.draw(shader)
+
+    cross_lines = []
+    for _idx, x, y in marker_labels:
+        cross_lines.extend([(x - 8.0, y - 8.0), (x + 8.0, y + 8.0), (x - 8.0, y + 8.0), (x + 8.0, y - 8.0)])
+    gpu.state.line_width_set(2.0)
+    batch = batch_for_shader(shader, 'LINES', {"pos": cross_lines})
+    shader.bind()
+    shader.uniform_float("color", (0.02, 0.12, 0.16, 0.95))
+    batch.draw(shader)
+
+    font_id = 0
+    blf.size(font_id, 12)
+    blf.color(font_id, 0.0, 0.9, 1.0, 1.0)
+    for idx, x, y in marker_labels:
+        blf.position(font_id, x + 10.0, y + 8.0, 0)
+        blf.draw(font_id, f"AUTO {idx}")
+
+    gpu.state.point_size_set(1.0)
+    gpu.state.line_width_set(1.0)
+    gpu.state.blend_set('NONE')
+
+
+def draw_active_pipe_cross_section_ring(context, ps):
+    region = context.region
+    region_data = context.region_data
+    if region is None or region_data is None:
+        return
+    center = get_active_curve_point_world_position(context)
+    if center is None:
+        return
+    verts = ps.cross_section_verts
+    if len(verts) < 3:
+        return
+
+    tangent = get_active_curve_tangent(context)
+    normal, binormal = get_cross_section_frame(tangent)
+    curve_point = get_active_curve_point(context)
+    projected = []
+    for vert in verts:
+        ox, oy = get_effective_offset(vert, curve_point, ps)
+        world_pos = center + normal * ox + binormal * oy
+        screen_pos = view3d_utils.location_3d_to_region_2d(region, region_data, world_pos)
+        if screen_pos is None:
+            return
+        projected.append((screen_pos.x, screen_pos.y))
+
+    lines = []
+    for idx, point in enumerate(projected):
+        lines.append(point)
+        lines.append(projected[(idx + 1) % len(projected)])
+
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    gpu.state.blend_set('ALPHA')
+    gpu.state.line_width_set(4.0)
+    batch = batch_for_shader(shader, 'LINES', {"pos": lines})
+    shader.bind()
+    shader.uniform_float("color", (1.0, 0.55, 0.0, 1.0))
+    batch.draw(shader)
+
+    gpu.state.point_size_set(7.0)
+    batch = batch_for_shader(shader, 'POINTS', {"pos": projected})
+    shader.bind()
+    shader.uniform_float("color", (1.0, 1.0, 0.15, 0.95))
+    batch.draw(shader)
+
+    center_2d = view3d_utils.location_3d_to_region_2d(region, region_data, center)
+    if center_2d is not None:
+        font_id = 0
+        blf.size(font_id, 13)
+        blf.color(font_id, 1.0, 0.62, 0.0, 1.0)
+        blf.position(font_id, center_2d.x + 12.0, center_2d.y - 18.0, 0)
+        blf.draw(font_id, "Active Ring")
+
+    gpu.state.point_size_set(1.0)
+    gpu.state.line_width_set(1.0)
+    gpu.state.blend_set('NONE')
+
+
 def rounded_rect_points(x0, y0, x1, y1, radius=8.0, segments=5):
     radius = max(0.0, min(radius, (x1 - x0) * 0.5, (y1 - y0) * 0.5))
     centers = (
@@ -410,6 +520,15 @@ def draw_widget_callback():
     settings = obj.hair_pipe_settings
     if len(settings.point_settings) == 0:
         return
+
+    draw_transition_point_markers(context, obj, settings)
+
+    wm = context.window_manager
+    if not hasattr(wm, 'hair_pipe_widget'):
+        return
+    wd = wm.hair_pipe_widget
+    if not wd.is_active:
+        return
     if settings.active_point_index >= len(settings.point_settings):
         return
 
@@ -423,13 +542,8 @@ def draw_widget_callback():
     if n < 3:
         return
 
-    wm = context.window_manager
-    if not hasattr(wm, 'hair_pipe_widget'):
-        return
-    wd = wm.hair_pipe_widget
-    if not wd.is_active:
-        return
     draw_curve_start_marker(context, obj)
+    draw_active_pipe_cross_section_ring(context, ps)
 
     cx = wd.widget_center_x
     cy = wd.widget_center_y
