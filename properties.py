@@ -51,6 +51,11 @@ class HairPipePointSettings(PropertyGroup):
         min=0.001,
         max=100.0,
     )
+    use_transition: BoolProperty(
+        name="横截面过渡模式",
+        description="This point is automatically interpolated from neighboring editable cross-sections and cannot be edited directly",
+        default=False,
+    )
 
 
 class HairPipeSettings(PropertyGroup):

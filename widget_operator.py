@@ -7,7 +7,7 @@ from bpy_extras import view3d_utils
 from bpy.props import IntProperty, FloatProperty, BoolProperty
 from bpy.types import PropertyGroup
 from mathutils import Vector
-from .operators import get_selected_curve_point_indices
+from .operators import get_selected_curve_point_indices, is_transition_point
 
 
 _draw_handle = None
@@ -409,6 +409,8 @@ def draw_widget_callback():
         return
 
     ps = settings.point_settings[settings.active_point_index]
+    if is_transition_point(ps):
+        return
     update_ghost_vertices(ps)
     curve_point = get_active_curve_point(context)
     verts = ps.cross_section_verts
@@ -490,7 +492,15 @@ def draw_widget_callback():
         th = thumb_size * 0.5
 
         pt_ps = settings.point_settings[pt_idx]
-        pt_verts = pt_ps.cross_section_verts
+        if is_transition_point(pt_ps):
+            font_id = 0
+            blf.size(font_id, 13)
+            blf.color(font_id, 0.25, 0.85, 1.0, 0.85 if is_current else 0.5)
+            blf.position(font_id, tx - 22, ty - 6, 0)
+            blf.draw(font_id, "AUTO")
+            pt_verts = []
+        else:
+            pt_verts = pt_ps.cross_section_verts
         ptn = len(pt_verts)
         if ptn >= 3:
             thumb_outline = []
@@ -1251,7 +1261,7 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
         if s.active_point_index >= len(s.point_settings):
             return False
         ps = s.point_settings[s.active_point_index]
-        return len(ps.cross_section_verts) >= 3
+        return not is_transition_point(ps) and len(ps.cross_section_verts) >= 3
 
     def invoke(self, context, event):
         wd = context.window_manager.hair_pipe_widget
@@ -1351,6 +1361,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         return {'CANCELLED'}
 
     ps = settings.point_settings[settings.active_point_index]
+    if is_transition_point(ps):
+        operator._finish(context)
+        return {'CANCELLED'}
     update_ghost_vertices(ps)
     curve_point = get_active_curve_point(context)
     verts = ps.cross_section_verts

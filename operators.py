@@ -357,6 +357,49 @@ def interpolate_section_value(prev_value, value0, value1, next_value, t, mode, s
     return monotone
 
 
+def is_transition_point(point_setting):
+    return bool(getattr(point_setting, 'use_transition', False))
+
+
+def find_previous_editable_point_index(point_settings, idx):
+    for point_idx in range(idx - 1, -1, -1):
+        if not is_transition_point(point_settings[point_idx]):
+            return point_idx
+    return None
+
+
+def find_next_editable_point_index(point_settings, idx):
+    for point_idx in range(idx + 1, len(point_settings)):
+        if not is_transition_point(point_settings[point_idx]):
+            return point_idx
+    return None
+
+
+def get_transition_source_indices(point_settings, idx):
+    if idx < 0 or idx >= len(point_settings):
+        return None, None
+    if not is_transition_point(point_settings[idx]):
+        return idx, idx
+    return find_previous_editable_point_index(point_settings, idx), find_next_editable_point_index(point_settings, idx)
+
+
+def get_effective_point_setting(point_settings, idx, settings):
+    if idx < 0:
+        return get_point_setting(point_settings, idx, settings)
+    if idx >= len(point_settings):
+        return get_point_setting(point_settings, idx, settings)
+    prev_idx, next_idx = get_transition_source_indices(point_settings, idx)
+    if prev_idx is None and next_idx is None:
+        return point_settings[idx]
+    if prev_idx is None:
+        return point_settings[next_idx]
+    if next_idx is None:
+        return point_settings[prev_idx]
+    if prev_idx == next_idx:
+        return point_settings[prev_idx]
+    return point_settings[idx]
+
+
 def get_cross_section_sample(point_setting, point=None, vert_idx=0):
     verts = point_setting.cross_section_verts
     if len(verts) == 0:
@@ -430,6 +473,80 @@ def interpolate_cross_sections_smooth(
         ry = lx * sin_r + ly * cos_r
         result.append((rx, ry))
     return result
+
+
+def interpolate_transition_cross_section(point_settings, idx, settings, point=None):
+    prev_idx, next_idx = get_transition_source_indices(point_settings, idx)
+    if prev_idx is None and next_idx is None:
+        return []
+    if prev_idx is None:
+        source = point_settings[next_idx]
+        return interpolate_cross_sections(source, source, 0.0, point, point)
+    if next_idx is None:
+        source = point_settings[prev_idx]
+        return interpolate_cross_sections(source, source, 0.0, point, point)
+    if prev_idx == next_idx:
+        source = point_settings[prev_idx]
+        return interpolate_cross_sections(source, source, 0.0, point, point)
+    prev_ps = point_settings[prev_idx]
+    next_ps = point_settings[next_idx]
+    t = (idx - prev_idx) / max(1, next_idx - prev_idx)
+    return interpolate_cross_sections_smooth(
+        prev_ps, prev_ps, next_ps, next_ps, t,
+        point, point, point, point,
+        settings.transition_mode, settings.transition_strength,
+    )
+
+
+def update_transition_point_values(curve_obj, settings):
+    point_settings = settings.point_settings
+    if len(point_settings) < 3:
+        return 0
+    changed = 0
+    for idx, ps in enumerate(point_settings):
+        if not is_transition_point(ps):
+            continue
+        prev_idx = find_previous_editable_point_index(point_settings, idx)
+        next_idx = find_next_editable_point_index(point_settings, idx)
+        if prev_idx is None or next_idx is None or prev_idx == next_idx:
+            continue
+        prev_ps = point_settings[prev_idx]
+        next_ps = point_settings[next_idx]
+        count = min(len(prev_ps.cross_section_verts), len(next_ps.cross_section_verts))
+        if count < 3:
+            continue
+        while len(ps.cross_section_verts) < count:
+            v = ps.cross_section_verts.add()
+            v.offset_x = 0.0
+            v.offset_y = 0.0
+            v.is_ghost = False
+        while len(ps.cross_section_verts) > count and len(ps.cross_section_verts) > 3:
+            ps.cross_section_verts.remove(len(ps.cross_section_verts) - 1)
+        raw_t = (idx - prev_idx) / max(1, next_idx - prev_idx)
+        t = edge_flow_t('SMOOTHER', raw_t, 2.0)
+        for vert_idx in range(count):
+            prev_v = prev_ps.cross_section_verts[vert_idx]
+            next_v = next_ps.cross_section_verts[vert_idx]
+            v = ps.cross_section_verts[vert_idx]
+            v.offset_x = prev_v.offset_x * (1.0 - t) + next_v.offset_x * t
+            v.offset_y = prev_v.offset_y * (1.0 - t) + next_v.offset_y * t
+            v.is_ghost = False
+        ps.scale = prev_ps.scale * (1.0 - t) + next_ps.scale * t
+        ps.rotation = lerp_angle(prev_ps.rotation, next_ps.rotation, t)
+        prev_point = get_curve_point_by_global_index(curve_obj, prev_idx)
+        next_point = get_curve_point_by_global_index(curve_obj, next_idx)
+        curve_point = get_curve_point_by_global_index(curve_obj, idx)
+        if prev_point is not None and next_point is not None and curve_point is not None:
+            prev_radius = getattr(prev_point, 'radius', 1.0)
+            next_radius = getattr(next_point, 'radius', 1.0)
+            prev_tilt = getattr(prev_point, 'tilt', 0.0)
+            next_tilt = getattr(next_point, 'tilt', 0.0)
+            curve_point.radius = prev_radius * (1.0 - t) + next_radius * t
+            curve_point.tilt = lerp_radians(prev_tilt, next_tilt, t)
+        if ps.active_vert_index >= len(ps.cross_section_verts):
+            ps.active_vert_index = len(ps.cross_section_verts) - 1
+        changed += 1
+    return changed
 
 
 def smooth_ring_offsets(ring_specs, iterations=2, factor=0.5, is_cyclic=False):
@@ -656,6 +773,7 @@ def normalize_cross_section_topology(settings):
 
 
 def generate_pipe_mesh(curve_obj, settings):
+    update_transition_point_values(curve_obj, settings)
     update_all_ghost_vertices(settings)
     splines_data = get_curve_points_data(curve_obj)
     if not splines_data:
@@ -718,12 +836,22 @@ def generate_pipe_mesh(curve_obj, settings):
                 h0r = points[idx0]['handle_right']
                 h1l = points[idx1]['handle_left']
                 p1 = points[idx1]['co']
-                ps0 = get_point_setting(point_settings, global_point_idx + idx0, settings)
-                ps1 = get_point_setting(point_settings, global_point_idx + idx1, settings)
+                global_idx0 = global_point_idx + idx0
+                global_idx1 = global_point_idx + idx1
+                ps0 = get_effective_point_setting(point_settings, global_idx0, settings)
+                ps1 = get_effective_point_setting(point_settings, global_idx1, settings)
                 idx_prev = (idx0 - 1) % num_points if is_cyclic or idx0 > 0 else idx0
                 idx_next = (idx1 + 1) % num_points if is_cyclic or idx1 < num_points - 1 else idx1
-                ps_prev = get_point_setting(point_settings, global_point_idx + idx_prev, settings)
-                ps_next = get_point_setting(point_settings, global_point_idx + idx_next, settings)
+                ps_prev = get_effective_point_setting(point_settings, global_point_idx + idx_prev, settings)
+                ps_next = get_effective_point_setting(point_settings, global_point_idx + idx_next, settings)
+                if global_idx0 < len(point_settings) and is_transition_point(point_settings[global_idx0]):
+                    trans = interpolate_transition_cross_section(point_settings, global_idx0, settings, points[idx0])
+                    if trans:
+                        ring_specs.append((p0, evaluate_bezier_tangent(p0, h0r, h1l, p1, 0.0), trans))
+                if global_idx1 < len(point_settings) and is_transition_point(point_settings[global_idx1]):
+                    trans = interpolate_transition_cross_section(point_settings, global_idx1, settings, points[idx1])
+                    if trans:
+                        ring_specs.append((p1, evaluate_bezier_tangent(p0, h0r, h1l, p1, 1.0), trans))
                 steps = seg_steps[seg_idx]
                 end_inc = 1 if (seg_idx == seg_count - 1 and not is_cyclic) else 0
                 for step in range(steps + end_inc):
@@ -2031,6 +2159,49 @@ class HAIRPIPE_OT_sync_points(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class HAIRPIPE_OT_toggle_cross_section_transition(bpy.types.Operator):
+    """Toggle transition mode for selected curve control points"""
+    bl_idname = "hair_pipe.toggle_cross_section_transition"
+    bl_label = "横截面过渡模式"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = get_context_curve_object(context)
+        return obj is not None and obj.type == 'CURVE'
+
+    def execute(self, context):
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            self.report({'ERROR'}, "请选择曲线或 FiguHair 预览网格")
+            return {'CANCELLED'}
+        sync_point_settings(curve_obj)
+        settings = curve_obj.hair_pipe_settings
+        selected = get_selected_curve_point_indices(curve_obj) if is_curve_edit_mode(curve_obj) else []
+        target_indices = selected if selected else [settings.active_point_index]
+        target_indices = [idx for idx in target_indices if 0 <= idx < len(settings.point_settings)]
+        if not target_indices:
+            self.report({'ERROR'}, "没有可切换的曲线点")
+            return {'CANCELLED'}
+
+        should_enable = any(not settings.point_settings[idx].use_transition for idx in target_indices)
+        changed = 0
+        for idx in target_indices:
+            prev_idx = find_previous_editable_point_index(settings.point_settings, idx)
+            next_idx = find_next_editable_point_index(settings.point_settings, idx)
+            if should_enable and (prev_idx is None or next_idx is None):
+                continue
+            settings.point_settings[idx].use_transition = should_enable
+            changed += 1
+        if changed == 0:
+            self.report({'WARNING'}, "端点或没有前后正常横截面的点不能设为过渡模式")
+            return {'CANCELLED'}
+        update_transition_point_values(curve_obj, settings)
+        update_all_ghost_vertices(settings)
+        self.report({'INFO'}, "已开启横截面过渡模式" if should_enable else "已关闭横截面过渡模式")
+        return {'FINISHED'}
+
+
 class HAIRPIPE_OT_apply_edge_flow(bpy.types.Operator):
     """Rebuild intermediate cross-sections between exactly two selected curve control points"""
     bl_idname = "hair_pipe.apply_edge_flow"
@@ -2935,6 +3106,7 @@ def _is_figuhair_family_obj(obj):
 classes = (
     HAIRPIPE_OT_generate_pipe,
     HAIRPIPE_OT_sync_points,
+    HAIRPIPE_OT_toggle_cross_section_transition,
     HAIRPIPE_OT_apply_edge_flow,
     HAIRPIPE_OT_reset_cross_section,
     HAIRPIPE_OT_reset_all_cross_sections,

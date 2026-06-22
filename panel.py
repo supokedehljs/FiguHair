@@ -103,6 +103,19 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         row.operator("hair_pipe.copy_cross_section", text="\u590d\u5236", icon='COPYDOWN')
         row.operator("hair_pipe.paste_cross_section", text="\u7c98\u8d34", icon='PASTEDOWN')
 
+        transition_box = header_box.box()
+        transition_box.label(text="横截面过渡", icon='IPO_EASE_IN_OUT')
+        active_idx = min(settings.active_point_index, len(settings.point_settings) - 1)
+        active_ps = settings.point_settings[active_idx]
+        if getattr(active_ps, "use_transition", False):
+            transition_box.label(text="当前点状态：过渡模式", icon='CHECKMARK')
+        else:
+            transition_box.label(text="当前点状态：正常模式", icon='RADIOBUT_OFF')
+        row = transition_box.row(align=True)
+        row.scale_y = 1.35
+        row.operator("hair_pipe.toggle_cross_section_transition", text="切换横截面过渡模式", icon='IPO_EASE_IN_OUT')
+        transition_box.label(text="可选择一个或多个曲线点后切换", icon='INFO')
+
         box = header_box.box()
         box.label(text="\u6a2a\u622a\u9762\u7f16\u8f91\u5668", icon='MOUSE_LMB')
         widget_data = getattr(context.window_manager, "hair_pipe_widget", None)
@@ -110,7 +123,10 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
             box.label(text="\u6a2a\u622a\u9762\u7f16\u8f91\u5668\u672a\u521d\u59cb\u5316\uff0c\u8bf7\u91cd\u65b0\u52a0\u8f7d\u63d2\u4ef6", icon='ERROR')
             return
         row = box.row(align=True)
-        if widget_data.is_active:
+        if getattr(active_ps, "use_transition", False):
+            row.enabled = False
+            row.operator("hair_pipe.widget_interact", text="过渡模式下无法编辑横截面", icon='LOCKED')
+        elif widget_data.is_active:
             row.operator("hair_pipe.widget_stop", text="\u5173\u95ed\u7f16\u8f91\u5668", icon='PANEL_CLOSE')
         else:
             row.operator("hair_pipe.widget_interact", text="\u6253\u5f00\u7f16\u8f91\u5668", icon='MOUSE_LMB')
