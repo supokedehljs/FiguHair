@@ -679,6 +679,38 @@ def generate_pipe_mesh(curve_obj, settings):
         ring_specs = []
         if spline_data['type'] == 'BEZIER':
             seg_count = num_points if is_cyclic else num_points - 1
+
+            # ── Step 1: estimate arc length of every segment ──────────────
+            ARC_SUBDIV = 8
+            seg_lengths = []
+            for seg_idx in range(seg_count):
+                idx0 = seg_idx
+                idx1 = (seg_idx + 1) % num_points
+                p0_  = points[idx0]['co']
+                h0r_ = points[idx0]['handle_right']
+                h1l_ = points[idx1]['handle_left']
+                p1_  = points[idx1]['co']
+                length = 0.0
+                prev = evaluate_bezier_segment(p0_, h0r_, h1l_, p1_, 0.0)
+                for k in range(1, ARC_SUBDIV + 1):
+                    cur = evaluate_bezier_segment(p0_, h0r_, h1l_, p1_, k / ARC_SUBDIV)
+                    length += (cur - prev).length
+                    prev = cur
+                seg_lengths.append(max(length, 1e-8))
+            total_length = sum(seg_lengths)
+
+            # ── Step 2: distribute sample steps proportionally ────────────
+            # Total samples across the whole spline (same budget as before)
+            total_steps = seg_count * max(1, resolution + 1)
+            seg_steps = []
+            remainder = 0.0
+            for seg_idx in range(seg_count):
+                raw = (seg_lengths[seg_idx] / total_length) * total_steps + remainder
+                steps = max(1, int(raw))
+                remainder = raw - steps
+                seg_steps.append(steps)
+
+            # ── Step 3: sample each segment ───────────────────────────────
             for seg_idx in range(seg_count):
                 idx0 = seg_idx
                 idx1 = (seg_idx + 1) % num_points
@@ -692,14 +724,12 @@ def generate_pipe_mesh(curve_obj, settings):
                 idx_next = (idx1 + 1) % num_points if is_cyclic or idx1 < num_points - 1 else idx1
                 ps_prev = get_point_setting(point_settings, global_point_idx + idx_prev, settings)
                 ps_next = get_point_setting(point_settings, global_point_idx + idx_next, settings)
-                steps = max(1, resolution + 1)
+                steps = seg_steps[seg_idx]
                 end_inc = 1 if (seg_idx == seg_count - 1 and not is_cyclic) else 0
                 for step in range(steps + end_inc):
                     t = step / steps
                     pos = evaluate_bezier_segment(p0, h0r, h1l, p1, t)
-                    tan0 = get_bezier_control_tangent(points, idx0, is_cyclic)
-                    tan1 = get_bezier_control_tangent(points, idx1, is_cyclic)
-                    tan = safe_normalized(tan0.lerp(tan1, t), evaluate_bezier_tangent(p0, h0r, h1l, p1, t))
+                    tan = evaluate_bezier_tangent(p0, h0r, h1l, p1, t)
                     interp = interpolate_cross_sections_smooth(
                         ps_prev, ps0, ps1, ps_next, t,
                         points[idx_prev], points[idx0], points[idx1], points[idx_next],
@@ -748,6 +778,24 @@ def generate_pipe_mesh(curve_obj, settings):
                 ring_specs.append((pos, tan, interp))
         elif spline_data['type'] == 'POLY':
             seg_count = num_points if is_cyclic else num_points - 1
+
+            # Arc lengths for POLY are just straight-line distances
+            seg_lengths = []
+            for seg_idx in range(seg_count):
+                idx0 = seg_idx
+                idx1 = (seg_idx + 1) % num_points
+                seg_lengths.append(max((points[idx1]['co'] - points[idx0]['co']).length, 1e-8))
+            total_length = sum(seg_lengths)
+
+            total_steps = seg_count * max(1, resolution + 1)
+            seg_steps = []
+            remainder = 0.0
+            for seg_idx in range(seg_count):
+                raw = (seg_lengths[seg_idx] / total_length) * total_steps + remainder
+                steps = max(1, int(raw))
+                remainder = raw - steps
+                seg_steps.append(steps)
+
             for seg_idx in range(seg_count):
                 idx0 = seg_idx
                 idx1 = (seg_idx + 1) % num_points
@@ -759,21 +807,18 @@ def generate_pipe_mesh(curve_obj, settings):
                 idx_next = (idx1 + 1) % num_points if is_cyclic or idx1 < num_points - 1 else idx1
                 ps_prev = get_point_setting(point_settings, global_point_idx + idx_prev, settings)
                 ps_next = get_point_setting(point_settings, global_point_idx + idx_next, settings)
-                steps = max(1, resolution + 1)
+                steps = seg_steps[seg_idx]
                 end_inc = 1 if (seg_idx == seg_count - 1 and not is_cyclic) else 0
                 for step in range(steps + end_inc):
                     t = step / steps
                     pos = p0.lerp(p1, t)
-                    tan0 = get_poly_control_tangent(points, idx0, is_cyclic)
-                    tan1 = get_poly_control_tangent(points, idx1, is_cyclic)
-                    tan = safe_normalized(tan0.lerp(tan1, t), p1 - p0)
+                    tan = safe_normalized(p1 - p0)
                     interp = interpolate_cross_sections_smooth(
                         ps_prev, ps0, ps1, ps_next, t,
                         points[idx_prev], points[idx0], points[idx1], points[idx_next],
                         settings.transition_mode, settings.transition_strength
                     )
                     ring_specs.append((pos, tan, interp))
-
         if settings.strong_smoothing:
             ring_specs = smooth_ring_offsets(
                 ring_specs,
