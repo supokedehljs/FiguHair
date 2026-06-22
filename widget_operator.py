@@ -12,6 +12,7 @@ from .operators import (
     get_curve_points_data,
     get_effective_point_setting,
     interpolate_cross_sections_smooth,
+    get_pipe_source_curve,
     is_transition_point,
     is_curve_edit_mode,
     sync_active_point_from_selection,
@@ -337,12 +338,10 @@ def get_curve_start_world_position(obj):
     return obj.matrix_world @ Vector(spline.points[0].co[:3])
 
 
-def draw_selected_curve_highlight(context, obj):
+def draw_curve_highlight_lines(context, obj):
     if obj is None or obj.type != 'CURVE':
         return
     if is_curve_edit_mode(obj):
-        return
-    if obj != context.active_object and not obj.select_get():
         return
     region = context.region
     region_data = context.region_data
@@ -350,7 +349,6 @@ def draw_selected_curve_highlight(context, obj):
         return
 
     lines = []
-    points_2d = []
     for spline in obj.data.splines:
         if spline.type == 'BEZIER':
             points = spline.bezier_points
@@ -365,7 +363,6 @@ def draw_selected_curve_highlight(context, obj):
                 projected.append((pos.x, pos.y))
         if not projected:
             continue
-        points_2d.extend(projected)
         for idx in range(len(projected) - 1):
             lines.append(projected[idx])
             lines.append(projected[idx + 1])
@@ -373,26 +370,32 @@ def draw_selected_curve_highlight(context, obj):
             lines.append(projected[-1])
             lines.append(projected[0])
 
-    if not lines and not points_2d:
+    if not lines:
         return
 
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
     gpu.state.blend_set('ALPHA')
-    if lines:
-        gpu.state.line_width_set(2.0)
-        batch = batch_for_shader(shader, 'LINES', {"pos": lines})
-        shader.bind()
-        shader.uniform_float("color", (1.0, 0.78, 0.05, 0.55))
-        batch.draw(shader)
-    if points_2d:
-        gpu.state.point_size_set(6.0)
-        batch = batch_for_shader(shader, 'POINTS', {"pos": points_2d})
-        shader.bind()
-        shader.uniform_float("color", (1.0, 0.86, 0.1, 0.5))
-        batch.draw(shader)
-    gpu.state.point_size_set(1.0)
+    gpu.state.line_width_set(2.0)
+    batch = batch_for_shader(shader, 'LINES', {"pos": lines})
+    shader.bind()
+    shader.uniform_float("color", (1.0, 0.78, 0.05, 0.55))
+    batch.draw(shader)
     gpu.state.line_width_set(1.0)
     gpu.state.blend_set('NONE')
+
+
+def draw_selected_curves_highlight(context):
+    highlighted = set()
+    for selected in context.selected_objects:
+        curve_obj = None
+        if selected.type == 'CURVE' and hasattr(selected, 'hair_pipe_settings'):
+            curve_obj = selected
+        elif selected.type == 'MESH':
+            curve_obj = get_pipe_source_curve(selected)
+        if curve_obj is None or curve_obj.name in highlighted:
+            continue
+        highlighted.add(curve_obj.name)
+        draw_curve_highlight_lines(context, curve_obj)
 
 
 def draw_curve_start_marker(context, obj):
@@ -703,7 +706,7 @@ def draw_widget_callback():
         return
 
     settings = obj.hair_pipe_settings
-    draw_selected_curve_highlight(context, obj)
+    draw_selected_curves_highlight(context)
     if len(settings.point_settings) == 0:
         return
 

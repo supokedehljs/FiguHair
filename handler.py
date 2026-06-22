@@ -13,12 +13,15 @@ from .operators import (
     ensure_tail_modifier_stack,
     verts_to_world_space,
     redirect_pipe_selection,
+    get_curve_from_figuhair_root,
 )
 
 
 _is_redirecting_selection = False
 _last_rebuild_time = 0.0
 _rebuild_guard = False
+_visibility_guard = False
+_root_visibility_states = {}
 
 
 def update_mesh_data_in_place(mesh, verts, faces, smooth_shading):
@@ -28,6 +31,46 @@ def update_mesh_data_in_place(mesh, verts, faces, smooth_shading):
     if smooth_shading:
         for poly in mesh.polygons:
             poly.use_smooth = True
+
+
+def set_object_hidden(obj, hidden):
+    if obj is None:
+        return
+    try:
+        obj.hide_set(hidden)
+    except Exception:
+        pass
+    obj.hide_viewport = hidden
+
+
+def sync_figuhair_root_visibility():
+    global _visibility_guard
+    if _visibility_guard:
+        return
+
+    _visibility_guard = True
+    try:
+        for root_obj in bpy.data.objects:
+            if root_obj.type != 'EMPTY' or not root_obj.get("hair_pipe_root"):
+                continue
+            hidden = bool(root_obj.hide_get() or root_obj.hide_viewport)
+            previous = _root_visibility_states.get(root_obj.name)
+            if previous == hidden:
+                continue
+            _root_visibility_states[root_obj.name] = hidden
+
+            curve_obj = get_curve_from_figuhair_root(root_obj)
+            if curve_obj is not None:
+                set_object_hidden(curve_obj, hidden)
+                pipe_obj = get_pipe_object_for_curve(curve_obj)
+                tail_obj = get_tail_object_for_curve(curve_obj)
+                set_object_hidden(pipe_obj, hidden)
+                set_object_hidden(tail_obj, hidden)
+            for child in root_obj.children:
+                if child.type in {'CURVE', 'MESH'}:
+                    set_object_hidden(child, hidden)
+    finally:
+        _visibility_guard = False
 
 
 def rebuild_existing_pipe(curve_obj):
@@ -124,6 +167,7 @@ def selection_sync_timer():
                 for area in screen.areas:
                     if area.type == 'VIEW_3D':
                         area.tag_redraw()
+    sync_figuhair_root_visibility()
     return 0.35
 
 

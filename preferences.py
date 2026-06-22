@@ -50,6 +50,7 @@ class HairPipePreferences(AddonPreferences):
             ("hair_pipe.toggle_redirect_selection", "\u53ea\u9009\u66f2\u7ebf\u6a21\u5f0f"),
             ("hair_pipe.apply_edge_flow", "\u5e94\u7528\u8fb9\u6d41"),
             ("hair_pipe.equalize_point_distance", "\u8ddd\u79bb\u5e73\u5747\u5316"),
+            ("hair_pipe.edit_tail_mesh", "\u672b\u7aef\u7f51\u683c\u7f16\u8f91\u6a21\u5f0f"),
             ("hair_pipe.widget_interact", "\u7f16\u8f91\u5668(\u5f00\u5173)"),
             ("hair_pipe.widget_hold", "\u7f16\u8f91\u5668(\u6309\u4f4f)"),
             ("hair_pipe.copy_cross_section", "\u590d\u5236\u622a\u9762"),
