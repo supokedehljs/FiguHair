@@ -28,6 +28,8 @@ class HairPipeWidgetSettings(PropertyGroup):
     is_active: BoolProperty(default=False)
     drag_vert_index: IntProperty(default=-1)
     drag_panel: IntProperty(default=0)
+    lasso_select_active: BoolProperty(default=False)
+    lasso_points: bpy.props.StringProperty(default="")
     region_offset_x: IntProperty(default=0)
     region_offset_y: IntProperty(default=0)
     hold_key_mode: BoolProperty(default=False)
@@ -94,6 +96,46 @@ def get_selected_widget_verts(wd):
 
 def set_selected_widget_verts(wd, indices):
     wd.selected_verts = ",".join(str(i) for i in sorted(indices))
+
+
+def get_lasso_points(wd):
+    raw = wd.lasso_points.strip()
+    if not raw:
+        return []
+    result = []
+    for part in raw.split(";"):
+        xy = part.split(":")
+        if len(xy) == 2:
+            try:
+                result.append((float(xy[0]), float(xy[1])))
+            except ValueError:
+                pass
+    return result
+
+
+def set_lasso_points(wd, points):
+    wd.lasso_points = ";".join(f"{x}:{y}" for x, y in points)
+
+
+def append_lasso_point(wd, x, y):
+    points = get_lasso_points(wd)
+    if not points or math.sqrt((points[-1][0] - x) ** 2 + (points[-1][1] - y) ** 2) >= 4.0:
+        points.append((x, y))
+        set_lasso_points(wd, points)
+
+
+def point_in_polygon(px, py, polygon):
+    if len(polygon) < 3:
+        return False
+    inside = False
+    j = len(polygon) - 1
+    for i in range(len(polygon)):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / max(yj - yi, 1e-8) + xi):
+            inside = not inside
+        j = i
+    return inside
 
 
 def store_rotate_offsets(wd, verts, indices):
@@ -680,6 +722,19 @@ def draw_widget_callback():
         shader.bind()
         shader.uniform_float("color", (1.0, 1.0, 1.0, 0.8))
         batch.draw(shader)
+
+    if wd.lasso_select_active:
+        lasso_points = get_lasso_points(wd)
+        if len(lasso_points) >= 2:
+            lasso_lines = []
+            for i in range(len(lasso_points) - 1):
+                lasso_lines.append(lasso_points[i])
+                lasso_lines.append(lasso_points[i + 1])
+            gpu.state.line_width_set(1.5)
+            batch = batch_for_shader(shader, 'LINES', {"pos": lasso_lines})
+            shader.bind()
+            shader.uniform_float("color", (0.3, 0.8, 1.0, 0.9))
+            batch.draw(shader)
 
     # --- Buttons ---
     x0, y0 = cx - half - padding, cy - half - padding
@@ -1572,7 +1627,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             wd.box_y1 = my
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
-        if event.type == 'RIGHTMOUSE' and event.value == 'RELEASE':
+        if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
             bx0 = min(wd.box_x0, wd.box_x1)
             by0 = min(wd.box_y0, wd.box_y1)
             bx1 = max(wd.box_x0, wd.box_x1)
@@ -1595,32 +1650,30 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             return {'RUNNING_MODAL'}
         return {'RUNNING_MODAL'}
 
-    # Box select active (right-click drag)
-    if wd.box_select_active:
+    if wd.lasso_select_active:
         if event.type == 'MOUSEMOVE':
-            wd.box_x1 = mx
-            wd.box_y1 = my
+            append_lasso_point(wd, mx, my)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type == 'RIGHTMOUSE' and event.value == 'RELEASE':
-            bx0 = min(wd.box_x0, wd.box_x1)
-            by0 = min(wd.box_y0, wd.box_y1)
-            bx1 = max(wd.box_x0, wd.box_x1)
-            by1 = max(wd.box_y0, wd.box_y1)
+            polygon = get_lasso_points(wd)
             selected = set()
-            for i, v in enumerate(verts):
-                ox, oy = get_effective_offset(v, curve_point, ps)
-                px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
-                if bx0 <= px <= bx1 and by0 <= py <= by1:
-                    selected.add(i)
+            if len(polygon) >= 3:
+                for i, v in enumerate(verts):
+                    ox, oy = get_raw_offset(v)
+                    px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
+                    if point_in_polygon(px, py, polygon):
+                        selected.add(i)
             if event.shift:
                 selected = selected | get_selected_widget_verts(wd)
             set_selected_widget_verts(wd, selected)
-            wd.box_select_active = False
+            wd.lasso_select_active = False
+            wd.lasso_points = ""
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type == 'ESC':
-            wd.box_select_active = False
+            wd.lasso_select_active = False
+            wd.lasso_points = ""
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         return {'RUNNING_MODAL'}
@@ -1690,26 +1743,6 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
 
-        closest_idx = find_nearest_raw_vertex(verts, mx, my, cx, cy, sf, alignment_angle, flip_h)
-        if closest_idx >= 0:
-            ps.active_vert_index = closest_idx
-            if event.shift:
-                sel = get_selected_widget_verts(wd)
-                if closest_idx in sel:
-                    sel.discard(closest_idx)
-                else:
-                    sel.add(closest_idx)
-                set_selected_widget_verts(wd, sel)
-            else:
-                set_selected_widget_verts(wd, {closest_idx})
-            if getattr(verts[closest_idx], 'is_ghost', False):
-                wd.drag_vert_index = -1
-            else:
-                wd.drag_vert_index = closest_idx
-                wd.drag_panel = 0
-            redraw_view3d(context)
-            return {'RUNNING_MODAL'}
-
         total_points = len(settings.point_settings)
         thumb_size = 140.0
         thumb_gap = 24.0
@@ -1727,13 +1760,28 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 redraw_view3d(context)
                 return {'RUNNING_MODAL'}
 
-        inside_thumb_strip = (abs(my - thumb_y) <= thumb_th + 10 and
-                              thumb_start_x - 10 <= mx <= thumb_start_x + thumb_total_w + 10)
-        if not inside_widget and not inside_thumb_strip:
-            if close_on_key_release or inside_controls:
-                return {'RUNNING_MODAL'}
-            operator._finish(context)
-            return {'FINISHED'}
+        closest_idx = find_nearest_raw_vertex(verts, mx, my, cx, cy, sf, alignment_angle, flip_h)
+        if closest_idx >= 0:
+            ps.active_vert_index = closest_idx
+            if event.shift:
+                sel = get_selected_widget_verts(wd)
+                if closest_idx in sel:
+                    sel.discard(closest_idx)
+                else:
+                    sel.add(closest_idx)
+                set_selected_widget_verts(wd, sel)
+            else:
+                set_selected_widget_verts(wd, {closest_idx})
+            wd.drag_vert_index = -1
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+
+        wd.box_select_active = True
+        wd.box_x0 = mx
+        wd.box_y0 = my
+        wd.box_x1 = mx
+        wd.box_y1 = my
+        redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
     # Rotation correction drag
@@ -1748,26 +1796,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
-    # Mouse move - drag selected points together
     if event.type == 'MOUSEMOVE':
-        if 0 <= wd.drag_vert_index < len(verts) and sf > 0.001 and not getattr(verts[wd.drag_vert_index], 'is_ghost', False):
-            new_x, new_y = widget_to_effective(mx, my, cx, cy, sf, alignment_angle, flip_h)
-            drag_v = verts[wd.drag_vert_index]
-            old_x, old_y = drag_v.offset_x, drag_v.offset_y
-            drag_v.offset_x = new_x
-            drag_v.offset_y = new_y
-            dx = new_x - old_x
-            dy = new_y - old_y
-            sel = get_selected_widget_verts(wd)
-            for si in sel:
-                if si != wd.drag_vert_index and 0 <= si < len(verts) and not getattr(verts[si], 'is_ghost', False):
-                    verts[si].offset_x += dx
-                    verts[si].offset_y += dy
-            update_ghost_vertices(ps)
-            redraw_view3d(context)
-            return {'RUNNING_MODAL'}
-        if inside_widget or inside_controls:
-            return {'RUNNING_MODAL'}
+        return {'RUNNING_MODAL'}
 
     # Left mouse release
     if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
@@ -1815,15 +1845,13 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
-    # Right click - start box select
     if event.type == 'RIGHTMOUSE' and event.value == 'PRESS':
-        wd.box_select_active = True
-        wd.box_x0 = mx
-        wd.box_y0 = my
-        wd.box_x1 = mx
-        wd.box_y1 = my
-        redraw_view3d(context)
-        return {'RUNNING_MODAL'}
+        wd.move_active = False
+        wd.rotate_active = False
+        wd.box_select_active = False
+        wd.lasso_select_active = False
+        operator._finish(context)
+        return {'FINISHED'}
 
     # ESC - close editor
     if event.type == 'ESC':
