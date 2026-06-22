@@ -214,6 +214,142 @@ def interpolate_nurbs_cross_sections_by_control_range(point_settings, points, se
     )
 
 
+def make_cumulative_lengths(centers, is_cyclic=False):
+    if not centers:
+        return []
+    distances = [0.0]
+    for idx in range(1, len(centers)):
+        distances.append(distances[-1] + (centers[idx] - centers[idx - 1]).length)
+    return distances
+
+
+def find_nearest_center_distance(centers, distances, co):
+    if not centers or not distances:
+        return 0.0
+    best_idx = 0
+    best_dist = (centers[0] - co).length_squared
+    for idx in range(1, len(centers)):
+        dist = (centers[idx] - co).length_squared
+        if dist < best_dist:
+            best_idx = idx
+            best_dist = dist
+    return distances[best_idx]
+
+
+def interpolate_cross_sections_by_anchor_distance(point_settings, points, settings, global_point_idx, anchors, distance):
+    num_points = len(points)
+    if num_points < 2 or not anchors:
+        return []
+    if distance <= anchors[0]:
+        idx0 = 0
+        idx1 = 1
+        local_t = 0.0
+    elif distance >= anchors[-1]:
+        idx0 = num_points - 2
+        idx1 = num_points - 1
+        local_t = 1.0
+    else:
+        idx0 = 0
+        for anchor_idx in range(len(anchors) - 1):
+            if anchors[anchor_idx] <= distance <= anchors[anchor_idx + 1]:
+                idx0 = anchor_idx
+                break
+        idx1 = idx0 + 1
+        span = max(anchors[idx1] - anchors[idx0], 1e-8)
+        local_t = (distance - anchors[idx0]) / span
+
+    idx_prev = idx0 - 1 if idx0 > 0 else idx0
+    idx_next = idx1 + 1 if idx1 < num_points - 1 else idx1
+    ps_prev = get_effective_point_setting(point_settings, global_point_idx + idx_prev, settings)
+    ps0 = get_effective_point_setting(point_settings, global_point_idx + idx0, settings)
+    ps1 = get_effective_point_setting(point_settings, global_point_idx + idx1, settings)
+    ps_next = get_effective_point_setting(point_settings, global_point_idx + idx_next, settings)
+    return interpolate_cross_sections_smooth(
+        ps_prev, ps0, ps1, ps_next, local_t,
+        points[idx_prev], points[idx0], points[idx1], points[idx_next],
+        settings.transition_mode, settings.transition_strength,
+    )
+
+
+def distribute_steps_by_lengths(lengths, total_steps):
+    if not lengths:
+        return []
+    positive_lengths = [max(length, 1e-8) for length in lengths]
+    total_length = sum(positive_lengths)
+    total_steps = max(len(positive_lengths), int(total_steps))
+    raw_steps = [length / total_length * total_steps for length in positive_lengths]
+    steps = [max(1, int(math.floor(raw))) for raw in raw_steps]
+    remaining = total_steps - sum(steps)
+
+    fractions = sorted(
+        ((raw_steps[i] - math.floor(raw_steps[i]), i) for i in range(len(raw_steps))),
+        reverse=True,
+    )
+    frac_idx = 0
+    while remaining > 0 and fractions:
+        steps[fractions[frac_idx % len(fractions)][1]] += 1
+        remaining -= 1
+        frac_idx += 1
+    while remaining < 0:
+        candidates = [i for i, count in enumerate(steps) if count > 1]
+        if not candidates:
+            break
+        idx = min(candidates, key=lambda i: raw_steps[i] - steps[i])
+        steps[idx] -= 1
+        remaining += 1
+    return steps
+
+
+def bezier_arc_length_at_t(p0, h0_right, h1_left, p1, t, subdivisions=12):
+    t = max(0.0, min(1.0, t))
+    if t <= 0.0:
+        return 0.0
+    length = 0.0
+    prev = evaluate_bezier_segment(p0, h0_right, h1_left, p1, 0.0)
+    for k in range(1, subdivisions + 1):
+        sample_t = t * k / subdivisions
+        cur = evaluate_bezier_segment(p0, h0_right, h1_left, p1, sample_t)
+        length += (cur - prev).length
+        prev = cur
+    return length
+
+
+def invert_bezier_arc_length(p0, h0_right, h1_left, p1, target_length, total_length):
+    if total_length <= 1e-8:
+        return 0.0
+    target_length = max(0.0, min(total_length, target_length))
+    low = 0.0
+    high = 1.0
+    for _ in range(12):
+        mid = (low + high) * 0.5
+        length = bezier_arc_length_at_t(p0, h0_right, h1_left, p1, mid)
+        if length < target_length:
+            low = mid
+        else:
+            high = mid
+    return (low + high) * 0.5
+
+
+def catmull_rom_vector(p0, p1, p2, p3, t):
+    t2 = t * t
+    t3 = t2 * t
+    return 0.5 * (
+        (2.0 * p1)
+        + (-p0 + p2) * t
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+    )
+
+
+def catmull_rom_tangent_vector(p0, p1, p2, p3, t):
+    t2 = t * t
+    return 0.5 * (
+        (-p0 + p2)
+        + (2.0 * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3)) * t
+        + (3.0 * (-p0 + 3.0 * p1 - 3.0 * p2 + p3)) * t2
+    )
+
+
 def safe_normalized(vector, fallback=None):
     if vector.length >= 1e-8:
         return vector.normalized()
@@ -820,13 +956,7 @@ def generate_pipe_mesh(curve_obj, settings):
             # ── Step 2: distribute sample steps proportionally ────────────
             # Total samples across the whole spline (same budget as before)
             total_steps = seg_count * max(1, resolution + 1)
-            seg_steps = []
-            remainder = 0.0
-            for seg_idx in range(seg_count):
-                raw = (seg_lengths[seg_idx] / total_length) * total_steps + remainder
-                steps = max(1, int(raw))
-                remainder = raw - steps
-                seg_steps.append(steps)
+            seg_steps = distribute_steps_by_lengths(seg_lengths, total_steps)
 
             # ── Step 3: sample each segment ───────────────────────────────
             for seg_idx in range(seg_count):
@@ -844,66 +974,60 @@ def generate_pipe_mesh(curve_obj, settings):
                 idx_next = (idx1 + 1) % num_points if is_cyclic or idx1 < num_points - 1 else idx1
                 ps_prev = get_effective_point_setting(point_settings, global_point_idx + idx_prev, settings)
                 ps_next = get_effective_point_setting(point_settings, global_point_idx + idx_next, settings)
-                if global_idx0 < len(point_settings) and is_transition_point(point_settings[global_idx0]):
-                    trans = interpolate_transition_cross_section(point_settings, global_idx0, settings, points[idx0])
-                    if trans:
-                        ring_specs.append((p0, evaluate_bezier_tangent(p0, h0r, h1l, p1, 0.0), trans))
-                if global_idx1 < len(point_settings) and is_transition_point(point_settings[global_idx1]):
-                    trans = interpolate_transition_cross_section(point_settings, global_idx1, settings, points[idx1])
-                    if trans:
-                        ring_specs.append((p1, evaluate_bezier_tangent(p0, h0r, h1l, p1, 1.0), trans))
                 steps = seg_steps[seg_idx]
-                end_inc = 1 if (seg_idx == seg_count - 1 and not is_cyclic) else 0
-                for step in range(steps + end_inc):
-                    t = step / steps
-                    pos = evaluate_bezier_segment(p0, h0r, h1l, p1, t)
-                    tan = evaluate_bezier_tangent(p0, h0r, h1l, p1, t)
+                step_count = steps if (is_cyclic or seg_idx < seg_count - 1) else steps + 1
+                segment_length = seg_lengths[seg_idx]
+                for step in range(step_count):
+                    if not is_cyclic and seg_idx == seg_count - 1 and step == step_count - 1:
+                        distance_t = 1.0
+                        shape_t = 1.0
+                    else:
+                        distance_t = step / steps
+                        shape_t = invert_bezier_arc_length(p0, h0r, h1l, p1, segment_length * distance_t, segment_length)
+                    pos = evaluate_bezier_segment(p0, h0r, h1l, p1, shape_t)
+                    tan = evaluate_bezier_tangent(p0, h0r, h1l, p1, shape_t)
                     interp = interpolate_cross_sections_smooth(
-                        ps_prev, ps0, ps1, ps_next, t,
+                        ps_prev, ps0, ps1, ps_next, distance_t,
                         points[idx_prev], points[idx0], points[idx1], points[idx_next],
                         settings.transition_mode, settings.transition_strength
                     )
                     ring_specs.append((pos, tan, interp))
         elif spline_data['type'] == 'NURBS':
-            order = max(2, min(spline_data.get('order_u', 4), num_points))
-            degree = order - 1
-            use_endpoint = spline_data.get('use_endpoint_u', False)
-            knots = make_nurbs_knot_vector(num_points, degree, is_cyclic, use_endpoint)
-            u_start, u_end = get_nurbs_domain(num_points, degree, knots, is_cyclic)
-            segs = num_points if is_cyclic else num_points - 1
-            steps_per_seg = resolution + 1
-            sample_count = segs * steps_per_seg if is_cyclic else segs * steps_per_seg + 1
-            sample_count = max(2, sample_count)
-            ring_count = sample_count
-            u_range = u_end - u_start
-            centers = []
-            interp_offsets = []
+            seg_count = num_points if is_cyclic else num_points - 1
+            seg_lengths = []
+            for seg_idx in range(seg_count):
+                idx0 = seg_idx
+                idx1 = (seg_idx + 1) % num_points
+                seg_lengths.append(max((points[idx1]['co'] - points[idx0]['co']).length, 1e-8))
 
-            for sample_idx in range(ring_count):
-                if is_cyclic:
-                    t = sample_idx / ring_count
-                else:
-                    t = sample_idx / (ring_count - 1)
-                u = u_start + u_range * t
-                if is_cyclic and sample_idx == ring_count - 1:
-                    u = u_end - 1e-8
+            total_steps = seg_count * max(1, resolution + 1)
+            seg_steps = distribute_steps_by_lengths(seg_lengths, total_steps)
 
-                weighted, total = get_nurbs_weighted_controls(points, degree, u, knots, is_cyclic)
-                centers.append(evaluate_nurbs_from_weighted(points, weighted, total))
-                interp_offsets.append(interpolate_nurbs_cross_sections_by_control_range(
-                    point_settings, points, settings, global_point_idx, t, is_cyclic
-                ))
-
-            for sample_idx, pos in enumerate(centers):
-                if is_cyclic:
-                    prev_pos = centers[(sample_idx - 1) % ring_count]
-                    next_pos = centers[(sample_idx + 1) % ring_count]
-                else:
-                    prev_pos = centers[max(0, sample_idx - 1)]
-                    next_pos = centers[min(ring_count - 1, sample_idx + 1)]
-                tan = safe_normalized(next_pos - prev_pos)
-                interp = interp_offsets[sample_idx]
-                ring_specs.append((pos, tan, interp))
+            for seg_idx in range(seg_count):
+                idx0 = seg_idx
+                idx1 = (seg_idx + 1) % num_points
+                idx_prev = (idx0 - 1) % num_points if is_cyclic or idx0 > 0 else idx0
+                idx_next = (idx1 + 1) % num_points if is_cyclic or idx1 < num_points - 1 else idx1
+                p_prev = points[idx_prev]['co']
+                p0 = points[idx0]['co']
+                p1 = points[idx1]['co']
+                p_next = points[idx_next]['co']
+                ps_prev = get_effective_point_setting(point_settings, global_point_idx + idx_prev, settings)
+                ps0 = get_effective_point_setting(point_settings, global_point_idx + idx0, settings)
+                ps1 = get_effective_point_setting(point_settings, global_point_idx + idx1, settings)
+                ps_next = get_effective_point_setting(point_settings, global_point_idx + idx_next, settings)
+                steps = seg_steps[seg_idx]
+                step_count = steps if (is_cyclic or seg_idx < seg_count - 1) else steps + 1
+                for step in range(step_count):
+                    t = 1.0 if (not is_cyclic and seg_idx == seg_count - 1 and step == step_count - 1) else step / steps
+                    pos = catmull_rom_vector(p_prev, p0, p1, p_next, t)
+                    tan = safe_normalized(catmull_rom_tangent_vector(p_prev, p0, p1, p_next, t), p1 - p0)
+                    interp = interpolate_cross_sections_smooth(
+                        ps_prev, ps0, ps1, ps_next, t,
+                        points[idx_prev], points[idx0], points[idx1], points[idx_next],
+                        settings.transition_mode, settings.transition_strength,
+                    )
+                    ring_specs.append((pos, tan, interp))
         elif spline_data['type'] == 'POLY':
             seg_count = num_points if is_cyclic else num_points - 1
 
@@ -913,16 +1037,8 @@ def generate_pipe_mesh(curve_obj, settings):
                 idx0 = seg_idx
                 idx1 = (seg_idx + 1) % num_points
                 seg_lengths.append(max((points[idx1]['co'] - points[idx0]['co']).length, 1e-8))
-            total_length = sum(seg_lengths)
-
             total_steps = seg_count * max(1, resolution + 1)
-            seg_steps = []
-            remainder = 0.0
-            for seg_idx in range(seg_count):
-                raw = (seg_lengths[seg_idx] / total_length) * total_steps + remainder
-                steps = max(1, int(raw))
-                remainder = raw - steps
-                seg_steps.append(steps)
+            seg_steps = distribute_steps_by_lengths(seg_lengths, total_steps)
 
             for seg_idx in range(seg_count):
                 idx0 = seg_idx
@@ -936,9 +1052,9 @@ def generate_pipe_mesh(curve_obj, settings):
                 ps_prev = get_point_setting(point_settings, global_point_idx + idx_prev, settings)
                 ps_next = get_point_setting(point_settings, global_point_idx + idx_next, settings)
                 steps = seg_steps[seg_idx]
-                end_inc = 1 if (seg_idx == seg_count - 1 and not is_cyclic) else 0
-                for step in range(steps + end_inc):
-                    t = step / steps
+                step_count = steps if (is_cyclic or seg_idx < seg_count - 1) else steps + 1
+                for step in range(step_count):
+                    t = 1.0 if (not is_cyclic and seg_idx == seg_count - 1 and step == step_count - 1) else step / steps
                     pos = p0.lerp(p1, t)
                     tan = safe_normalized(p1 - p0)
                     interp = interpolate_cross_sections_smooth(

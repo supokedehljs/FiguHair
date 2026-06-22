@@ -7,7 +7,12 @@ from bpy_extras import view3d_utils
 from bpy.props import IntProperty, FloatProperty, BoolProperty
 from bpy.types import PropertyGroup
 from mathutils import Vector
-from .operators import get_selected_curve_point_indices, is_transition_point
+from .operators import (
+    is_transition_point,
+    is_curve_edit_mode,
+    sync_active_point_from_selection,
+    sync_point_settings,
+)
 
 
 _draw_handle = None
@@ -690,6 +695,12 @@ def get_view3d_window_region(context):
 
 
 def setup_widget(context):
+    obj = context.active_object
+    if obj is not None and obj.type == 'CURVE':
+        sync_point_settings(obj)
+        if is_curve_edit_mode(obj):
+            sync_active_point_from_selection(obj)
+
     wd = context.window_manager.hair_pipe_widget
     area, region = get_view3d_window_region(context)
     if region is None:
@@ -831,29 +842,7 @@ def set_vertex_from_effective_offset(vertex, effective_x, effective_y, curve_poi
 
 
 def apply_active_vertex_edit_to_selected_points(context, source_ps, vert_idx):
-    obj = context.active_object
-    if obj is None or obj.type != 'CURVE':
-        return
-    settings = obj.hair_pipe_settings
-    selected = get_selected_curve_point_indices(obj)
-    if len(selected) <= 1:
-        return
-    active_idx = settings.active_point_index
-    if vert_idx < 0 or vert_idx >= len(source_ps.cross_section_verts):
-        return
-    src_vert = source_ps.cross_section_verts[vert_idx]
-    for point_idx in selected:
-        if point_idx == active_idx or point_idx >= len(settings.point_settings):
-            continue
-        target_ps = settings.point_settings[point_idx]
-        if vert_idx >= len(target_ps.cross_section_verts):
-            continue
-        target_vert = target_ps.cross_section_verts[vert_idx]
-        target_vert.offset_x = src_vert.offset_x
-        target_vert.offset_y = src_vert.offset_y
-        target_vert.is_ghost = getattr(src_vert, 'is_ghost', False)
-        target_ps.active_vert_index = min(source_ps.active_vert_index, len(target_ps.cross_section_verts) - 1)
-        update_ghost_vertices(target_ps)
+    return
 
 
 def get_active_curve_point(context):
