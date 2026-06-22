@@ -2091,24 +2091,43 @@ def configure_pipe_object(pipe_obj, curve_obj):
 
 def redirect_pipe_selection(context, pipe_obj=None):
     pipe_obj = pipe_obj or context.active_object
-    curve_obj = get_pipe_source_curve(pipe_obj)
-    if curve_obj is None:
+    active_curve = get_pipe_source_curve(pipe_obj)
+    if active_curve is None:
         return False
 
-    if not curve_obj.hair_pipe_settings.redirect_selection:
+    if not active_curve.hair_pipe_settings.redirect_selection:
         return False
 
-    if context.view_layer.objects.get(curve_obj.name) is None:
+    if context.view_layer.objects.get(active_curve.name) is None:
         return False
 
     if context.mode != 'OBJECT':
         return False
 
-    for obj in context.selected_objects:
-        obj.select_set(False)
-    curve_obj.hide_set(False)
-    curve_obj.select_set(True)
-    context.view_layer.objects.active = curve_obj
+    selected_curves = []
+    selected_meshes = []
+    for obj in list(context.selected_objects):
+        if obj.type == 'CURVE' and hasattr(obj, 'hair_pipe_settings'):
+            selected_curves.append(obj)
+        elif obj.type == 'MESH':
+            source_curve = get_pipe_source_curve(obj)
+            if source_curve is not None and source_curve.hair_pipe_settings.redirect_selection:
+                selected_meshes.append(obj)
+                selected_curves.append(source_curve)
+
+    if active_curve not in selected_curves:
+        selected_curves.append(active_curve)
+
+    selected_curves = [curve for curve in dict.fromkeys(selected_curves) if context.view_layer.objects.get(curve.name) is not None]
+    if not selected_curves:
+        return False
+
+    for mesh_obj in selected_meshes:
+        mesh_obj.select_set(False)
+    for curve in selected_curves:
+        curve.hide_set(False)
+        curve.select_set(True)
+    context.view_layer.objects.active = active_curve
     return True
 
 

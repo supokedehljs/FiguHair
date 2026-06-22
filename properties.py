@@ -180,10 +180,7 @@ class HairPipeSettings(PropertyGroup):
         name="Rotation Correction",
         description="Manual rotation correction for the cross-section display on this curve (degrees)",
         default=0.0,
-        min=-180.0,
-        max=180.0,
         precision=1,
-        subtype="ANGLE",
     )
 
 
