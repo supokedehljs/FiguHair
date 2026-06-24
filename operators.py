@@ -2693,10 +2693,42 @@ class HAIRPIPE_OT_copy_cs_to_all(bpy.types.Operator):
 
 
 
+def apply_global_mesh_selectability(enabled):
+    for obj in bpy.data.objects:
+        if _is_pipe_mesh_obj(obj):
+            obj.hide_select = enabled
+
+
+def sync_global_redirect_selection(source_curve):
+    if source_curve is None or not hasattr(source_curve, 'hair_pipe_settings'):
+        return
+    enabled = bool(source_curve.hair_pipe_settings.redirect_selection)
+    for obj in bpy.data.objects:
+        if obj.type == 'CURVE' and hasattr(obj, 'hair_pipe_settings') and obj != source_curve:
+            obj.hair_pipe_settings.redirect_selection = enabled
+    apply_global_mesh_selectability(enabled)
+
+
+class HAIRPIPE_OT_apply_global_mesh_selectability(bpy.types.Operator):
+    """Apply global mesh selectability to all FiguHair pipe meshes"""
+    bl_idname = "hair_pipe.apply_global_mesh_selectability"
+    bl_label = "应用网格不可选模式"
+
+    @classmethod
+    def poll(cls, context):
+        return True
+
+    def execute(self, context):
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is not None:
+            sync_global_redirect_selection(curve_obj)
+        return {'FINISHED'}
+
+
 class HAIRPIPE_OT_toggle_redirect_selection(bpy.types.Operator):
-    """Toggle between curve-only and mesh-selectable mode"""
+    """Toggle global curve-only and mesh-selectable mode"""
     bl_idname = "hair_pipe.toggle_redirect_selection"
-    bl_label = "\u5207\u6362\u9009\u62e9\u6a21\u5f0f"
+    bl_label = "网格不可选模式"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -2709,6 +2741,7 @@ class HAIRPIPE_OT_toggle_redirect_selection(bpy.types.Operator):
             return {'CANCELLED'}
         settings = curve_obj.hair_pipe_settings
         settings.redirect_selection = not settings.redirect_selection
+        sync_global_redirect_selection(curve_obj)
         return {'FINISHED'}
 
 
@@ -2893,12 +2926,37 @@ class HAIRPIPE_OT_toggle_tail_visibility(bpy.types.Operator):
         tail_obj = get_tail_object_for_curve(curve_obj)
         if tail_obj is None:
             return {'CANCELLED'}
-        new_hidden = not tail_obj.hide_viewport
-        tail_obj.hide_viewport = new_hidden
+        new_hidden = not tail_obj.hide_get()
+        tail_obj.hide_set(new_hidden)
+        if not new_hidden:
+            tail_obj.hide_viewport = False
         tail_obj.hide_render = True
         tail_obj["hair_pipe_tail_user_hidden"] = new_hidden
-        # show_in_front mirrors visibility: True when shown, False when hidden
         tail_obj.show_in_front = not new_hidden
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_hide_all_tail_meshes(bpy.types.Operator):
+    """Hide all FiguHair tail meshes"""
+    bl_idname = "hair_pipe.hide_all_tail_meshes"
+    bl_label = "隐藏所有末端网格"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return any(_is_tail_mesh_only_obj(obj) for obj in bpy.data.objects)
+
+    def execute(self, context):
+        count = 0
+        for tail_obj in bpy.data.objects:
+            if not _is_tail_mesh_only_obj(tail_obj):
+                continue
+            tail_obj.hide_set(True)
+            tail_obj.hide_render = True
+            tail_obj["hair_pipe_tail_user_hidden"] = True
+            tail_obj.show_in_front = False
+            count += 1
+        self.report({'INFO'}, f"已隐藏 {count} 个末端网格")
         return {'FINISHED'}
 
 
@@ -2932,8 +2990,9 @@ class HAIRPIPE_OT_edit_tail_mesh(bpy.types.Operator):
                 bpy.ops.object.mode_set(mode='OBJECT')
             # Restore user-intended hidden state
             user_hidden = bool(tail_obj.get("hair_pipe_tail_user_hidden", False))
-            tail_obj.hide_viewport = user_hidden
+            tail_obj.hide_viewport = False
             tail_obj.hide_set(user_hidden)
+            tail_obj.show_in_front = not user_hidden
             for obj in list(context.selected_objects):
                 obj.select_set(False)
             curve_obj.hide_set(False)
@@ -2952,7 +3011,7 @@ class HAIRPIPE_OT_edit_tail_mesh(bpy.types.Operator):
         curve_obj.hair_pipe_settings.redirect_selection = False
 
         # Remember user-intended hidden state before revealing for edit
-        tail_obj["hair_pipe_tail_user_hidden"] = bool(tail_obj.get("hair_pipe_tail_user_hidden", tail_obj.hide_viewport))
+        tail_obj["hair_pipe_tail_user_hidden"] = bool(tail_obj.get("hair_pipe_tail_user_hidden", tail_obj.hide_get()))
         tail_obj.hide_set(False)
         tail_obj.hide_viewport = False
         # Ensure solid display, always in front
@@ -3252,11 +3311,13 @@ classes = (
     HAIRPIPE_OT_copy_cross_section,
     HAIRPIPE_OT_paste_cross_section,
     HAIRPIPE_OT_copy_cs_to_all,
+    HAIRPIPE_OT_apply_global_mesh_selectability,
     HAIRPIPE_OT_toggle_redirect_selection,
     HAIRPIPE_OT_equalize_point_distance,
     HAIRPIPE_OT_create_tail_mesh,
     HAIRPIPE_OT_remove_tail_mesh,
     HAIRPIPE_OT_toggle_tail_visibility,
+    HAIRPIPE_OT_hide_all_tail_meshes,
     HAIRPIPE_OT_edit_tail_mesh,
     HAIRPIPE_OT_duplicate_hair,
     HAIRPIPE_OT_merge_hair_for_export,

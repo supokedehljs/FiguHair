@@ -62,6 +62,9 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         from .operators import get_tail_object_for_curve
         tail_box = layout.box()
         tail_box.label(text="\u672b\u7aef\u7f51\u683c", icon='MESH_CONE')
+        hide_all_row = tail_box.row(align=True)
+        hide_all_row.scale_y = 1.1
+        hide_all_row.operator("hair_pipe.hide_all_tail_meshes", text="隐藏所有", icon='HIDE_ON')
         tail_obj = get_tail_object_for_curve(curve_obj)
         if tail_obj is None:
             row = tail_box.row(align=True)

@@ -165,8 +165,8 @@ class HairPipeSettings(PropertyGroup):
         default=True,
     )
     redirect_selection: BoolProperty(
-        name="Select Curve From Preview",
-        description="Selecting the generated preview mesh automatically selects this source curve",
+        name="网格不可选模式",
+        description="让所有 FiguHair 头发网格不可选，点击预览网格时自动选择源曲线",
         default=True,
     )
     point_settings: CollectionProperty(type=HairPipePointSettings)

@@ -22,6 +22,7 @@ _last_rebuild_time = 0.0
 _rebuild_guard = False
 _visibility_guard = False
 _root_visibility_states = {}
+_tail_visibility_states = {}
 
 
 def update_mesh_data_in_place(mesh, verts, faces, smooth_shading):
@@ -36,14 +37,19 @@ def update_mesh_data_in_place(mesh, verts, faces, smooth_shading):
 def set_object_hidden(obj, hidden):
     if obj is None:
         return
+    if not hidden:
+        obj.hide_viewport = False
     try:
         obj.hide_set(hidden)
     except Exception:
         pass
-    obj.hide_viewport = hidden
 
 
-def sync_figuhair_root_visibility():
+def object_hidden(obj):
+    return bool(obj is not None and obj.hide_get())
+
+
+def sync_figuhair_visibility():
     global _visibility_guard
     if _visibility_guard:
         return
@@ -53,22 +59,52 @@ def sync_figuhair_root_visibility():
         for root_obj in bpy.data.objects:
             if root_obj.type != 'EMPTY' or not root_obj.get("hair_pipe_root"):
                 continue
-            hidden = bool(root_obj.hide_get() or root_obj.hide_viewport)
-            previous = _root_visibility_states.get(root_obj.name)
-            if previous == hidden:
-                continue
-            _root_visibility_states[root_obj.name] = hidden
-
             curve_obj = get_curve_from_figuhair_root(root_obj)
-            if curve_obj is not None:
-                set_object_hidden(curve_obj, hidden)
-                pipe_obj = get_pipe_object_for_curve(curve_obj)
-                tail_obj = get_tail_object_for_curve(curve_obj)
-                set_object_hidden(pipe_obj, hidden)
-                set_object_hidden(tail_obj, hidden)
-            for child in root_obj.children:
-                if child.type in {'CURVE', 'MESH'}:
-                    set_object_hidden(child, hidden)
+            if curve_obj is None:
+                continue
+            pipe_obj = get_pipe_object_for_curve(curve_obj)
+            tail_obj = get_tail_object_for_curve(curve_obj)
+
+            root_hidden = object_hidden(root_obj)
+            curve_hidden = object_hidden(curve_obj)
+            pipe_hidden = object_hidden(pipe_obj)
+
+            if tail_obj is not None:
+                previous_tail_hidden = _tail_visibility_states.get(tail_obj.name)
+                current_tail_hidden = object_hidden(tail_obj)
+                if previous_tail_hidden is None or current_tail_hidden != previous_tail_hidden:
+                    tail_obj["hair_pipe_tail_user_hidden"] = current_tail_hidden
+                user_tail_hidden = bool(tail_obj.get("hair_pipe_tail_user_hidden", current_tail_hidden))
+                _tail_visibility_states[tail_obj.name] = current_tail_hidden
+            else:
+                user_tail_hidden = False
+
+            previous = _root_visibility_states.get(root_obj.name)
+            current_state = (root_hidden, curve_hidden, pipe_hidden)
+            if previous is None:
+                _root_visibility_states[root_obj.name] = current_state
+                if tail_obj is not None and user_tail_hidden:
+                    set_object_hidden(tail_obj, True)
+                continue
+
+            prev_root_hidden, prev_curve_hidden, _prev_pipe_hidden = previous
+            driven_hidden = None
+            if root_hidden != prev_root_hidden:
+                driven_hidden = root_hidden
+            elif curve_hidden != prev_curve_hidden:
+                driven_hidden = curve_hidden
+
+            if driven_hidden is not None:
+                set_object_hidden(root_obj, driven_hidden)
+                set_object_hidden(curve_obj, driven_hidden)
+                set_object_hidden(pipe_obj, driven_hidden)
+                if tail_obj is not None:
+                    set_object_hidden(tail_obj, driven_hidden or user_tail_hidden)
+                current_state = (driven_hidden, driven_hidden, driven_hidden)
+            elif tail_obj is not None and user_tail_hidden and not object_hidden(tail_obj):
+                set_object_hidden(tail_obj, True)
+
+            _root_visibility_states[root_obj.name] = current_state
     finally:
         _visibility_guard = False
 
@@ -167,7 +203,7 @@ def selection_sync_timer():
                 for area in screen.areas:
                     if area.type == 'VIEW_3D':
                         area.tag_redraw()
-    sync_figuhair_root_visibility()
+    sync_figuhair_visibility()
     return 0.35
 
 
