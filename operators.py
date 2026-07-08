@@ -2681,6 +2681,7 @@ class HAIRPIPE_OT_paste_cross_section(bpy.types.Operator):
         self.layout.prop(self, "rotation_offset")
 
     def execute(self, context):
+        bpy.ops.ed.undo_push(message="粘贴横截面")
         settings = context.active_object.hair_pipe_settings
         sync_point_settings(context.active_object)
         selected = get_selected_curve_point_indices(context.active_object) if is_curve_edit_mode(context.active_object) else []
