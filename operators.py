@@ -2360,6 +2360,7 @@ class HAIRPIPE_OT_toggle_cross_section_transition(bpy.types.Operator):
         if curve_obj is None:
             self.report({'ERROR'}, "请选择曲线或 FiguHair 预览网格")
             return {'CANCELLED'}
+        bpy.ops.ed.undo_push(message="截面边流")
         sync_point_settings(curve_obj)
         settings = curve_obj.hair_pipe_settings
         selected = get_selected_curve_point_indices(curve_obj) if is_curve_edit_mode(curve_obj) else []
@@ -2636,6 +2637,11 @@ class HAIRPIPE_OT_copy_cross_section(bpy.types.Operator):
         return s.active_point_index < len(s.point_settings)
 
     def execute(self, context):
+        try:
+            from .widget_operator import push_widget_undo
+            push_widget_undo(context, "复制横截面")
+        except Exception:
+            pass
         global _HAIRPIPE_CROSS_SECTION_CLIPBOARD
         settings = context.active_object.hair_pipe_settings
         src = settings.point_settings[settings.active_point_index]
@@ -2681,7 +2687,11 @@ class HAIRPIPE_OT_paste_cross_section(bpy.types.Operator):
         self.layout.prop(self, "rotation_offset")
 
     def execute(self, context):
-        bpy.ops.ed.undo_push(message="粘贴横截面")
+        try:
+            from .widget_operator import push_widget_undo
+            push_widget_undo(context, "粘贴横截面")
+        except Exception:
+            pass
         settings = context.active_object.hair_pipe_settings
         sync_point_settings(context.active_object)
         selected = get_selected_curve_point_indices(context.active_object) if is_curve_edit_mode(context.active_object) else []
