@@ -1,4 +1,12 @@
-bl_info = {} 
+bl_info = {
+    "name": "FiguHair - Hair Curve Pipe",
+    "author": "Unknown",
+    "version": (1, 0, 0),
+    "blender": (4, 0, 0),
+    "location": "View3D > Sidebar > FiguHair",
+    "description": "Generate pipe mesh from curves with per-point custom cross-sections",
+    "category": "Add Curve",
+}
  
 from . import operators, panel, properties, handler, widget_operator, preferences 
  
@@ -18,22 +26,4 @@ def unregister():
     widget_operator.unregister() 
     properties.unregister()
  
-def stable_cross_section_frame(tangent): 
-    tangent = operators.safe_normalized(tangent) 
-    if tangent.z < -0.999999: 
-        normal = operators.Vector((0, -1, 0)) 
-    else: 
-        a = 1.0 / (1.0 + tangent.z) 
-        b = -tangent.x * tangent.y * a 
-        normal = operators.Vector((1.0 - tangent.x * tangent.x * a, b, -tangent.x)) 
-        if normal.length < 1e-8: 
-            normal = operators.Vector((1, 0, 0)) 
-    normal = normal - tangent * normal.dot(tangent) 
-    if normal.length < 1e-8: 
-        normal = operators.Vector((1, 0, 0)) 
-        normal = normal - tangent * normal.dot(tangent) 
-    normal.normalize() 
-    binormal = tangent.cross(normal).normalized() 
-    return normal, binormal 
- 
-operators.get_cross_section_frame = stable_cross_section_frame
+

@@ -417,10 +417,19 @@ def get_poly_control_tangent(points, idx, is_cyclic):
 
 def get_cross_section_frame(tangent):
     tangent = safe_normalized(tangent)
-    up = Vector((0, 0, 1))
-    if abs(tangent.dot(up)) > 0.999:
-        up = Vector((1, 0, 0))
-    normal = tangent.cross(up).normalized()
+    if tangent.z < -0.999999:
+        normal = Vector((0, -1, 0))
+    else:
+        a = 1.0 / (1.0 + tangent.z)
+        b = -tangent.x * tangent.y * a
+        normal = Vector((1.0 - tangent.x * tangent.x * a, b, -tangent.x))
+        if normal.length < 1e-8:
+            normal = Vector((1, 0, 0))
+    normal = normal - tangent * normal.dot(tangent)
+    if normal.length < 1e-8:
+        normal = Vector((1, 0, 0))
+        normal = normal - tangent * normal.dot(tangent)
+    normal.normalize()
     binormal = tangent.cross(normal).normalized()
     return normal, binormal
 
@@ -1332,11 +1341,12 @@ def get_tail_source_curve(tail_obj):
 
 
 def get_context_curve_object(context):
+    view_layer = getattr(context, 'view_layer', None)
+    active_obj = view_layer.objects.active if view_layer is not None else None
     candidates = (
         getattr(context, 'object', None),
         getattr(context, 'active_object', None),
-        getattr(getattr(context, 'view_layer', None), 'objects', None).active
-        if getattr(context, 'view_layer', None) is not None else None,
+        active_obj,
     )
 
     for obj in candidates:

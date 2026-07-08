@@ -104,8 +104,19 @@ class HAIRPIPE_OT_add_keymap_item(bpy.types.Operator):
 _addon_keymaps = []
 
 
+_register_keymaps_retries = 0
+
 def register_keymaps():
-    wm = bpy.context.window_manager
+    global _register_keymaps_retries
+    wm = getattr(bpy.context, 'window_manager', None)
+    if wm is None:
+        if _register_keymaps_retries < 10:
+            _register_keymaps_retries += 1
+            def _defer_register():
+                register_keymaps()
+                return None
+            bpy.app.timers.register(_defer_register, first_interval=0.5)
+        return
     kc = wm.keyconfigs.addon
     if kc is None:
         return
@@ -122,6 +133,7 @@ def register_keymaps():
     else:
         kmi = km.keymap_items.new('hair_pipe.widget_interact', 'X', 'PRESS', ctrl=True, shift=True)
     _addon_keymaps.append((km, kmi))
+    _register_keymaps_retries = 0
 
 
 def unregister_keymaps():

@@ -17,6 +17,12 @@ from .operators import (
     is_curve_edit_mode,
     sync_active_point_from_selection,
     sync_point_settings,
+    catmull_rom_2d,
+    update_ghost_vertices,
+    safe_normalized,
+    get_cross_section_frame,
+    add_cross_section_vertex_after,
+    remove_cross_section_vertex_all,
 )
 
 
@@ -60,11 +66,6 @@ class HairPipeWidgetSettings(PropertyGroup):
     idx_button_y1: FloatProperty(default=0.0)
     flip_horizontal: BoolProperty(default=False)
     selected_verts: bpy.props.StringProperty(default="")
-    box_select_active: BoolProperty(default=False)
-    box_x0: FloatProperty(default=0.0)
-    box_y0: FloatProperty(default=0.0)
-    box_x1: FloatProperty(default=0.0)
-    box_y1: FloatProperty(default=0.0)
     box_select_active: BoolProperty(default=False)
     box_x0: FloatProperty(default=0.0)
     box_y0: FloatProperty(default=0.0)
@@ -1026,51 +1027,7 @@ def get_effective_offset(vertex, curve_point, point_setting):
     return x * cos_r - y * sin_r, x * sin_r + y * cos_r
 
 
-def catmull_rom_2d(p0, p1, p2, p3, t):
-    t2 = t * t
-    t3 = t2 * t
-    x = 0.5 * (
-        2.0 * p1[0]
-        + (-p0[0] + p2[0]) * t
-        + (2.0 * p0[0] - 5.0 * p1[0] + 4.0 * p2[0] - p3[0]) * t2
-        + (-p0[0] + 3.0 * p1[0] - 3.0 * p2[0] + p3[0]) * t3
-    )
-    y = 0.5 * (
-        2.0 * p1[1]
-        + (-p0[1] + p2[1]) * t
-        + (2.0 * p0[1] - 5.0 * p1[1] + 4.0 * p2[1] - p3[1]) * t2
-        + (-p0[1] + 3.0 * p1[1] - 3.0 * p2[1] + p3[1]) * t3
-    )
-    return x, y
 
-
-def update_ghost_vertices(point_setting):
-    verts = point_setting.cross_section_verts
-    count = len(verts)
-    if count < 3:
-        return
-    real_indices = [i for i, v in enumerate(verts) if not getattr(v, 'is_ghost', False)]
-    real_count = len(real_indices)
-    if real_count < 2:
-        return
-    for real_pos, start_idx in enumerate(real_indices):
-        end_idx = real_indices[(real_pos + 1) % real_count]
-        gap = (end_idx - start_idx - 1) % count
-        if gap <= 0:
-            continue
-        prev_idx = real_indices[(real_pos - 1) % real_count]
-        next_idx = real_indices[(real_pos + 2) % real_count]
-        p0 = (verts[prev_idx].offset_x, verts[prev_idx].offset_y)
-        p1 = (verts[start_idx].offset_x, verts[start_idx].offset_y)
-        p2 = (verts[end_idx].offset_x, verts[end_idx].offset_y)
-        p3 = (verts[next_idx].offset_x, verts[next_idx].offset_y)
-        for step in range(1, gap + 1):
-            ghost_idx = (start_idx + step) % count
-            ghost_vert = verts[ghost_idx]
-            if not getattr(ghost_vert, 'is_ghost', False):
-                continue
-            t = step / (gap + 1)
-            ghost_vert.offset_x, ghost_vert.offset_y = catmull_rom_2d(p0, p1, p2, p3, t)
 
 
 def chaikin_closed(points, iterations=3):
@@ -1128,33 +1085,6 @@ def get_active_curve_point(context):
                 return point
             global_idx += 1
     return None
-
-
-def safe_normalized(vector, fallback=None):
-    if vector.length >= 1e-8:
-        return vector.normalized()
-    if fallback is not None and fallback.length >= 1e-8:
-        return fallback.normalized()
-    return Vector((0, 0, 1))
-
-
-def get_cross_section_frame(tangent):
-    tangent = safe_normalized(tangent)
-    if tangent.z < -0.999999:
-        normal = Vector((0, -1, 0))
-    else:
-        a = 1.0 / (1.0 + tangent.z)
-        b = -tangent.x * tangent.y * a
-        normal = Vector((1.0 - tangent.x * tangent.x * a, b, -tangent.x))
-        if normal.length < 1e-8:
-            normal = Vector((1, 0, 0))
-    normal = normal - tangent * normal.dot(tangent)
-    if normal.length < 1e-8:
-        normal = Vector((1, 0, 0))
-        normal = normal - tangent * normal.dot(tangent)
-    normal.normalize()
-    binormal = tangent.cross(normal).normalized()
-    return normal, binormal
 
 
 def get_active_curve_point_world_position(context):
@@ -1380,21 +1310,6 @@ def add_cross_section_vertex(ps, settings):
     add_cross_section_vertex_after_all(settings, active_point_index, idx)
 
 
-def add_cross_section_vertex_after(ps, idx, is_ghost=False):
-    verts = ps.cross_section_verts
-    n = len(verts)
-    idx = max(0, min(idx, n - 1))
-    idx_next = (idx + 1) % n
-    v = verts.add()
-    v.offset_x = (verts[idx].offset_x + verts[idx_next].offset_x) * 0.5
-    v.offset_y = (verts[idx].offset_y + verts[idx_next].offset_y) * 0.5
-    v.is_ghost = is_ghost
-    target = idx + 1
-    for i in range(len(verts) - 1, target, -1):
-        verts.move(i, i - 1)
-    ps.active_vert_index = target
-
-
 def add_cross_section_vertex_after_all(settings, active_index, idx):
     for point_idx, point_setting in enumerate(settings.point_settings):
         if len(point_setting.cross_section_verts) >= 2:
@@ -1531,17 +1446,6 @@ def remove_cross_section_vertex(ps):
     idx = max(0, min(ps.active_vert_index, len(verts) - 1))
     verts.remove(idx)
     ps.active_vert_index = min(idx, len(verts) - 1)
-    return True
-
-
-def remove_cross_section_vertex_all(settings, remove_idx):
-    if any(len(point_setting.cross_section_verts) <= 3 for point_setting in settings.point_settings):
-        return False
-    for point_setting in settings.point_settings:
-        verts = point_setting.cross_section_verts
-        idx = max(0, min(remove_idx, len(verts) - 1))
-        verts.remove(idx)
-        point_setting.active_vert_index = min(idx, len(verts) - 1)
     return True
 
 

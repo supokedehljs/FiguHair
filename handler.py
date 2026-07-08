@@ -193,17 +193,20 @@ _timer_registered = False
 
 
 def selection_sync_timer():
-    obj = bpy.context.active_object
-    if obj is not None and obj.type == 'CURVE' and is_curve_edit_mode(obj):
-        sync_active_point_from_selection(obj)
-        if time.perf_counter() - _last_rebuild_time > 0.35:
-            rebuild_existing_pipe(obj)
-            screen = bpy.context.screen
-            if screen is not None:
-                for area in screen.areas:
-                    if area.type == 'VIEW_3D':
-                        area.tag_redraw()
-    sync_figuhair_visibility()
+    try:
+        obj = getattr(bpy.context, 'active_object', None)
+        if obj is not None and obj.type == 'CURVE' and is_curve_edit_mode(obj):
+            sync_active_point_from_selection(obj)
+            if time.perf_counter() - _last_rebuild_time > 0.35:
+                rebuild_existing_pipe(obj)
+                screen = getattr(bpy.context, 'screen', None)
+                if screen is not None:
+                    for area in screen.areas:
+                        if area.type == 'VIEW_3D':
+                            area.tag_redraw()
+        sync_figuhair_visibility()
+    except AttributeError:
+        pass
     return 0.35
 
 
