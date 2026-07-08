@@ -15,10 +15,12 @@ from .operators import (
     get_pipe_source_curve,
     is_transition_point,
     is_curve_edit_mode,
+    get_selected_curve_point_indices,
     sync_active_point_from_selection,
     sync_point_settings,
     catmull_rom_2d,
     update_ghost_vertices,
+    update_all_ghost_vertices,
     safe_normalized,
     get_cross_section_frame,
     add_cross_section_vertex_after,
@@ -39,6 +41,11 @@ class HairPipeWidgetSettings(PropertyGroup):
     is_active: BoolProperty(default=False)
     drag_vert_index: IntProperty(default=-1)
     drag_panel: IntProperty(default=0)
+    left_drag_pending: BoolProperty(default=False)
+    left_drag_active: BoolProperty(default=False)
+    left_drag_start_x: FloatProperty(default=0.0)
+    left_drag_start_y: FloatProperty(default=0.0)
+    left_drag_vert_index: IntProperty(default=-1)
     lasso_select_active: BoolProperty(default=False)
     lasso_points: bpy.props.StringProperty(default="")
     region_offset_x: IntProperty(default=0)
@@ -206,26 +213,6 @@ def draw_single_cross_section(shader, verts, ps, settings,
         return
 
     alpha_mult = 1.0 if is_active else 0.6
-
-    gpu.state.line_width_set(1.0)
-    grid = [(panel_cx - panel_half, panel_cy), (panel_cx + panel_half, panel_cy),
-            (panel_cx, panel_cy - panel_half), (panel_cx, panel_cy + panel_half)]
-    batch = batch_for_shader(shader, 'LINES', {"pos": grid})
-    shader.bind()
-    shader.uniform_float("color", (0.35, 0.35, 0.35, 0.4 * alpha_mult))
-    batch.draw(shader)
-
-    ref_r = settings.default_radius * panel_sf
-    circ = []
-    for i in range(64):
-        a0 = 2 * math.pi * i / 64
-        a1 = 2 * math.pi * ((i + 1) % 64) / 64
-        circ.append((panel_cx + math.cos(a0) * ref_r, panel_cy + math.sin(a0) * ref_r))
-        circ.append((panel_cx + math.cos(a1) * ref_r, panel_cy + math.sin(a1) * ref_r))
-    batch = batch_for_shader(shader, 'LINES', {"pos": circ})
-    shader.bind()
-    shader.uniform_float("color", (0.45, 0.45, 0.2, 0.35 * alpha_mult))
-    batch.draw(shader)
 
     outline = []
     for i in range(n):
@@ -1067,8 +1054,48 @@ def set_vertex_from_effective_offset(vertex, effective_x, effective_y, curve_poi
     vertex.offset_y = local_y / scale
 
 
+def get_widget_target_point_indices(context, settings):
+    obj = context.active_object
+    if obj is None or obj.type != 'CURVE':
+        return []
+    selected = get_selected_curve_point_indices(obj) if is_curve_edit_mode(obj) else []
+    if settings.active_point_index not in selected:
+        selected.append(settings.active_point_index)
+    return [idx for idx in dict.fromkeys(selected) if 0 <= idx < len(settings.point_settings)]
+
+
+def copy_cross_section_shape(source_ps, target_ps):
+    target_verts = target_ps.cross_section_verts
+    while len(target_verts) > 0:
+        target_verts.remove(len(target_verts) - 1)
+    for source_vert in source_ps.cross_section_verts:
+        target_vert = target_verts.add()
+        target_vert.offset_x = source_vert.offset_x
+        target_vert.offset_y = source_vert.offset_y
+        target_vert.is_ghost = getattr(source_vert, 'is_ghost', False)
+    target_ps.scale = source_ps.scale
+    target_ps.rotation = source_ps.rotation
+    target_ps.active_vert_index = min(source_ps.active_vert_index, len(target_verts) - 1)
+    update_ghost_vertices(target_ps)
+
+
+def sync_active_cross_section_to_selected_points(context):
+    obj = context.active_object
+    if obj is None or obj.type != 'CURVE':
+        return
+    settings = obj.hair_pipe_settings
+    active_index = settings.active_point_index
+    if not (0 <= active_index < len(settings.point_settings)):
+        return
+    source_ps = settings.point_settings[active_index]
+    for target_index in get_widget_target_point_indices(context, settings):
+        if target_index != active_index:
+            copy_cross_section_shape(source_ps, settings.point_settings[target_index])
+    update_all_ghost_vertices(settings)
+
+
 def apply_active_vertex_edit_to_selected_points(context, source_ps, vert_idx):
-    return
+    sync_active_cross_section_to_selected_points(context)
 
 
 def get_active_curve_point(context):
@@ -1592,6 +1619,59 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     inside_flip_button = is_inside_rect(mx, my, wd.flip_button_x0, wd.flip_button_y0, wd.flip_button_x1, wd.flip_button_y1)
     inside_idx_button = is_inside_rect(mx, my, wd.idx_button_x0, wd.idx_button_y0, wd.idx_button_x1, wd.idx_button_y1)
     inside_controls = inside_add_button or inside_remove_button or inside_toggle_button or inside_flip_button or inside_idx_button
+    drag_threshold = 4.0
+
+    if wd.left_drag_pending:
+        moved = math.sqrt((mx - wd.left_drag_start_x) ** 2 + (my - wd.left_drag_start_y) ** 2)
+        if event.type == 'MOUSEMOVE' and moved >= drag_threshold:
+            if wd.left_drag_vert_index >= 0:
+                sel = get_selected_widget_verts(wd)
+                if wd.left_drag_vert_index not in sel:
+                    sel = {wd.left_drag_vert_index}
+                    set_selected_widget_verts(wd, sel)
+                movable = {vi for vi in sel if 0 <= vi < len(verts) and not getattr(verts[vi], 'is_ghost', False)}
+                if movable:
+                    set_selected_widget_verts(wd, movable)
+                    wd.left_drag_active = True
+                    wd.move_active = True
+                    wd.move_start_x = wd.left_drag_start_x
+                    wd.move_start_y = wd.left_drag_start_y
+                    store_rotate_offsets(wd, verts, sorted(movable))
+                wd.left_drag_pending = False
+                redraw_view3d(context)
+                return {'RUNNING_MODAL'}
+            wd.left_drag_pending = False
+            wd.box_select_active = True
+            wd.box_x0 = wd.left_drag_start_x
+            wd.box_y0 = wd.left_drag_start_y
+            wd.box_x1 = mx
+            wd.box_y1 = my
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
+            if wd.left_drag_vert_index >= 0:
+                closest_idx = wd.left_drag_vert_index
+                ps.active_vert_index = closest_idx
+                if event.shift:
+                    sel = get_selected_widget_verts(wd)
+                    if closest_idx in sel:
+                        sel.discard(closest_idx)
+                    else:
+                        sel.add(closest_idx)
+                    set_selected_widget_verts(wd, sel)
+                else:
+                    set_selected_widget_verts(wd, {closest_idx})
+            else:
+                set_selected_widget_verts(wd, set())
+            wd.left_drag_pending = False
+            wd.left_drag_vert_index = -1
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.type in {'RIGHTMOUSE', 'ESC'}:
+            wd.left_drag_pending = False
+            wd.left_drag_vert_index = -1
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
 
     if wd.move_active:
         sel = sorted(get_selected_widget_verts(wd))
@@ -1608,8 +1688,11 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             update_ghost_vertices(ps)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
-        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+        if event.type == 'LEFTMOUSE' and ((wd.left_drag_active and event.value == 'RELEASE') or (not wd.left_drag_active and event.value == 'PRESS')):
             wd.move_active = False
+            wd.left_drag_active = False
+            wd.left_drag_vert_index = -1
+            sync_active_cross_section_to_selected_points(context)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type in {'RIGHTMOUSE', 'ESC'}:
@@ -1618,6 +1701,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                     verts[vi].offset_x = initial[ip][0]
                     verts[vi].offset_y = initial[ip][1]
             wd.move_active = False
+            wd.left_drag_active = False
+            wd.left_drag_vert_index = -1
             update_ghost_vertices(ps)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
@@ -1642,6 +1727,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             return {'RUNNING_MODAL'}
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
             wd.scale_active = False
+            sync_active_cross_section_to_selected_points(context)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type in {'RIGHTMOUSE', 'ESC'}:
@@ -1719,10 +1805,14 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 selected = selected | get_selected_widget_verts(wd)
             set_selected_widget_verts(wd, selected)
             wd.box_select_active = False
+            wd.left_drag_pending = False
+            wd.left_drag_vert_index = -1
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type == 'ESC':
             wd.box_select_active = False
+            wd.left_drag_pending = False
+            wd.left_drag_vert_index = -1
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         return {'RUNNING_MODAL'}
@@ -1765,6 +1855,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 insert_cross_section_vertex_on_edge_all(
                     settings, settings.active_point_index, edge_idx, local_pos[0], local_pos[1], edge_t, None
                 )
+                sync_active_cross_section_to_selected_points(context)
                 wd.drag_vert_index = -1
                 redraw_view3d(context)
                 return {'RUNNING_MODAL'}
@@ -1775,11 +1866,13 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
         if inside_add_button:
             add_cross_section_vertex(ps, settings)
+            sync_active_cross_section_to_selected_points(context)
             wd.drag_vert_index = -1
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if inside_remove_button:
             remove_cross_section_vertex_all(settings, ps.active_vert_index)
+            sync_active_cross_section_to_selected_points(context)
             wd.drag_vert_index = -1
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
@@ -1787,6 +1880,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             if 0 <= ps.active_vert_index < len(verts):
                 verts[ps.active_vert_index].is_ghost = not getattr(verts[ps.active_vert_index], 'is_ghost', False)
                 update_ghost_vertices(ps)
+                sync_active_cross_section_to_selected_points(context)
             wd.drag_vert_index = -1
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
@@ -1825,26 +1919,12 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 return {'RUNNING_MODAL'}
 
         closest_idx = find_nearest_raw_vertex(verts, mx, my, cx, cy, sf, alignment_angle, flip_h)
-        if closest_idx >= 0:
-            ps.active_vert_index = closest_idx
-            if event.shift:
-                sel = get_selected_widget_verts(wd)
-                if closest_idx in sel:
-                    sel.discard(closest_idx)
-                else:
-                    sel.add(closest_idx)
-                set_selected_widget_verts(wd, sel)
-            else:
-                set_selected_widget_verts(wd, {closest_idx})
-            wd.drag_vert_index = -1
-            redraw_view3d(context)
-            return {'RUNNING_MODAL'}
-
-        wd.box_select_active = True
-        wd.box_x0 = mx
-        wd.box_y0 = my
-        wd.box_x1 = mx
-        wd.box_y1 = my
+        wd.left_drag_pending = True
+        wd.left_drag_active = False
+        wd.left_drag_start_x = mx
+        wd.left_drag_start_y = my
+        wd.left_drag_vert_index = closest_idx
+        wd.drag_vert_index = closest_idx
         redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
@@ -1866,6 +1946,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     # Left mouse release
     if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
         wd.drag_vert_index = -1
+        wd.left_drag_pending = False
+        wd.left_drag_active = False
+        wd.left_drag_vert_index = -1
         redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
@@ -1929,6 +2012,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         wd.rotate_active = False
         wd.scale_active = False
         wd.box_select_active = False
+        wd.left_drag_pending = False
+        wd.left_drag_active = False
+        wd.left_drag_vert_index = -1
         wd.lasso_select_active = False
         operator._finish(context)
         return {'FINISHED'}
@@ -1938,6 +2024,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         wd.move_active = False
         wd.rotate_active = False
         wd.scale_active = False
+        wd.left_drag_pending = False
+        wd.left_drag_active = False
+        wd.left_drag_vert_index = -1
         operator._finish(context)
         return {'FINISHED'}
 
