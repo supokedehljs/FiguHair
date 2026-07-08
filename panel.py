@@ -56,8 +56,10 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         if settings.strong_smoothing:
             box.prop(settings, "strong_smoothing_iterations", text="\u5e73\u6ed1\u6b21\u6570")
         box.prop(settings, "smooth_shading", text="\u5e73\u6ed1\u7740\u8272")
-        box.prop(settings, "cap_ends", text="\u5c01\u53e3")
-        box.prop(settings, "default_subdiv", text="\u6dfb\u52a0\u7ec6\u5206\u4fee\u6539\u5668")
+        row = box.row(align=True)
+        row.prop(settings, "subdivision_levels", text="细分层级")
+        icon = 'HIDE_OFF' if settings.default_subdiv else 'HIDE_ON'
+        row.prop(settings, "default_subdiv", text="", icon=icon, toggle=True)
 
         from .operators import get_tail_object_for_curve
         tail_box = layout.box()
@@ -88,10 +90,6 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
 
         box = header_box.box()
         box.label(text="\u622a\u9762\u8fc7\u6e21\u5e73\u6ed1", icon='IPO_BEZIER')
-        box.prop(settings, "edge_flow_mode", text="\u6a21\u5f0f")
-        if settings.edge_flow_mode in {'START', 'END'}:
-            box.prop(settings, "edge_flow_power", text="\u504f\u5411\u5f3a\u5ea6")
-        box.prop(settings, "edge_flow_blend", text="\u91cd\u5efa\u5f3a\u5ea6")
         row = box.row(align=True)
         row.scale_y = 1.25
         op = row.operator("hair_pipe.apply_edge_flow", text="\u622a\u9762\u8fb9\u6d41")

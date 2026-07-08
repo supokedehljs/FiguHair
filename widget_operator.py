@@ -1,6 +1,7 @@
 import bpy
 import gpu
 import math
+import json
 import blf
 from gpu_extras.batch import batch_for_shader
 from bpy_extras import view3d_utils
@@ -101,6 +102,7 @@ class HairPipeWidgetSettings(PropertyGroup):
     corr_rot_dragging: bpy.props.BoolProperty(default=False)
     corr_rot_drag_start_x: FloatProperty(default=0.0)
     corr_rot_drag_start_val: FloatProperty(default=0.0)
+    undo_stack: bpy.props.StringProperty(default="[]")
 
 
 
@@ -982,6 +984,88 @@ def redraw_view3d(context):
             area.tag_redraw()
 
 
+def serialize_cross_section_undo_state(obj):
+    settings = obj.hair_pipe_settings
+    state = {
+        "active_point_index": settings.active_point_index,
+        "widget_correct_rotation": settings.widget_correct_rotation,
+        "points": [],
+    }
+    for ps in settings.point_settings:
+        state["points"].append({
+            "scale": ps.scale,
+            "rotation": ps.rotation,
+            "active_vert_index": ps.active_vert_index,
+            "use_transition": getattr(ps, "use_transition", False),
+            "verts": [
+                [v.offset_x, v.offset_y, bool(getattr(v, "is_ghost", False))]
+                for v in ps.cross_section_verts
+            ],
+        })
+    return state
+
+
+def restore_cross_section_undo_state(obj, state):
+    settings = obj.hair_pipe_settings
+    point_states = state.get("points", [])
+    for idx, point_state in enumerate(point_states):
+        if idx >= len(settings.point_settings):
+            break
+        ps = settings.point_settings[idx]
+        verts = ps.cross_section_verts
+        while len(verts) > 0:
+            verts.remove(len(verts) - 1)
+        for x, y, is_ghost in point_state.get("verts", []):
+            v = verts.add()
+            v.offset_x = x
+            v.offset_y = y
+            v.is_ghost = is_ghost
+        ps.scale = point_state.get("scale", ps.scale)
+        ps.rotation = point_state.get("rotation", ps.rotation)
+        ps.active_vert_index = min(point_state.get("active_vert_index", ps.active_vert_index), max(0, len(verts) - 1))
+        ps.use_transition = point_state.get("use_transition", getattr(ps, "use_transition", False))
+        update_ghost_vertices(ps)
+    settings.active_point_index = min(state.get("active_point_index", settings.active_point_index), max(0, len(settings.point_settings) - 1))
+    settings.widget_correct_rotation = state.get("widget_correct_rotation", settings.widget_correct_rotation)
+    update_all_ghost_vertices(settings)
+
+
+def get_widget_undo_stack(wd):
+    try:
+        stack = json.loads(wd.undo_stack) if wd.undo_stack else []
+        return stack if isinstance(stack, list) else []
+    except Exception:
+        return []
+
+
+def set_widget_undo_stack(wd, stack):
+    wd.undo_stack = json.dumps(stack[-64:])
+
+
+def push_widget_undo(context, message="编辑横截面"):
+    obj = context.active_object
+    if obj is None or obj.type != 'CURVE':
+        return
+    wd = context.window_manager.hair_pipe_widget
+    stack = get_widget_undo_stack(wd)
+    stack.append(serialize_cross_section_undo_state(obj))
+    set_widget_undo_stack(wd, stack)
+
+
+def pop_widget_undo(context):
+    obj = context.active_object
+    if obj is None or obj.type != 'CURVE':
+        return False
+    wd = context.window_manager.hair_pipe_widget
+    stack = get_widget_undo_stack(wd)
+    if not stack:
+        return False
+    state = stack.pop()
+    set_widget_undo_stack(wd, stack)
+    restore_cross_section_undo_state(obj, state)
+    return True
+
+
 def is_inside_rect(x, y, x0, y0, x1, y1):
     return x0 <= x <= x1 and y0 <= y <= y1
 
@@ -1580,6 +1664,11 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         operator._finish(context)
         return {'FINISHED'}
 
+    if event.type == 'Z' and event.value == 'PRESS' and event.ctrl:
+        pop_widget_undo(context)
+        redraw_view3d(context)
+        return {'RUNNING_MODAL'}
+
     if close_on_key_release and event.value == 'RELEASE' and event.type not in {'LEFTMOUSE', 'RIGHTMOUSE', 'MIDDLEMOUSE', 'MOUSEMOVE'}:
         operator._finish(context)
         return {'FINISHED'}
@@ -1631,6 +1720,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                     set_selected_widget_verts(wd, sel)
                 movable = {vi for vi in sel if 0 <= vi < len(verts) and not getattr(verts[vi], 'is_ghost', False)}
                 if movable:
+                    push_widget_undo(context, "移动横截面顶点")
                     set_selected_widget_verts(wd, movable)
                     wd.left_drag_active = True
                     wd.move_active = True
@@ -1852,6 +1942,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 verts, mx, my, cx, cy, sf, alignment_angle, flip_h
             )
             if edge_idx >= 0:
+                push_widget_undo(context, "插入横截面顶点")
                 insert_cross_section_vertex_on_edge_all(
                     settings, settings.active_point_index, edge_idx, local_pos[0], local_pos[1], edge_t, None
                 )
@@ -1865,12 +1956,14 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     # Left mouse press
     if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
         if inside_add_button:
+            push_widget_undo(context, "添加横截面顶点")
             add_cross_section_vertex(ps, settings)
             sync_active_cross_section_to_selected_points(context)
             wd.drag_vert_index = -1
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if inside_remove_button:
+            push_widget_undo(context, "删除横截面顶点")
             remove_cross_section_vertex_all(settings, ps.active_vert_index)
             sync_active_cross_section_to_selected_points(context)
             wd.drag_vert_index = -1
@@ -1878,6 +1971,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             return {'RUNNING_MODAL'}
         if inside_toggle_button:
             if 0 <= ps.active_vert_index < len(verts):
+                push_widget_undo(context, "切换横截面幽灵点")
                 verts[ps.active_vert_index].is_ghost = not getattr(verts[ps.active_vert_index], 'is_ghost', False)
                 update_ghost_vertices(ps)
                 sync_active_cross_section_to_selected_points(context)
@@ -1895,6 +1989,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             return {'RUNNING_MODAL'}
         inside_corr_rot = is_inside_rect(mx, my, wd.corr_rot_x0, wd.corr_rot_y0, wd.corr_rot_x1, wd.corr_rot_y1)
         if inside_corr_rot:
+            push_widget_undo(context, "旋转修正横截面编辑器")
             wd.corr_rot_dragging = True
             wd.corr_rot_drag_start_x = mx
             wd.corr_rot_drag_start_val = settings.widget_correct_rotation
@@ -1959,6 +2054,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             set_selected_widget_verts(wd, sel)
         sel = {vi for vi in sel if 0 <= vi < len(verts) and not getattr(verts[vi], 'is_ghost', False)}
         if sel:
+            push_widget_undo(context, "移动横截面顶点")
             set_selected_widget_verts(wd, sel)
             wd.move_active = True
             wd.move_start_x = mx
@@ -1974,6 +2070,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             set_selected_widget_verts(wd, sel)
         sel = {vi for vi in sel if 0 <= vi < len(verts) and not getattr(verts[vi], 'is_ghost', False)}
         if sel:
+            push_widget_undo(context, "旋转横截面顶点")
             set_selected_widget_verts(wd, sel)
             wd.rotate_active = True
             wd.rotate_start_x = mx
@@ -1989,6 +2086,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             set_selected_widget_verts(wd, sel)
         sel = {vi for vi in sel if 0 <= vi < len(verts) and not getattr(verts[vi], 'is_ghost', False)}
         if sel:
+            push_widget_undo(context, "缩放横截面顶点")
             set_selected_widget_verts(wd, sel)
             wd.scale_active = True
             wd.scale_start_x = mx

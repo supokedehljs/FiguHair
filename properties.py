@@ -7,6 +7,24 @@ from bpy.props import (
 from bpy.types import PropertyGroup
 
 
+def update_subdivision_modifier_settings(self, context):
+    owner = getattr(self, "id_data", None)
+    if owner is None or getattr(owner, "type", None) != 'CURVE':
+        return
+    for obj in bpy.data.objects:
+        if obj.type != 'MESH' or obj.get("hair_pipe_source_curve") != owner.name:
+            continue
+        modifier = obj.modifiers.get("FiguHair Catmull-Clark")
+        if modifier is None:
+            modifier = obj.modifiers.new("FiguHair Catmull-Clark", 'SUBSURF')
+            modifier.subdivision_type = 'CATMULL_CLARK'
+            modifier.show_render = True
+        modifier.subdivision_type = 'CATMULL_CLARK'
+        modifier.levels = self.subdivision_levels
+        modifier.render_levels = self.subdivision_levels
+        modifier.show_viewport = self.default_subdiv
+
+
 class HairPipeCrossSectionVertex(PropertyGroup):
     """A single vertex on the cross-section profile (2D local coordinates)"""
     offset_x: FloatProperty(
@@ -106,7 +124,7 @@ class HairPipeSettings(PropertyGroup):
     strong_smoothing: BoolProperty(
         name="Strong Smoothing",
         description="Apply additional smoothing across the whole generated ring sequence",
-        default=True,
+        default=False,
     )
     strong_smoothing_iterations: IntProperty(
         name="Strong Smoothing Iterations",
@@ -159,10 +177,19 @@ class HairPipeSettings(PropertyGroup):
         description="Close the ends of the pipe",
         default=False,
     )
+    subdivision_levels: IntProperty(
+        name="细分层级",
+        description="Viewport and render levels for the FiguHair subdivision surface modifier",
+        default=2,
+        min=0,
+        max=6,
+        update=update_subdivision_modifier_settings,
+    )
     default_subdiv: BoolProperty(
-        name="Default Subdivision",
-        description="Add a level 2 subdivision surface modifier when creating the pipe mesh",
+        name="显示细分修改器",
+        description="Show or hide the FiguHair subdivision surface modifier in the viewport. The modifier is always created for hair pipe meshes.",
         default=True,
+        update=update_subdivision_modifier_settings,
     )
     redirect_selection: BoolProperty(
         name="网格不可选模式",

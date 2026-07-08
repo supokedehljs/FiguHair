@@ -1420,14 +1420,15 @@ def ensure_tail_edit_proxy(tail_obj):
     return proxy_obj
 
 
-def ensure_pipe_subdivision_modifier(pipe_obj):
+def ensure_pipe_subdivision_modifier(pipe_obj, show_viewport=True, levels=2):
     modifier = pipe_obj.modifiers.get("FiguHair Catmull-Clark")
     if modifier is None:
         modifier = pipe_obj.modifiers.new("FiguHair Catmull-Clark", 'SUBSURF')
+    levels = max(0, min(int(levels), 6))
     modifier.subdivision_type = 'CATMULL_CLARK'
-    modifier.levels = 2
-    modifier.render_levels = 2
-    modifier.show_viewport = True
+    modifier.levels = levels
+    modifier.render_levels = levels
+    modifier.show_viewport = show_viewport
     modifier.show_render = True
     return modifier
 
@@ -1505,9 +1506,11 @@ def ensure_tail_join_geometry_nodes(pipe_obj, tail_obj):
     return modifier
 
 
-def ensure_tail_modifier_stack(pipe_obj, tail_obj):
+def ensure_tail_modifier_stack(pipe_obj, tail_obj, settings=None):
     join_modifier = ensure_tail_join_geometry_nodes(pipe_obj, tail_obj)
-    subdiv_modifier = ensure_pipe_subdivision_modifier(pipe_obj)
+    show_viewport = True if settings is None else settings.default_subdiv
+    levels = 2 if settings is None else settings.subdivision_levels
+    subdiv_modifier = ensure_pipe_subdivision_modifier(pipe_obj, show_viewport, levels)
     move_modifier_before(pipe_obj, join_modifier, subdiv_modifier)
     return join_modifier, subdiv_modifier
 
@@ -2090,12 +2093,11 @@ def configure_pipe_object(pipe_obj, curve_obj):
 
     pipe_obj.show_in_front = False
     pipe_obj.hide_select = False
-    if curve_obj.hair_pipe_settings.default_subdiv:
-        ensure_pipe_subdivision_modifier(pipe_obj)
-    else:
-        existing = pipe_obj.modifiers.get("FiguHair Catmull-Clark")
-        if existing is not None:
-            pipe_obj.modifiers.remove(existing)
+    ensure_pipe_subdivision_modifier(
+        pipe_obj,
+        curve_obj.hair_pipe_settings.default_subdiv,
+        curve_obj.hair_pipe_settings.subdivision_levels,
+    )
     pipe_obj.select_set(False)
 
 
@@ -2180,31 +2182,42 @@ def lerp_radians(a, b, t):
     return a + delta * t
 
 
-def rebuild_cross_section_between(curve_obj, settings, start_idx, end_idx, mode, power, blend):
-    if start_idx == end_idx:
-        return 0
-    if start_idx > end_idx:
-        start_idx, end_idx = end_idx, start_idx
-    if end_idx - start_idx < 2:
+def find_previous_edge_flow_source_index(point_settings, idx, target_indices):
+    for point_idx in range(idx - 1, -1, -1):
+        if point_idx not in target_indices and not is_transition_point(point_settings[point_idx]):
+            return point_idx
+    return None
+
+
+def find_next_edge_flow_source_index(point_settings, idx, target_indices):
+    for point_idx in range(idx + 1, len(point_settings)):
+        if point_idx not in target_indices and not is_transition_point(point_settings[point_idx]):
+            return point_idx
+    return None
+
+
+def apply_edge_flow_to_target_indices(curve_obj, settings, target_indices, mode, power, blend):
+    target_indices = sorted({idx for idx in target_indices if 0 <= idx < len(settings.point_settings)})
+    if not target_indices:
         return 0
 
-    start_ps = settings.point_settings[start_idx]
-    end_ps = settings.point_settings[end_idx]
-    start_curve_point = get_curve_point_by_global_index(curve_obj, start_idx)
-    end_curve_point = get_curve_point_by_global_index(curve_obj, end_idx)
-    start_radius = getattr(start_curve_point, 'radius', 1.0) if start_curve_point is not None else 1.0
-    end_radius = getattr(end_curve_point, 'radius', 1.0) if end_curve_point is not None else 1.0
-    start_tilt = getattr(start_curve_point, 'tilt', 0.0) if start_curve_point is not None else 0.0
-    end_tilt = getattr(end_curve_point, 'tilt', 0.0) if end_curve_point is not None else 0.0
-    count = min(len(start_ps.cross_section_verts), len(end_ps.cross_section_verts))
-    if count < 3:
-        return 0
-
+    target_set = set(target_indices)
     blend = max(0.0, min(1.0, blend))
     changed = 0
-    span = end_idx - start_idx
-    for point_idx in range(start_idx + 1, end_idx):
+
+    for point_idx in target_indices:
+        start_idx = find_previous_edge_flow_source_index(settings.point_settings, point_idx, target_set)
+        end_idx = find_next_edge_flow_source_index(settings.point_settings, point_idx, target_set)
+        if start_idx is None or end_idx is None or start_idx == end_idx:
+            continue
+
+        start_ps = settings.point_settings[start_idx]
+        end_ps = settings.point_settings[end_idx]
         ps = settings.point_settings[point_idx]
+        count = min(len(start_ps.cross_section_verts), len(end_ps.cross_section_verts))
+        if count < 3:
+            continue
+
         while len(ps.cross_section_verts) < count:
             v = ps.cross_section_verts.add()
             v.offset_x = 0.0
@@ -2212,7 +2225,8 @@ def rebuild_cross_section_between(curve_obj, settings, start_idx, end_idx, mode,
             v.is_ghost = False
         while len(ps.cross_section_verts) > count and len(ps.cross_section_verts) > 3:
             ps.cross_section_verts.remove(len(ps.cross_section_verts) - 1)
-        raw_t = (point_idx - start_idx) / span
+
+        raw_t = (point_idx - start_idx) / max(1, end_idx - start_idx)
         t = edge_flow_t(mode, raw_t, power)
         for vert_idx in range(count):
             sv = start_ps.cross_section_verts[vert_idx]
@@ -2223,18 +2237,29 @@ def rebuild_cross_section_between(curve_obj, settings, start_idx, end_idx, mode,
             cv.offset_x = cv.offset_x * (1.0 - blend) + target_x * blend
             cv.offset_y = cv.offset_y * (1.0 - blend) + target_y * blend
             cv.is_ghost = False
+
         ps.scale = ps.scale * (1.0 - blend) + (start_ps.scale * (1.0 - t) + end_ps.scale * t) * blend
         target_rot = lerp_angle(start_ps.rotation, end_ps.rotation, t)
         ps.rotation = ps.rotation * (1.0 - blend) + target_rot * blend
+
+        start_curve_point = get_curve_point_by_global_index(curve_obj, start_idx)
+        end_curve_point = get_curve_point_by_global_index(curve_obj, end_idx)
         curve_point = get_curve_point_by_global_index(curve_obj, point_idx)
-        if curve_point is not None:
+        if start_curve_point is not None and end_curve_point is not None and curve_point is not None:
+            start_radius = getattr(start_curve_point, 'radius', 1.0)
+            end_radius = getattr(end_curve_point, 'radius', 1.0)
+            start_tilt = getattr(start_curve_point, 'tilt', 0.0)
+            end_tilt = getattr(end_curve_point, 'tilt', 0.0)
             target_radius = start_radius * (1.0 - t) + end_radius * t
             target_tilt = lerp_radians(start_tilt, end_tilt, t)
             curve_point.radius = curve_point.radius * (1.0 - blend) + target_radius * blend
             curve_point.tilt = curve_point.tilt * (1.0 - blend) + target_tilt * blend
+
         if ps.active_vert_index >= len(ps.cross_section_verts):
             ps.active_vert_index = len(ps.cross_section_verts) - 1
+        ps.use_transition = False
         changed += 1
+
     return changed
 
 
@@ -2282,7 +2307,7 @@ class HAIRPIPE_OT_generate_pipe(bpy.types.Operator):
         tail_obj = get_tail_object_for_curve(curve_obj)
         if tail_obj is not None:
             update_tail_mesh_for_curve(curve_obj, settings, verts)
-            ensure_tail_modifier_stack(pipe_obj, tail_obj)
+            ensure_tail_modifier_stack(pipe_obj, tail_obj, settings)
         self.report({'INFO'}, f"Generated pipe with {len(verts)} vertices")
         return {'FINISHED'}
 
@@ -2348,7 +2373,7 @@ class HAIRPIPE_OT_toggle_cross_section_transition(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_apply_edge_flow(bpy.types.Operator):
-    """Rebuild intermediate cross-sections between exactly two selected curve control points"""
+    """Rebuild selected curve control points from surrounding editable cross-sections"""
     bl_idname = "hair_pipe.apply_edge_flow"
     bl_label = "Apply Edge Flow"
     bl_options = {'REGISTER', 'UNDO'}
@@ -2401,32 +2426,30 @@ class HAIRPIPE_OT_apply_edge_flow(bpy.types.Operator):
             self.report({'ERROR'}, "Select a curve or its FiguHair preview mesh")
             return {'CANCELLED'}
         if not is_curve_edit_mode(curve_obj):
-            self.report({'ERROR'}, "Enter curve Edit Mode and select exactly two control points")
+            self.report({'ERROR'}, "Enter curve Edit Mode and select one or more target control points")
             return {'CANCELLED'}
 
         sync_point_settings(curve_obj)
+        settings = curve_obj.hair_pipe_settings
         selected = get_selected_curve_point_indices(curve_obj)
-        if len(selected) != 2:
-            self.report({'ERROR'}, "Select exactly two curve control points")
+        target_indices = selected if selected else [settings.active_point_index]
+        target_indices = [idx for idx in target_indices if 0 <= idx < len(settings.point_settings)]
+        if not target_indices:
+            self.report({'ERROR'}, "Select one or more target curve control points")
             return {'CANCELLED'}
 
-        settings = curve_obj.hair_pipe_settings
         settings.edge_flow_mode = self.mode
         settings.edge_flow_power = self.power
         settings.edge_flow_blend = self.blend
-        start_idx, end_idx = sorted(selected)
-        if end_idx >= len(settings.point_settings):
-            self.report({'ERROR'}, "Selected point index is out of range")
-            return {'CANCELLED'}
-        changed = rebuild_cross_section_between(
-            curve_obj, settings, start_idx, end_idx, self.mode, self.power, self.blend
+        changed = apply_edge_flow_to_target_indices(
+            curve_obj, settings, target_indices, self.mode, self.power, self.blend
         )
         if changed <= 0:
-            self.report({'ERROR'}, "Selected points must have at least one point between them")
+            self.report({'ERROR'}, "Selected targets need editable cross-sections before and after them")
             return {'CANCELLED'}
-        settings.active_point_index = end_idx
+        settings.active_point_index = target_indices[-1]
         update_all_ghost_vertices(settings)
-        self.report({'INFO'}, f"Rebuilt {changed} intermediate cross-sections")
+        self.report({'INFO'}, f"Rebuilt {changed} selected cross-sections")
         return {'FINISHED'}
 
 
@@ -2878,7 +2901,7 @@ class HAIRPIPE_OT_create_tail_mesh(bpy.types.Operator):
             return {'CANCELLED'}
         pipe_obj = get_pipe_object_for_curve(curve_obj)
         if pipe_obj is not None:
-            ensure_tail_modifier_stack(pipe_obj, tail_obj)
+            ensure_tail_modifier_stack(pipe_obj, tail_obj, settings)
         self.report({'INFO'}, "\u5df2\u521b\u5efa\u672b\u7aef\u7f51\u683c")
         return {'FINISHED'}
 
@@ -3174,7 +3197,7 @@ class HAIRPIPE_OT_duplicate_hair(bpy.types.Operator):
             new_tail.matrix_world = src_tail_matrix
 
             if new_pipe is not None:
-                ensure_tail_modifier_stack(new_pipe, new_tail)
+                ensure_tail_modifier_stack(new_pipe, new_tail, new_curve.hair_pipe_settings)
 
         # ── 5. Activate the new curve ─────────────────────────────────────
         for o in context.selected_objects:
