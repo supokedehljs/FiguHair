@@ -33,7 +33,7 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
             return
 
         box = layout.box()
-        box.label(text="\u751f\u6210", icon='MESH_CYLINDER')
+        box.label(text="\u901a\u7528", icon='MESH_CYLINDER')
         row = box.row(align=True)
         row.scale_y = 1.35
         row.operator("hair_pipe.generate_pipe", text="\u751f\u6210 / \u66f4\u65b0\u7ba1\u7ebf")
@@ -43,6 +43,8 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         row3 = box.row(align=True)
         row3.scale_y = 1.2
         row3.operator("hair_pipe.merge_hair_for_export", text="导出合并网格", icon='EXPORT')
+        row = box.row(align=True)
+        row.operator("hair_pipe.toggle_solo_display", text="单独显示", icon='HIDE_OFF')
         mode_text = "\u53ea\u9009\u66f2\u7ebf\u6a21\u5f0f" if settings.redirect_selection else "\u5934\u53d1\u7f51\u683c\u53ef\u9009\u6a21\u5f0f"
         row = box.row(align=True)
         row.prop(settings, "redirect_selection", text=mode_text, toggle=True)
@@ -85,52 +87,41 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         header_box.prop(settings, "auto_update", text="\u7f16\u8f91\u6a21\u5f0f\u64cd\u4f5c", icon='EDITMODE_HLT',
                         emboss=False)
 
+        active_idx = min(settings.active_point_index, len(settings.point_settings) - 1)
+        active_ps = settings.point_settings[active_idx]
+        widget_data = getattr(context.window_manager, "hair_pipe_widget", None)
+
         if not settings.auto_update:
             return
 
         box = header_box.box()
-        box.label(text="\u622a\u9762\u8fc7\u6e21\u5e73\u6ed1", icon='IPO_BEZIER')
         row = box.row(align=True)
         row.scale_y = 1.25
         op = row.operator("hair_pipe.apply_edge_flow", text="\u622a\u9762\u8fb9\u6d41")
         op.mode = settings.edge_flow_mode
         op.power = settings.edge_flow_power
         op.blend = settings.edge_flow_blend
-        row = box.row(align=True)
-        row.scale_y = 1.1
         row.operator("hair_pipe.equalize_point_distance", text="\u66f2\u7ebf\u5e73\u6ed1", icon='SMOOTHCURVE')
 
         row = box.row(align=True)
         row.operator("hair_pipe.copy_cross_section", text="\u590d\u5236", icon='COPYDOWN')
         row.operator("hair_pipe.paste_cross_section", text="\u7c98\u8d34", icon='PASTEDOWN')
 
-        transition_box = header_box.box()
-        transition_box.label(text="横截面过渡", icon='IPO_EASE_IN_OUT')
-        active_idx = min(settings.active_point_index, len(settings.point_settings) - 1)
-        active_ps = settings.point_settings[active_idx]
-        if getattr(active_ps, "use_transition", False):
-            transition_box.label(text="当前点状态：过渡模式", icon='CHECKMARK')
-        else:
-            transition_box.label(text="当前点状态：正常模式", icon='RADIOBUT_OFF')
-        row = transition_box.row(align=True)
-        row.scale_y = 1.35
-        row.operator("hair_pipe.toggle_cross_section_transition", text="切换横截面过渡模式", icon='IPO_EASE_IN_OUT')
-        transition_box.label(text="可选择一个或多个曲线点后切换", icon='INFO')
-
-        box = header_box.box()
-        box.label(text="\u6a2a\u622a\u9762\u7f16\u8f91\u5668", icon='MOUSE_LMB')
-        widget_data = getattr(context.window_manager, "hair_pipe_widget", None)
-        if widget_data is None:
-            box.label(text="\u6a2a\u622a\u9762\u7f16\u8f91\u5668\u672a\u521d\u59cb\u5316\uff0c\u8bf7\u91cd\u65b0\u52a0\u8f7d\u63d2\u4ef6", icon='ERROR')
-            return
         row = box.row(align=True)
-        if getattr(active_ps, "use_transition", False):
-            row.enabled = False
-            row.operator("hair_pipe.widget_interact", text="过渡模式下无法编辑横截面", icon='LOCKED')
-        elif widget_data.is_active:
-            row.operator("hair_pipe.widget_stop", text="\u5173\u95ed\u7f16\u8f91\u5668", icon='PANEL_CLOSE')
+        row.scale_y = 1.2
+        row.operator("hair_pipe.toggle_cross_section_transition", text=("切换到点正常模式" if getattr(active_ps, "use_transition", False) else "切换到点过渡模式"), icon='IPO_EASE_IN_OUT')
+
+        if widget_data is None:
+            box.label(text="横截面编辑器未初始化，请重新加载插件", icon='ERROR')
         else:
-            row.operator("hair_pipe.widget_interact", text="\u6253\u5f00\u7f16\u8f91\u5668", icon='MOUSE_LMB')
+            row = box.row(align=True)
+            if getattr(active_ps, "use_transition", False):
+                row.enabled = False
+                row.operator("hair_pipe.widget_interact", text="过渡模式下无法编辑横截面", icon='LOCKED')
+            elif widget_data.is_active:
+                row.operator("hair_pipe.widget_stop", text="关闭编辑器", icon='PANEL_CLOSE')
+            else:
+                row.operator("hair_pipe.widget_interact", text="打开编辑器", icon='MOUSE_LMB')
 
 
 classes = (

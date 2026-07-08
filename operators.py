@@ -1306,6 +1306,21 @@ def get_tail_object_for_curve(curve_obj):
     return None
 
 
+def get_hair_root_object(curve_obj):
+    root_obj = get_figuhair_root(curve_obj)
+    if root_obj is not None:
+        return root_obj
+    if curve_obj is None:
+        return None
+    if curve_obj.parent is not None and curve_obj.parent.type == 'EMPTY' and curve_obj.parent.get("hair_pipe_root"):
+        return curve_obj.parent
+    root_name = curve_obj.name + "_FiguHair"
+    obj = bpy.data.objects.get(root_name)
+    if obj is not None and obj.type == 'EMPTY' and obj.get("hair_pipe_root"):
+        return obj
+    return None
+
+
 def verts_to_world_space(verts, curve_obj):
     matrix = curve_obj.matrix_world
     return [matrix @ vert for vert in verts]
@@ -2354,7 +2369,7 @@ class HAIRPIPE_OT_toggle_cross_section_transition(bpy.types.Operator):
             self.report({'ERROR'}, "没有可切换的曲线点")
             return {'CANCELLED'}
 
-        should_enable = any(not settings.point_settings[idx].use_transition for idx in target_indices)
+        should_enable = not all(settings.point_settings[idx].use_transition for idx in target_indices)
         changed = 0
         for idx in target_indices:
             prev_idx = find_previous_editable_point_index(settings.point_settings, idx)
@@ -2993,6 +3008,82 @@ class HAIRPIPE_OT_hide_all_tail_meshes(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class HAIRPIPE_OT_toggle_solo_display(bpy.types.Operator):
+    """Toggle solo display for the active hair set"""
+    bl_idname = "hair_pipe.toggle_solo_display"
+    bl_label = "单独显示"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        curve_obj = get_context_curve_object(context)
+        return curve_obj is not None and curve_obj.type == 'CURVE'
+
+    def execute(self, context):
+        curves = []
+        for obj in getattr(context, 'selected_objects', ()):
+            if obj is None:
+                continue
+            curve_obj = None
+            if obj.type == 'CURVE':
+                curve_obj = obj
+            elif obj.type == 'EMPTY':
+                curve_obj = get_curve_from_figuhair_root(obj)
+            else:
+                curve_obj = get_pipe_source_curve(obj) or get_tail_source_curve(obj)
+            if curve_obj is not None and curve_obj not in curves:
+                curves.append(curve_obj)
+        if not curves:
+            curve_obj = get_context_curve_object(context)
+            if curve_obj is not None:
+                curves = [curve_obj]
+        if not curves:
+            return {'CANCELLED'}
+
+        roots = []
+        family_ids = set()
+        solo_enabled = True
+        for curve_obj in curves:
+            root_obj = get_hair_root_object(curve_obj)
+            if root_obj is None:
+                continue
+            roots.append(root_obj)
+            solo_enabled = solo_enabled and not bool(root_obj.get("hair_pipe_solo_active", False))
+            family_ids.add(root_obj.name)
+            family_ids.add(curve_obj.name)
+            pipe_obj = get_pipe_object_for_curve(curve_obj)
+            tail_obj = get_tail_object_for_curve(curve_obj)
+            if pipe_obj is not None:
+                family_ids.add(pipe_obj.name)
+            if tail_obj is not None:
+                family_ids.add(tail_obj.name)
+
+        if not roots:
+            return {'CANCELLED'}
+
+        if solo_enabled:
+            for obj in bpy.data.objects:
+                if _is_figuhair_family_obj(obj):
+                    obj["hair_pipe_solo_prev_hidden"] = obj.hide_get()
+                    obj.hide_set(obj.name not in family_ids)
+            for root_obj in roots:
+                root_obj["hair_pipe_solo_active"] = True
+            self.report({'INFO'}, "已单独显示选中的头发")
+        else:
+            for obj in bpy.data.objects:
+                if not _is_figuhair_family_obj(obj):
+                    continue
+                prev_hidden = bool(obj.get("hair_pipe_solo_prev_hidden", False))
+                obj.hide_set(prev_hidden)
+                if "hair_pipe_solo_prev_hidden" in obj:
+                    del obj["hair_pipe_solo_prev_hidden"]
+            for root_obj in roots:
+                if "hair_pipe_solo_active" in root_obj:
+                    del root_obj["hair_pipe_solo_active"]
+            self.report({'INFO'}, "已取消单独显示")
+        return {'FINISHED'}
+
+
 class HAIRPIPE_OT_edit_tail_mesh(bpy.types.Operator):
     """切换末端网格编辑模式与曲线编辑模式"""
     bl_idname = "hair_pipe.edit_tail_mesh"
@@ -3334,6 +3425,7 @@ classes = (
     HAIRPIPE_OT_generate_pipe,
     HAIRPIPE_OT_sync_points,
     HAIRPIPE_OT_toggle_cross_section_transition,
+    HAIRPIPE_OT_toggle_solo_display,
     HAIRPIPE_OT_apply_edge_flow,
     HAIRPIPE_OT_reset_cross_section,
     HAIRPIPE_OT_reset_all_cross_sections,

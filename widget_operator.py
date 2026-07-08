@@ -206,6 +206,46 @@ def get_curve_point_by_index(context, idx):
     return None
 
 
+def draw_circle_points(shader, points, color, radius, segments=20):
+    if not points:
+        return
+    circles = []
+    indices = []
+    for p in points:
+        center_index = len(circles)
+        circles.append(p)
+        for i in range(segments):
+            angle = (i / segments) * math.tau
+            circles.append((p[0] + math.cos(angle) * radius, p[1] + math.sin(angle) * radius))
+        for i in range(1, segments + 1):
+            i1 = center_index + i
+            i2 = center_index + (i % segments) + 1
+            indices.append((center_index, i1, i2))
+    batch = batch_for_shader(shader, 'TRIS', {"pos": circles}, indices=indices)
+    shader.bind()
+    shader.uniform_float("color", color)
+    batch.draw(shader)
+
+
+def draw_circle_outline(shader, points, color, radius, segments=24, line_width=1.4):
+    if not points:
+        return
+    lines = []
+    for p in points:
+        ring = []
+        for i in range(segments):
+            angle = (i / segments) * math.tau
+            ring.append((p[0] + math.cos(angle) * radius, p[1] + math.sin(angle) * radius))
+        for i in range(segments):
+            lines.append(ring[i])
+            lines.append(ring[(i + 1) % segments])
+    gpu.state.line_width_set(line_width)
+    batch = batch_for_shader(shader, 'LINES', {"pos": lines})
+    shader.bind()
+    shader.uniform_float("color", color)
+    batch.draw(shader)
+
+
 def draw_single_cross_section(shader, verts, ps, settings,
                                panel_cx, panel_cy, panel_sf, alignment_angle,
                                flip_h, panel_half, is_active, wd=None):
@@ -250,31 +290,17 @@ def draw_single_cross_section(shader, verts, ps, settings,
         else:
             normal_pts.append(point)
     if ghost_pts:
-        gpu.state.point_size_set(8.0 if is_active else 6.0)
-        batch = batch_for_shader(shader, 'POINTS', {"pos": ghost_pts})
-        shader.bind()
-        shader.uniform_float("color", (0.45, 0.65, 1.0, 0.45 * alpha_mult))
-        batch.draw(shader)
+        draw_circle_points(shader, ghost_pts, (0.45, 0.65, 1.0, 0.45 * alpha_mult), 4.5 if is_active else 3.5)
     if normal_pts:
-        gpu.state.point_size_set(10.0 if is_active else 7.0)
-        batch = batch_for_shader(shader, 'POINTS', {"pos": normal_pts})
-        shader.bind()
-        shader.uniform_float("color", (1.0, 1.0, 1.0, 0.9 * alpha_mult))
-        batch.draw(shader)
+        draw_circle_points(shader, normal_pts, (1.0, 1.0, 1.0, 0.9 * alpha_mult), 5.0 if is_active else 4.0)
 
     if is_active:
         aidx = ps.active_vert_index
         if 0 <= aidx < n:
-            gpu.state.point_size_set(18.0)
             ax, ay = get_raw_offset(verts[aidx])
             ap = [effective_to_widget(ax, ay, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h)]
-            batch = batch_for_shader(shader, 'POINTS', {"pos": ap})
-            shader.bind()
-            if getattr(verts[aidx], 'is_ghost', False):
-                shader.uniform_float("color", (0.55, 0.75, 1.0, 0.95))
-            else:
-                shader.uniform_float("color", (0.0, 0.95, 1.0, 1.0))
-            batch.draw(shader)
+            active_color = (1.0, 0.5, 0.0, 1.0) if wd is not None and aidx in get_selected_widget_verts(wd) else ((0.0, 0.95, 1.0, 1.0) if not getattr(verts[aidx], 'is_ghost', False) else (0.55, 0.75, 1.0, 0.95))
+            draw_circle_points(shader, ap, active_color, 5.0 if is_active else 4.0)
 
         if wd is not None:
             sel_indices = get_selected_widget_verts(wd)
@@ -285,11 +311,7 @@ def draw_single_cross_section(shader, verts, ps, settings,
                         sx, sy = get_raw_offset(verts[si])
                         sel_pts.append(effective_to_widget(sx, sy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h))
                 if sel_pts:
-                    gpu.state.point_size_set(22.0)
-                    batch = batch_for_shader(shader, 'POINTS', {"pos": sel_pts})
-                    shader.bind()
-                    shader.uniform_float("color", (1.0, 0.5, 0.0, 0.7))
-                    batch.draw(shader)
+                    draw_circle_points(shader, sel_pts, (1.0, 0.5, 0.0, 1.0), 5.0)
 
 
 
