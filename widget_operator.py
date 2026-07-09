@@ -88,6 +88,7 @@ class HairPipeWidgetSettings(PropertyGroup):
     move_active: BoolProperty(default=False)
     scale_active: BoolProperty(default=False)
     display_scale_active: BoolProperty(default=False)
+    left_drag_started_inside_widget: BoolProperty(default=False)
     show_vert_indices: BoolProperty(default=False)
     show_full_mesh_grid: BoolProperty(default=False)
     show_smooth_preview: BoolProperty(default=False)
@@ -109,6 +110,7 @@ class HairPipeWidgetSettings(PropertyGroup):
     corr_rot_y1: FloatProperty(default=0.0)
     corr_rot_dragging: bpy.props.BoolProperty(default=False)
     corr_rot_drag_start_x: FloatProperty(default=0.0)
+    corr_rot_drag_start_angle: FloatProperty(default=0.0)
     corr_rot_drag_start_val: FloatProperty(default=0.0)
     undo_stack: bpy.props.StringProperty(default="[]")
 
@@ -962,6 +964,18 @@ def draw_widget_callback():
     draw_single_cross_section(shader, verts, ps, settings,
                                cx, cy, sf, alignment_angle, flip_h, half, True, wd)
 
+    cross_size = 9.0
+    cross_lines = [
+        (cx - cross_size, cy), (cx + cross_size, cy),
+        (cx, cy - cross_size), (cx, cy + cross_size),
+    ]
+    gpu.state.line_width_set(1.4)
+    batch = batch_for_shader(shader, 'LINES', {"pos": cross_lines})
+    shader.bind()
+    shader.uniform_float("color", (0.1, 0.9, 1.0, 0.85))
+    batch.draw(shader)
+    draw_circle_points(shader, [(cx, cy)], (0.1, 0.9, 1.0, 0.45), 2.0, segments=14)
+
     # Box select rect
     if wd.box_select_active:
         bx0r = min(wd.box_x0, wd.box_x1)
@@ -1286,7 +1300,7 @@ def push_widget_undo(context, message="编辑横截面"):
 
 
 def pop_widget_undo(context):
-    obj = context.active_object
+    obj = get_widget_source_curve(context)
     if obj is None or obj.type != 'CURVE':
         return False
     wd = context.window_manager.hair_pipe_widget
@@ -1970,20 +1984,24 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     sf = wd.widget_scale_factor
     alignment_angle = get_view_alignment_angle(context) + math.radians(settings.widget_correct_rotation)
     flip_h = wd.flip_horizontal
+    view_area, view_region = get_view3d_window_region(context)
+    if view_region is None:
+        operator._finish(context)
+        return {'CANCELLED'}
+    if view_area is not None:
+        event_region = None
+        for candidate_region in view_area.regions:
+            if candidate_region.x <= event.mouse_x < candidate_region.x + candidate_region.width and candidate_region.y <= event.mouse_y < candidate_region.y + candidate_region.height:
+                event_region = candidate_region
+                break
+        if event_region is not None and event_region.type != 'WINDOW':
+            return {'PASS_THROUGH'}
+        if event_region is None and not (view_region.x <= event.mouse_x < view_region.x + view_region.width and view_region.y <= event.mouse_y < view_region.y + view_region.height):
+            return {'PASS_THROUGH'}
+    wd.region_offset_x = view_region.x
+    wd.region_offset_y = view_region.y
     mx, my = operator._get_local_mouse(event, wd)
-    area = None
-    region = None
-    for candidate_area in context.screen.areas:
-        if candidate_area.x <= event.mouse_x < candidate_area.x + candidate_area.width and candidate_area.y <= event.mouse_y < candidate_area.y + candidate_area.height:
-            area = candidate_area
-            for candidate_region in candidate_area.regions:
-                if candidate_region.x <= event.mouse_x < candidate_region.x + candidate_region.width and candidate_region.y <= event.mouse_y < candidate_region.y + candidate_region.height:
-                    region = candidate_region
-                    break
-            break
-    if area is None or area.type != 'VIEW_3D' or region is None or region.type != 'WINDOW':
-        return {'PASS_THROUGH'}
-    if mx < 0 or my < 0 or mx > region.width or my > region.height:
+    if mx < 0 or my < 0 or mx > view_region.width or my > view_region.height:
         return {'PASS_THROUGH'}
     half = wd.widget_size / 2.0
     inside_widget = abs(mx - cx) <= half and abs(my - cy) <= half
@@ -1996,6 +2014,35 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     inside_controls = inside_add_button or inside_remove_button or inside_toggle_button or inside_preview_button or inside_flip_button or inside_idx_button
     inside_corr_rot = is_inside_rect(mx, my, wd.corr_rot_x0, wd.corr_rot_y0, wd.corr_rot_x1, wd.corr_rot_y1)
     drag_threshold = 4.0
+
+    view_cx = view_region.width * 0.5
+    view_cy = view_region.height * 0.5
+
+    if event.type == 'T' and event.value == 'PRESS' and event.ctrl:
+        push_widget_undo(context, "旋转修正横截面编辑器")
+        wd.corr_rot_dragging = True
+        wd.corr_rot_drag_start_angle = math.atan2(my - view_cy, mx - view_cx)
+        wd.corr_rot_drag_start_val = settings.widget_correct_rotation
+        redraw_view3d(context)
+        return {'RUNNING_MODAL'}
+
+    if wd.corr_rot_dragging:
+        if event.type == 'MOUSEMOVE':
+            current_angle = math.atan2(my - view_cy, mx - view_cx)
+            delta_angle = math.degrees(current_angle - wd.corr_rot_drag_start_angle)
+            settings.widget_correct_rotation = wd.corr_rot_drag_start_val + delta_angle
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            wd.corr_rot_dragging = False
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
+            settings.widget_correct_rotation = wd.corr_rot_drag_start_val
+            wd.corr_rot_dragging = False
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        return {'RUNNING_MODAL'}
 
     if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.value == 'PRESS':
         if not event.ctrl:
@@ -2041,7 +2088,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 return {'RUNNING_MODAL'}
             wd.left_drag_pending = False
             wd.box_select_active = True
-            wd.box_select_3d = not inside_widget
+            wd.box_select_3d = not wd.left_drag_started_inside_widget
             wd.box_x0 = wd.left_drag_start_x
             wd.box_y0 = wd.left_drag_start_y
             wd.box_x1 = mx
@@ -2049,6 +2096,11 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
+            if not wd.left_drag_started_inside_widget:
+                wd.left_drag_pending = False
+                wd.left_drag_vert_index = -1
+                redraw_view3d(context)
+                return {'RUNNING_MODAL'}
             if wd.left_drag_vert_index >= 0:
                 closest_idx = wd.left_drag_vert_index
                 ps.active_vert_index = closest_idx
@@ -2359,6 +2411,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             wd.left_drag_active = False
             wd.left_drag_start_x = mx
             wd.left_drag_start_y = my
+            wd.left_drag_started_inside_widget = False
             wd.left_drag_vert_index = -1
             wd.drag_vert_index = -1
             if point_idx >= 0 and ring_idx >= 0:
@@ -2392,23 +2445,12 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             wd.left_drag_active = False
             wd.left_drag_start_x = mx
             wd.left_drag_start_y = my
+            wd.left_drag_started_inside_widget = True
             wd.left_drag_vert_index = closest_idx
             wd.drag_vert_index = closest_idx
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         return {'PASS_THROUGH'}
-
-    # Rotation correction drag
-    if event.type == 'MOUSEMOVE' and wd.corr_rot_dragging:
-        delta_x = mx - wd.corr_rot_drag_start_x
-        settings.widget_correct_rotation = wd.corr_rot_drag_start_val + delta_x * 0.5
-        redraw_view3d(context)
-        return {'RUNNING_MODAL'}
-
-    if event.type == 'LEFTMOUSE' and event.value == 'RELEASE' and wd.corr_rot_dragging:
-        wd.corr_rot_dragging = False
-        redraw_view3d(context)
-        return {'RUNNING_MODAL'}
 
     if event.type == 'MOUSEMOVE':
         return {'RUNNING_MODAL'}
@@ -2501,7 +2543,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
 
 
 def get_widget_edit_context(context):
-    obj = context.active_object
+    obj = get_widget_source_curve(context)
     if obj is None or getattr(obj, 'type', None) != 'CURVE' or not hasattr(obj, 'hair_pipe_settings'):
         return None, None, None, None
     settings = obj.hair_pipe_settings
@@ -2591,16 +2633,19 @@ class HAIRPIPE_OT_widget_make_normal(bpy.types.Operator):
         if not selected:
             return {'CANCELLED'}
         push_widget_undo(context, "设置横截面正常点")
+        target_indices = get_widget_target_point_indices(context, settings)
         changed = False
-        if len(selected) == 2:
-            changed = toggle_ghost_between_selected_edge_points(ps, selected)
-        for idx in selected:
-            if getattr(verts[idx], 'is_ghost', False):
-                verts[idx].is_ghost = False
-                changed = True
+        for point_idx in target_indices:
+            target_ps = settings.point_settings[point_idx]
+            if len(selected) == 2:
+                changed = toggle_ghost_between_selected_edge_points(target_ps, selected) or changed
+            for idx in selected:
+                if 0 <= idx < len(target_ps.cross_section_verts) and getattr(target_ps.cross_section_verts[idx], 'is_ghost', False):
+                    target_ps.cross_section_verts[idx].is_ghost = False
+                    changed = True
+            update_ghost_vertices(target_ps)
         if changed:
-            update_ghost_vertices(ps)
-            sync_active_cross_section_to_selected_points(context)
+            update_all_ghost_vertices(settings)
         if wd is not None:
             set_selected_widget_verts(wd, {idx for idx in selected if 0 <= idx < len(verts) and not getattr(verts[idx], 'is_ghost', False)})
             wd.drag_vert_index = -1
