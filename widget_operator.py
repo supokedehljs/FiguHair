@@ -79,6 +79,7 @@ class HairPipeWidgetSettings(PropertyGroup):
     selected_verts: bpy.props.StringProperty(default="")
     source_curve_name: bpy.props.StringProperty(default="")
     box_select_active: BoolProperty(default=False)
+    box_select_3d: BoolProperty(default=False)
     box_x0: FloatProperty(default=0.0)
     box_y0: FloatProperty(default=0.0)
     box_x1: FloatProperty(default=0.0)
@@ -665,6 +666,71 @@ def draw_active_pipe_cross_section_ring(context, ps):
     gpu.state.point_size_set(1.0)
     gpu.state.line_width_set(1.0)
     gpu.state.blend_set('NONE')
+
+
+def get_pipe_control_vertices_in_screen_rect(context, x0, y0, x1, y1):
+    region = context.region
+    region_data = context.region_data
+    obj = context.active_object
+    if region is None or region_data is None or obj is None or obj.type != 'CURVE':
+        return []
+
+    settings = obj.hair_pipe_settings
+    if len(settings.point_settings) == 0:
+        return []
+
+    try:
+        mesh_verts, _faces = generate_pipe_mesh(obj, settings)
+    except Exception:
+        return []
+    if not mesh_verts:
+        return []
+
+    segments = len(settings.point_settings[0].cross_section_verts)
+    if segments < 3 or len(mesh_verts) < segments:
+        return []
+
+    control_positions = []
+    for spline_data in get_curve_points_data(obj):
+        for point in spline_data.get('points', []):
+            control_positions.append(obj.matrix_world @ point['co'])
+    if not control_positions:
+        return []
+
+    ring_centers = []
+    for start in range(0, len(mesh_verts) - segments + 1, segments):
+        ring = mesh_verts[start:start + segments]
+        ring_center = sum((Vector(v) for v in ring), Vector((0.0, 0.0, 0.0))) / segments
+        ring_centers.append((start, obj.matrix_world @ ring_center))
+
+    hits = []
+    used_starts = set()
+    for point_idx, control_world in enumerate(control_positions[:len(settings.point_settings)]):
+        if is_transition_point(settings.point_settings[point_idx]):
+            continue
+        best_start = None
+        best_ring_dist = None
+        for start, ring_center_world in ring_centers:
+            if start in used_starts:
+                continue
+            dist = (ring_center_world - control_world).length
+            if best_ring_dist is None or dist < best_ring_dist:
+                best_ring_dist = dist
+                best_start = start
+        if best_start is None:
+            continue
+        used_starts.add(best_start)
+        ring_world = [obj.matrix_world @ Vector(v) for v in mesh_verts[best_start:best_start + segments]]
+        point_vert_count = len(settings.point_settings[point_idx].cross_section_verts)
+        for vert_idx, world_pos in enumerate(ring_world[:point_vert_count]):
+            if getattr(settings.point_settings[point_idx].cross_section_verts[vert_idx], 'is_ghost', False):
+                continue
+            screen_pos = view3d_utils.location_3d_to_region_2d(region, region_data, world_pos)
+            if screen_pos is None:
+                continue
+            if x0 <= screen_pos.x <= x1 and y0 <= screen_pos.y <= y1:
+                hits.append((point_idx, vert_idx))
+    return hits
 
 
 def find_nearest_pipe_control_vertex(context, mx, my, max_dist=16.0):
@@ -1975,6 +2041,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 return {'RUNNING_MODAL'}
             wd.left_drag_pending = False
             wd.box_select_active = True
+            wd.box_select_3d = not inside_widget
             wd.box_x0 = wd.left_drag_start_x
             wd.box_y0 = wd.left_drag_start_y
             wd.box_x1 = mx
@@ -2147,16 +2214,34 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             by0 = min(wd.box_y0, wd.box_y1)
             bx1 = max(wd.box_x0, wd.box_x1)
             by1 = max(wd.box_y0, wd.box_y1)
-            selected = set()
-            for i, v in enumerate(verts):
-                ox, oy = get_raw_offset(v)
-                px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
-                if bx0 <= px <= bx1 and by0 <= py <= by1:
-                    selected.add(i)
+            if wd.box_select_3d:
+                hits = get_pipe_control_vertices_in_screen_rect(context, bx0, by0, bx1, by1)
+                if hits:
+                    target_point_idx = settings.active_point_index
+                    active_hits = [vert_idx for point_idx, vert_idx in hits if point_idx == target_point_idx]
+                    if not active_hits:
+                        target_point_idx = hits[0][0]
+                        active_hits = [vert_idx for point_idx, vert_idx in hits if point_idx == target_point_idx]
+                    settings.active_point_index = target_point_idx
+                    select_curve_point_by_index(obj, target_point_idx)
+                    target_ps = settings.point_settings[target_point_idx]
+                    if active_hits:
+                        target_ps.active_vert_index = active_hits[0]
+                    selected = set(active_hits)
+                else:
+                    selected = set()
+            else:
+                selected = set()
+                for i, v in enumerate(verts):
+                    ox, oy = get_raw_offset(v)
+                    px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
+                    if bx0 <= px <= bx1 and by0 <= py <= by1:
+                        selected.add(i)
             if event.shift:
                 selected = selected | get_selected_widget_verts(wd)
             set_selected_widget_verts(wd, selected)
             wd.box_select_active = False
+            wd.box_select_3d = False
             wd.left_drag_pending = False
             wd.left_drag_vert_index = -1
             redraw_view3d(context)
@@ -2270,6 +2355,12 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
 
         if not inside_widget:
             point_idx, ring_idx = find_nearest_pipe_control_vertex(context, mx, my)
+            wd.left_drag_pending = True
+            wd.left_drag_active = False
+            wd.left_drag_start_x = mx
+            wd.left_drag_start_y = my
+            wd.left_drag_vert_index = -1
+            wd.drag_vert_index = -1
             if point_idx >= 0 and ring_idx >= 0:
                 settings.active_point_index = point_idx
                 select_curve_point_by_index(obj, point_idx)
@@ -2284,12 +2375,16 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                     set_selected_widget_verts(wd, sel)
                 else:
                     set_selected_widget_verts(wd, {ring_idx})
-                wd.left_drag_pending = False
-                wd.left_drag_active = False
-                wd.left_drag_vert_index = -1
+                wd.left_drag_vert_index = ring_idx
                 wd.drag_vert_index = ring_idx
                 redraw_view3d(context)
                 return {'RUNNING_MODAL'}
+
+            return {'RUNNING_MODAL'}
+
+        if not inside_widget:
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
 
         if inside_widget:
             closest_idx = find_nearest_raw_vertex(verts, mx, my, cx, cy, sf, alignment_angle, flip_h)
