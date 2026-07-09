@@ -2235,7 +2235,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 for i, v in enumerate(verts):
                     ox, oy = get_raw_offset(v)
                     px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
-                    if bx0 <= px <= bx1 and by0 <= py <= by1:
+                    if bx0 <= px <= bx1 and by0 <= py <= by1 and not getattr(v, 'is_ghost', False):
                         selected.add(i)
             if event.shift:
                 selected = selected | get_selected_widget_verts(wd)
@@ -2548,7 +2548,7 @@ class HAIRPIPE_OT_widget_remove_vertex(bpy.types.Operator):
 
 class HAIRPIPE_OT_widget_toggle_ghost(bpy.types.Operator):
     bl_idname = "hair_pipe.widget_toggle_ghost"
-    bl_label = "幽灵点"
+    bl_label = "设置为幽灵点"
 
     def execute(self, context):
         obj, settings, ps, wd = get_widget_edit_context(context)
@@ -2556,19 +2556,53 @@ class HAIRPIPE_OT_widget_toggle_ghost(bpy.types.Operator):
             return {'CANCELLED'}
         verts = ps.cross_section_verts
         selected = {idx for idx in get_selected_widget_verts(wd) if 0 <= idx < len(verts)} if wd is not None else set()
-        if len(selected) == 2:
-            push_widget_undo(context, "解除横截面幽灵线段")
-            changed = toggle_ghost_between_selected_edge_points(ps, selected)
-        elif 0 <= ps.active_vert_index < len(verts):
-            push_widget_undo(context, "切换横截面幽灵点")
-            verts[ps.active_vert_index].is_ghost = not getattr(verts[ps.active_vert_index], 'is_ghost', False)
-            changed = True
-        else:
+        if not selected and 0 <= ps.active_vert_index < len(verts):
+            selected = {ps.active_vert_index}
+        if not selected:
             return {'CANCELLED'}
+        push_widget_undo(context, "设置横截面幽灵点")
+        changed = False
+        for idx in selected:
+            if not getattr(verts[idx], 'is_ghost', False):
+                verts[idx].is_ghost = True
+                changed = True
         if changed:
             update_ghost_vertices(ps)
             sync_active_cross_section_to_selected_points(context)
         if wd is not None:
+            set_selected_widget_verts(wd, {idx for idx in selected if 0 <= idx < len(verts) and not getattr(verts[idx], 'is_ghost', False)})
+            wd.drag_vert_index = -1
+        redraw_view3d(context)
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_widget_make_normal(bpy.types.Operator):
+    bl_idname = "hair_pipe.widget_make_normal"
+    bl_label = "设置为正常点"
+
+    def execute(self, context):
+        obj, settings, ps, wd = get_widget_edit_context(context)
+        if ps is None:
+            return {'CANCELLED'}
+        verts = ps.cross_section_verts
+        selected = {idx for idx in get_selected_widget_verts(wd) if 0 <= idx < len(verts)} if wd is not None else set()
+        if not selected and 0 <= ps.active_vert_index < len(verts):
+            selected = {ps.active_vert_index}
+        if not selected:
+            return {'CANCELLED'}
+        push_widget_undo(context, "设置横截面正常点")
+        changed = False
+        if len(selected) == 2:
+            changed = toggle_ghost_between_selected_edge_points(ps, selected)
+        for idx in selected:
+            if getattr(verts[idx], 'is_ghost', False):
+                verts[idx].is_ghost = False
+                changed = True
+        if changed:
+            update_ghost_vertices(ps)
+            sync_active_cross_section_to_selected_points(context)
+        if wd is not None:
+            set_selected_widget_verts(wd, {idx for idx in selected if 0 <= idx < len(verts) and not getattr(verts[idx], 'is_ghost', False)})
             wd.drag_vert_index = -1
         redraw_view3d(context)
         return {'FINISHED'}
@@ -2636,6 +2670,7 @@ classes = (
     HAIRPIPE_OT_widget_add_vertex,
     HAIRPIPE_OT_widget_remove_vertex,
     HAIRPIPE_OT_widget_toggle_ghost,
+    HAIRPIPE_OT_widget_make_normal,
     HAIRPIPE_OT_widget_toggle_smooth_preview,
     HAIRPIPE_OT_widget_toggle_flip,
     HAIRPIPE_OT_widget_toggle_grid,
