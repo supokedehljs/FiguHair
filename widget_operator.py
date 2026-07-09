@@ -33,6 +33,7 @@ from .operators import (
 _draw_handle = None
 _addon_keymaps = []
 _PIPE_BASEMESH_STATE_KEY = "hair_pipe_widget_basemesh_state"
+_CURVE_OVERLAY_STATE_KEY = "hair_pipe_widget_curve_overlay_state"
 
 
 class HairPipeWidgetSettings(PropertyGroup):
@@ -84,8 +85,10 @@ class HairPipeWidgetSettings(PropertyGroup):
     rotate_active: BoolProperty(default=False)
     move_active: BoolProperty(default=False)
     scale_active: BoolProperty(default=False)
+    display_scale_active: BoolProperty(default=False)
     show_vert_indices: BoolProperty(default=False)
     show_full_mesh_grid: BoolProperty(default=False)
+    show_smooth_preview: BoolProperty(default=True)
     rotate_start_x: FloatProperty(default=0.0)
     rotate_start_y: FloatProperty(default=0.0)
     move_start_x: FloatProperty(default=0.0)
@@ -259,50 +262,58 @@ def draw_single_cross_section(shader, verts, ps, settings,
 
     alpha_mult = 1.0 if is_active else 0.6
 
+    if wd is None or getattr(wd, 'show_smooth_preview', True):
+        raw_points = [get_raw_offset(v) for v in verts]
+        smooth_raw = chaikin_closed(raw_points, 3)
+        smooth_widget_points = [effective_to_widget(x, y, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h) for x, y in smooth_raw]
+        smooth_lines = make_smooth_preview_lines(smooth_widget_points)
+        if smooth_lines:
+            gpu.state.line_width_set(1.5 if is_active else 1.0)
+            batch = batch_for_shader(shader, 'LINES', {"pos": smooth_lines})
+            shader.bind()
+            shader.uniform_float("color", (0.0, 0.95, 1.0, 0.8 * alpha_mult))
+            batch.draw(shader)
+
     outline = []
+    ghost_edges = []
     for i in range(n):
         j = (i + 1) % n
         ix, iy = get_raw_offset(verts[i])
         jx, jy = get_raw_offset(verts[j])
-        outline.append(effective_to_widget(ix, iy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h))
-        outline.append(effective_to_widget(jx, jy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h))
-    gpu.state.line_width_set(2.0 if is_active else 1.5)
-    batch = batch_for_shader(shader, 'LINES', {"pos": outline})
-    shader.bind()
-    shader.uniform_float("color", (1.0, 0.8, 0.05, 1.0 * alpha_mult))
-    batch.draw(shader)
-
-    raw_points = [get_raw_offset(v) for v in verts]
-    smooth_raw = chaikin_closed(raw_points, 3)
-    smooth_widget_points = [effective_to_widget(x, y, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h) for x, y in smooth_raw]
-    smooth_lines = make_smooth_preview_lines(smooth_widget_points)
-    if smooth_lines:
-        gpu.state.line_width_set(1.5 if is_active else 1.0)
-        batch = batch_for_shader(shader, 'LINES', {"pos": smooth_lines})
+        p0 = effective_to_widget(ix, iy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h)
+        p1 = effective_to_widget(jx, jy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h)
+        if getattr(verts[i], 'is_ghost', False) or getattr(verts[j], 'is_ghost', False):
+            ghost_edges.extend([p0, p1])
+        else:
+            outline.extend([p0, p1])
+    if outline:
+        gpu.state.line_width_set(2.0 if is_active else 1.5)
+        batch = batch_for_shader(shader, 'LINES', {"pos": outline})
         shader.bind()
-        shader.uniform_float("color", (0.0, 0.95, 1.0, 0.8 * alpha_mult))
+        shader.uniform_float("color", (1.0, 0.8, 0.05, 1.0 * alpha_mult))
+        batch.draw(shader)
+    if ghost_edges:
+        gpu.state.line_width_set(2.0 if is_active else 1.5)
+        batch = batch_for_shader(shader, 'LINES', {"pos": ghost_edges})
+        shader.bind()
+        shader.uniform_float("color", (0.45, 0.65, 1.0, 0.82 * alpha_mult))
         batch.draw(shader)
 
     normal_pts = []
-    ghost_pts = []
     for v in verts:
-        ox, oy = get_raw_offset(v)
-        point = effective_to_widget(ox, oy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h)
         if getattr(v, 'is_ghost', False):
-            ghost_pts.append(point)
-        else:
-            normal_pts.append(point)
-    if ghost_pts:
-        draw_circle_points(shader, ghost_pts, (0.45, 0.65, 1.0, 0.45 * alpha_mult), 4.5 if is_active else 3.5)
+            continue
+        ox, oy = get_raw_offset(v)
+        normal_pts.append(effective_to_widget(ox, oy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h))
     if normal_pts:
         draw_circle_points(shader, normal_pts, (1.0, 1.0, 1.0, 0.9 * alpha_mult), 5.0 if is_active else 4.0)
 
     if is_active:
         aidx = ps.active_vert_index
-        if 0 <= aidx < n:
+        if 0 <= aidx < n and not getattr(verts[aidx], 'is_ghost', False):
             ax, ay = get_raw_offset(verts[aidx])
             ap = [effective_to_widget(ax, ay, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h)]
-            active_color = (1.0, 0.5, 0.0, 1.0) if wd is not None and aidx in get_selected_widget_verts(wd) else ((0.0, 0.95, 1.0, 1.0) if not getattr(verts[aidx], 'is_ghost', False) else (0.55, 0.75, 1.0, 0.95))
+            active_color = (1.0, 0.5, 0.0, 1.0) if wd is not None and aidx in get_selected_widget_verts(wd) else (0.0, 0.95, 1.0, 1.0)
             draw_circle_points(shader, ap, active_color, 5.0 if is_active else 4.0)
 
         if wd is not None:
@@ -310,7 +321,7 @@ def draw_single_cross_section(shader, verts, ps, settings,
             if sel_indices:
                 sel_pts = []
                 for si in sel_indices:
-                    if 0 <= si < n:
+                    if 0 <= si < n and not getattr(verts[si], 'is_ghost', False):
                         sx, sy = get_raw_offset(verts[si])
                         sel_pts.append(effective_to_widget(sx, sy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h))
                 if sel_pts:
@@ -637,17 +648,23 @@ def draw_active_pipe_cross_section_ring(context, ps):
 
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
     gpu.state.blend_set('ALPHA')
-    gpu.state.line_width_set(4.0)
-    batch = batch_for_shader(shader, 'LINES', {"pos": lines})
-    shader.bind()
-    shader.uniform_float("color", (1.0, 0.55, 0.0, 1.0))
-    batch.draw(shader)
+    if lines:
+        gpu.state.line_width_set(2.0)
+        batch = batch_for_shader(shader, 'LINES', {"pos": lines})
+        shader.bind()
+        shader.uniform_float("color", (1.0, 0.55, 0.0, 1.0))
+        batch.draw(shader)
 
-    gpu.state.point_size_set(7.0)
-    batch = batch_for_shader(shader, 'POINTS', {"pos": projected})
-    shader.bind()
-    shader.uniform_float("color", (1.0, 1.0, 0.15, 0.95))
-    batch.draw(shader)
+    visible_points = [
+        point for idx, point in enumerate(projected)
+        if idx < len(ps.cross_section_verts) and not getattr(ps.cross_section_verts[idx], 'is_ghost', False)
+    ]
+    if visible_points:
+        gpu.state.point_size_set(7.0)
+        batch = batch_for_shader(shader, 'POINTS', {"pos": visible_points})
+        shader.bind()
+        shader.uniform_float("color", (1.0, 1.0, 0.15, 0.95))
+        batch.draw(shader)
 
     gpu.state.point_size_set(1.0)
     gpu.state.line_width_set(1.0)
@@ -842,6 +859,14 @@ def draw_widget_callback():
     gpu.state.blend_set('ALPHA')
 
     region = context.region
+    if region is not None:
+        dim_w = region.width
+        dim_h = region.height
+        dim_bg = [(0.0, 0.0), (dim_w, 0.0), (dim_w, dim_h), (0.0, dim_h)]
+        batch = batch_for_shader(shader, 'TRIS', {"pos": dim_bg}, indices=[(0, 1, 2), (0, 2, 3)])
+        shader.bind()
+        shader.uniform_float("color", (0.0, 0.0, 0.0, 0.22))
+        batch.draw(shader)
 
     # --- Thumbnail strip at top ---
     total_points = len(settings.point_settings)
@@ -965,6 +990,7 @@ def draw_widget_callback():
         ('add', "添加"),
         ('remove', "删除"),
         ('toggle', "幽灵点"),
+        ('preview', "细分预览"),
         ('flip', "水平翻转"),
         ('idx', "显示网格"),
     ]
@@ -979,26 +1005,29 @@ def draw_widget_callback():
     add_x0, _, add_x1, _ = bounds['add']
     rem_x0, _, rem_x1, _ = bounds['remove']
     tog_x0, _, tog_x1, _ = bounds['toggle']
+    preview_x0, _, preview_x1, _ = bounds['preview']
     flip_x0, _, flip_x1, _ = bounds['flip']
     idx_x0, _, idx_x1, _ = bounds['idx']
     wd.add_button_x0, wd.add_button_y0, wd.add_button_x1, wd.add_button_y1 = bounds['add']
     wd.remove_button_x0, wd.remove_button_y0, wd.remove_button_x1, wd.remove_button_y1 = bounds['remove']
     wd.toggle_button_x0, wd.toggle_button_y0, wd.toggle_button_x1, wd.toggle_button_y1 = bounds['toggle']
+    wd.rotate_button_x0, wd.rotate_button_y0, wd.rotate_button_x1, wd.rotate_button_y1 = bounds['preview']
     wd.flip_button_x0, wd.flip_button_y0, wd.flip_button_x1, wd.flip_button_y1 = bounds['flip']
     wd.idx_button_x0, wd.idx_button_y0, wd.idx_button_x1, wd.idx_button_y1 = bounds['idx']
-    wd.rotate_button_x0 = wd.rotate_button_y0 = wd.rotate_button_x1 = wd.rotate_button_y1 = 0.0
 
     can_remove = all(len(pset.cross_section_verts) > 3 for pset in settings.point_settings)
     active_is_ghost = 0 <= ps.active_vert_index < n and getattr(verts[ps.active_vert_index], 'is_ghost', False)
     draw_widget_button(shader, add_x0, by0, add_x1, by1)
     draw_widget_button(shader, rem_x0, by0, rem_x1, by1, enabled=can_remove)
     draw_widget_button(shader, tog_x0, by0, tog_x1, by1, active=active_is_ghost)
+    draw_widget_button(shader, preview_x0, by0, preview_x1, by1, active=wd.show_smooth_preview)
     draw_widget_button(shader, flip_x0, by0, flip_x1, by1, active=flip_h)
     draw_widget_button(shader, idx_x0, by0, idx_x1, by1, active=wd.show_full_mesh_grid)
 
     draw_centered_label(font_id, "添加", add_x0, by0, add_x1, by1)
     draw_centered_label(font_id, "删除", rem_x0, by0, rem_x1, by1, 1.0 if can_remove else 0.38)
     draw_centered_label(font_id, "幽灵点", tog_x0, by0, tog_x1, by1)
+    draw_centered_label(font_id, "细分预览", preview_x0, by0, preview_x1, by1)
     draw_centered_label(font_id, "水平翻转", flip_x0, by0, flip_x1, by1)
     draw_centered_label(font_id, "显示网格", idx_x0, by0, idx_x1, by1)
 
@@ -1025,7 +1054,7 @@ def draw_widget_callback():
     blf.size(font_id, 13)
     blf.color(font_id, 0.7, 0.8, 0.9, 0.7)
     blf.position(font_id, 18.0, 24.0, 0)
-    blf.draw(font_id, "点击上方缩略图切换截面 | 中键插入点 | 右键拖拽框选 | S 缩放显示区域")
+    blf.draw(font_id, "点击上方缩略图切换截面 | 中键插入点 | 右键拖拽框选 | S 缩放点 | Alt+S 缩放显示区域")
 
     gpu.state.line_width_set(1.0)
     gpu.state.point_size_set(1.0)
@@ -1054,6 +1083,66 @@ def get_view3d_window_region(context):
                 if region.type == 'WINDOW':
                     return area, region
     return None, None
+
+
+def set_curve_overlay_hidden(context, curve_obj, enabled):
+    if curve_obj is None or getattr(curve_obj, "type", None) != 'CURVE':
+        return
+
+    data = curve_obj.data
+    if enabled:
+        if not curve_obj.get(_CURVE_OVERLAY_STATE_KEY):
+            curve_obj[_CURVE_OVERLAY_STATE_KEY] = json.dumps({
+                "show_wire": bool(curve_obj.show_wire),
+                "show_in_front": bool(curve_obj.show_in_front),
+                "display_type": curve_obj.display_type,
+                "hide_viewport": bool(curve_obj.hide_viewport),
+                "hide_set": bool(curve_obj.hide_get()),
+                "data_show_handles": bool(getattr(data, "show_handles", True)),
+                "data_show_normal_face": bool(getattr(data, "show_normal_face", False)),
+            })
+        curve_obj["hair_pipe_widget_hide_curve_overlay"] = True
+        curve_obj.show_wire = False
+        curve_obj.show_in_front = False
+        curve_obj.hide_viewport = True
+        try:
+            curve_obj.hide_set(True)
+        except Exception:
+            pass
+        if hasattr(data, "show_handles"):
+            data.show_handles = False
+        if hasattr(data, "show_normal_face"):
+            data.show_normal_face = False
+    else:
+        raw_state = curve_obj.get(_CURVE_OVERLAY_STATE_KEY)
+        if raw_state:
+            try:
+                state = json.loads(raw_state)
+            except Exception:
+                state = {}
+            curve_obj.display_type = state.get("display_type", curve_obj.display_type)
+            curve_obj.show_wire = bool(state.get("show_wire", False))
+            curve_obj.show_in_front = bool(state.get("show_in_front", False))
+            curve_obj.hide_viewport = bool(state.get("hide_viewport", False))
+            try:
+                curve_obj.hide_set(bool(state.get("hide_set", False)))
+            except Exception:
+                pass
+            try:
+                del curve_obj["hair_pipe_widget_hide_curve_overlay"]
+            except Exception:
+                pass
+            if hasattr(data, "show_handles"):
+                data.show_handles = bool(state.get("data_show_handles", getattr(data, "show_handles", True)))
+            if hasattr(data, "show_normal_face"):
+                data.show_normal_face = bool(state.get("data_show_normal_face", getattr(data, "show_normal_face", False)))
+            try:
+                del curve_obj[_CURVE_OVERLAY_STATE_KEY]
+            except Exception:
+                pass
+
+    if context is not None:
+        redraw_view3d(context)
 
 
 def set_pipe_basemesh_preview(context, curve_obj, enabled):
@@ -1147,6 +1236,7 @@ def setup_widget(context):
     wd.show_full_mesh_grid = False
     wd.drag_vert_index = -1
     set_pipe_basemesh_preview(context, obj, True)
+    set_curve_overlay_hidden(context, obj, True)
     ensure_draw_handler()
     redraw_view3d(context)
     return True
@@ -1724,6 +1814,36 @@ def find_nearest_cross_section_vertex(verts, mx, my, cx, cy, sf, curve_point, po
     return closest_idx
 
 
+def toggle_ghost_between_selected_edge_points(ps, selected_indices):
+    verts = ps.cross_section_verts
+    n = len(verts)
+    if n < 3 or len(selected_indices) != 2:
+        return False
+    a, b = sorted(selected_indices)
+    if a == b:
+        return False
+    changed = False
+    if (a + 1) % n == b and getattr(verts[a], 'is_ghost', False):
+        verts[a].is_ghost = False
+        changed = True
+    if (b + 1) % n == a and getattr(verts[b], 'is_ghost', False):
+        verts[b].is_ghost = False
+        changed = True
+    if (a + 1) % n != b:
+        for idx in range(a + 1, b):
+            if getattr(verts[idx], 'is_ghost', False):
+                verts[idx].is_ghost = False
+                changed = True
+    if (b + 1) % n != a:
+        idx = (b + 1) % n
+        while idx != a:
+            if getattr(verts[idx], 'is_ghost', False):
+                verts[idx].is_ghost = False
+                changed = True
+            idx = (idx + 1) % n
+    return changed
+
+
 def remove_cross_section_vertex(ps):
     verts = ps.cross_section_verts
     if len(verts) <= 3:
@@ -1755,6 +1875,7 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
     def invoke(self, context, event):
         wd = context.window_manager.hair_pipe_widget
         if wd.is_active:
+            set_curve_overlay_hidden(context, context.active_object, False)
             set_pipe_basemesh_preview(context, context.active_object, False)
             wd.is_active = False
             wd.drag_vert_index = -1
@@ -1790,6 +1911,7 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
         return handle_widget_modal(self, context, event, close_on_key_release=False)
 
     def _finish(self, context):
+        set_curve_overlay_hidden(context, context.active_object, False)
         set_pipe_basemesh_preview(context, context.active_object, False)
         wd = context.window_manager.hair_pipe_widget
         wd.is_active = False
@@ -1830,6 +1952,7 @@ class HAIRPIPE_OT_widget_hold(bpy.types.Operator):
         wd.move_active = False
         wd.rotate_active = False
         wd.scale_active = False
+        wd.display_scale_active = False
         wd.hold_key_mode = False
         redraw_view3d(context)
 
@@ -1882,9 +2005,10 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     inside_add_button = is_inside_rect(mx, my, wd.add_button_x0, wd.add_button_y0, wd.add_button_x1, wd.add_button_y1)
     inside_remove_button = is_inside_rect(mx, my, wd.remove_button_x0, wd.remove_button_y0, wd.remove_button_x1, wd.remove_button_y1)
     inside_toggle_button = is_inside_rect(mx, my, wd.toggle_button_x0, wd.toggle_button_y0, wd.toggle_button_x1, wd.toggle_button_y1)
+    inside_preview_button = is_inside_rect(mx, my, wd.rotate_button_x0, wd.rotate_button_y0, wd.rotate_button_x1, wd.rotate_button_y1)
     inside_flip_button = is_inside_rect(mx, my, wd.flip_button_x0, wd.flip_button_y0, wd.flip_button_x1, wd.flip_button_y1)
     inside_idx_button = is_inside_rect(mx, my, wd.idx_button_x0, wd.idx_button_y0, wd.idx_button_x1, wd.idx_button_y1)
-    inside_controls = inside_add_button or inside_remove_button or inside_toggle_button or inside_flip_button or inside_idx_button
+    inside_controls = inside_add_button or inside_remove_button or inside_toggle_button or inside_preview_button or inside_flip_button or inside_idx_button
     inside_corr_rot = is_inside_rect(mx, my, wd.corr_rot_x0, wd.corr_rot_y0, wd.corr_rot_x1, wd.corr_rot_y1)
     drag_threshold = 4.0
 
@@ -1976,7 +2100,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             return {'RUNNING_MODAL'}
         return {'RUNNING_MODAL'}
 
-    if wd.scale_active:
+    if wd.display_scale_active:
         if event.type == 'MOUSEMOVE':
             start_dist = math.sqrt((wd.scale_start_x - cx) ** 2 + (wd.scale_start_y - cy) ** 2)
             now_dist = math.sqrt((mx - cx) ** 2 + (my - cy) ** 2)
@@ -1985,12 +2109,45 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
-            wd.scale_active = False
+            wd.display_scale_active = False
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type in {'RIGHTMOUSE', 'ESC'}:
             wd.widget_scale_factor = wd.scale_start_factor
+            wd.display_scale_active = False
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        return {'RUNNING_MODAL'}
+
+    if wd.scale_active:
+        sel = sorted(get_selected_widget_verts(wd))
+        initial = get_rotate_offsets(wd)
+        if event.type == 'MOUSEMOVE':
+            cnt = max(1, len(initial))
+            ctr_x = sum(o[0] for o in initial) / cnt
+            ctr_y = sum(o[1] for o in initial) / cnt
+            start_dist = math.sqrt((wd.scale_start_x - cx) ** 2 + (wd.scale_start_y - cy) ** 2)
+            now_dist = math.sqrt((mx - cx) ** 2 + (my - cy) ** 2)
+            factor = now_dist / max(start_dist, 1.0)
+            for ip, vi in enumerate(sel):
+                if vi < len(verts) and ip < len(initial) and not getattr(verts[vi], 'is_ghost', False):
+                    verts[vi].offset_x = ctr_x + (initial[ip][0] - ctr_x) * factor
+                    verts[vi].offset_y = ctr_y + (initial[ip][1] - ctr_y) * factor
+            update_ghost_vertices(ps)
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
             wd.scale_active = False
+            sync_active_cross_section_to_selected_points(context)
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.type in {'RIGHTMOUSE', 'ESC'}:
+            for ip, vi in enumerate(sel):
+                if vi < len(verts) and ip < len(initial):
+                    verts[vi].offset_x = initial[ip][0]
+                    verts[vi].offset_y = initial[ip][1]
+            wd.scale_active = False
+            update_ghost_vertices(ps)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         return {'RUNNING_MODAL'}
@@ -2134,11 +2291,22 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if inside_toggle_button:
-            if 0 <= ps.active_vert_index < len(verts):
+            selected = {idx for idx in get_selected_widget_verts(wd) if 0 <= idx < len(verts)}
+            if len(selected) == 2:
+                push_widget_undo(context, "解除横截面幽灵线段")
+                if toggle_ghost_between_selected_edge_points(ps, selected):
+                    update_ghost_vertices(ps)
+                    sync_active_cross_section_to_selected_points(context)
+            elif 0 <= ps.active_vert_index < len(verts):
                 push_widget_undo(context, "切换横截面幽灵点")
                 verts[ps.active_vert_index].is_ghost = not getattr(verts[ps.active_vert_index], 'is_ghost', False)
                 update_ghost_vertices(ps)
                 sync_active_cross_section_to_selected_points(context)
+            wd.drag_vert_index = -1
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if inside_preview_button:
+            wd.show_smooth_preview = not wd.show_smooth_preview
             wd.drag_vert_index = -1
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
@@ -2264,12 +2432,28 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
-    if event.type == 'S' and event.value == 'PRESS':
-        wd.scale_active = True
+    if event.type == 'S' and event.value == 'PRESS' and event.alt:
+        wd.display_scale_active = True
         wd.scale_start_x = mx
         wd.scale_start_y = my
         wd.scale_start_factor = wd.widget_scale_factor
         redraw_view3d(context)
+        return {'RUNNING_MODAL'}
+
+    if event.type == 'S' and event.value == 'PRESS':
+        sel = get_selected_widget_verts(wd)
+        if not sel and 0 <= ps.active_vert_index < len(verts):
+            sel = {ps.active_vert_index}
+            set_selected_widget_verts(wd, sel)
+        sel = {vi for vi in sel if 0 <= vi < len(verts) and not getattr(verts[vi], 'is_ghost', False)}
+        if sel:
+            push_widget_undo(context, "缩放横截面顶点")
+            set_selected_widget_verts(wd, sel)
+            wd.scale_active = True
+            wd.scale_start_x = mx
+            wd.scale_start_y = my
+            store_rotate_offsets(wd, verts, sorted(sel))
+            redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
     # A - Select All / Deselect All
@@ -2286,6 +2470,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         wd.move_active = False
         wd.rotate_active = False
         wd.scale_active = False
+        wd.display_scale_active = False
         wd.box_select_active = False
         wd.left_drag_pending = False
         wd.left_drag_active = False
@@ -2318,6 +2503,7 @@ class HAIRPIPE_OT_widget_stop(bpy.types.Operator):
     bl_label = "关闭横截面编辑器"
 
     def execute(self, context):
+        set_curve_overlay_hidden(context, context.active_object, False)
         set_pipe_basemesh_preview(context, context.active_object, False)
         wd = context.window_manager.hair_pipe_widget
         wd.is_active = False

@@ -64,6 +64,7 @@ def sync_figuhair_visibility():
                 continue
             pipe_obj = get_pipe_object_for_curve(curve_obj)
             tail_obj = get_tail_object_for_curve(curve_obj)
+            curve_overlay_hidden = bool(curve_obj.get("hair_pipe_widget_hide_curve_overlay", False))
 
             root_hidden = object_hidden(root_obj)
             curve_hidden = object_hidden(curve_obj)
@@ -91,7 +92,7 @@ def sync_figuhair_visibility():
             driven_hidden = None
             if root_hidden != prev_root_hidden:
                 driven_hidden = root_hidden
-            elif curve_hidden != prev_curve_hidden:
+            elif curve_hidden != prev_curve_hidden and not curve_overlay_hidden:
                 driven_hidden = curve_hidden
 
             if driven_hidden is not None:
@@ -103,6 +104,9 @@ def sync_figuhair_visibility():
                 current_state = (driven_hidden, driven_hidden, driven_hidden)
             elif tail_obj is not None and user_tail_hidden and not object_hidden(tail_obj):
                 set_object_hidden(tail_obj, True)
+
+            if curve_overlay_hidden:
+                current_state = (object_hidden(root_obj), object_hidden(curve_obj), object_hidden(pipe_obj))
 
             _root_visibility_states[root_obj.name] = current_state
     finally:
