@@ -209,6 +209,30 @@ class HairPipeSettings(PropertyGroup):
         default=0.0,
         precision=1,
     )
+    widget_offset_x: FloatProperty(
+        name="左右",
+        description="横截面编辑器显示区域的水平偏移",
+        default=0.0,
+        min=-1.0,
+        max=1.0,
+        precision=2,
+    )
+    widget_offset_y: FloatProperty(
+        name="上下",
+        description="横截面编辑器显示区域的垂直偏移",
+        default=0.0,
+        min=-1.0,
+        max=1.0,
+        precision=2,
+    )
+    widget_area_scale: FloatProperty(
+        name="大小",
+        description="横截面编辑器显示区域的整体大小",
+        default=1.0,
+        min=0.35,
+        max=1.8,
+        precision=2,
+    )
 
 
 def register():

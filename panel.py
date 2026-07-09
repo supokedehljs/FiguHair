@@ -125,6 +125,11 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         row.scale_y = 1.2
         row.operator("hair_pipe.toggle_cross_section_transition", text=("切换到点正常模式" if getattr(active_ps, "use_transition", False) else "切换到点过渡模式"), icon='IPO_EASE_IN_OUT')
 
+        row = box.row(align=True)
+        row.prop(settings, "widget_offset_x", text="左右")
+        row.prop(settings, "widget_offset_y", text="上下")
+        row.prop(settings, "widget_area_scale", text="大小")
+
         if widget_data is None:
             box.label(text="横截面编辑器未初始化，请重新加载插件", icon='ERROR')
         else:

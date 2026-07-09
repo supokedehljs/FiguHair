@@ -88,7 +88,7 @@ class HairPipeWidgetSettings(PropertyGroup):
     display_scale_active: BoolProperty(default=False)
     show_vert_indices: BoolProperty(default=False)
     show_full_mesh_grid: BoolProperty(default=False)
-    show_smooth_preview: BoolProperty(default=True)
+    show_smooth_preview: BoolProperty(default=False)
     rotate_start_x: FloatProperty(default=0.0)
     rotate_start_y: FloatProperty(default=0.0)
     move_start_x: FloatProperty(default=0.0)
@@ -309,13 +309,6 @@ def draw_single_cross_section(shader, verts, ps, settings,
         draw_circle_points(shader, normal_pts, (1.0, 1.0, 1.0, 0.9 * alpha_mult), 5.0 if is_active else 4.0)
 
     if is_active:
-        aidx = ps.active_vert_index
-        if 0 <= aidx < n and not getattr(verts[aidx], 'is_ghost', False):
-            ax, ay = get_raw_offset(verts[aidx])
-            ap = [effective_to_widget(ax, ay, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h)]
-            active_color = (1.0, 0.5, 0.0, 1.0) if wd is not None and aidx in get_selected_widget_verts(wd) else (0.0, 0.95, 1.0, 1.0)
-            draw_circle_points(shader, ap, active_color, 5.0 if is_active else 4.0)
-
         if wd is not None:
             sel_indices = get_selected_widget_verts(wd)
             if sel_indices:
@@ -612,8 +605,6 @@ def draw_active_pipe_cross_section_ring(context, ps):
             batch.draw(shader)
 
     selected_indices = {idx for idx in get_selected_widget_verts(wd) if 0 <= idx < segments}
-    if 0 <= ps.active_vert_index < segments:
-        selected_indices.add(ps.active_vert_index)
     if selected_indices and projected_rings:
         highlight_lines = []
         for selected_idx in sorted(selected_indices):
@@ -865,86 +856,25 @@ def draw_widget_callback():
         dim_bg = [(0.0, 0.0), (dim_w, 0.0), (dim_w, dim_h), (0.0, dim_h)]
         batch = batch_for_shader(shader, 'TRIS', {"pos": dim_bg}, indices=[(0, 1, 2), (0, 2, 3)])
         shader.bind()
-        shader.uniform_float("color", (0.0, 0.0, 0.0, 0.22))
+        shader.uniform_float("color", (0.0, 0.0, 0.0, 0.38))
         batch.draw(shader)
-
-    # --- Thumbnail strip at top ---
-    total_points = len(settings.point_settings)
-    thumb_size = 140.0
-    thumb_gap = 24.0
-    thumb_total_w = total_points * thumb_size + (total_points - 1) * thumb_gap
-    thumb_start_x = cx - thumb_total_w * 0.5
-    thumb_y = cy + half + padding + 30.0
-    thumb_sf = thumb_size * 0.28 / max(base_radius, 0.01)
-
-    for pt_idx in range(total_points):
-        tx = thumb_start_x + pt_idx * (thumb_size + thumb_gap) + thumb_size * 0.5
-        ty = thumb_y
-        is_current = (pt_idx == settings.active_point_index)
-
-        th = thumb_size * 0.5
-
-        pt_ps = settings.point_settings[pt_idx]
-        if is_transition_point(pt_ps):
-            font_id = 0
-            blf.size(font_id, 13)
-            blf.color(font_id, 0.25, 0.85, 1.0, 0.85 if is_current else 0.5)
-            blf.position(font_id, tx - 22, ty - 6, 0)
-            blf.draw(font_id, "AUTO")
-            pt_verts = []
-        else:
-            pt_verts = pt_ps.cross_section_verts
-        ptn = len(pt_verts)
-        if ptn >= 3:
-            thumb_outline = []
-            for i in range(ptn):
-                j = (i + 1) % ptn
-                ix, iy = get_raw_offset(pt_verts[i])
-                jx, jy = get_raw_offset(pt_verts[j])
-                thumb_outline.append(effective_to_widget(ix, iy, tx, ty, thumb_sf, alignment_angle, flip_h))
-                thumb_outline.append(effective_to_widget(jx, jy, tx, ty, thumb_sf, alignment_angle, flip_h))
-            gpu.state.line_width_set(1.5 if is_current else 1.0)
-            batch = batch_for_shader(shader, 'LINES', {"pos": thumb_outline})
-            shader.bind()
-            line_color = (1.0, 0.9, 0.2, 1.0) if is_current else (0.8, 0.7, 0.3, 0.7)
-            shader.uniform_float("color", line_color)
-            batch.draw(shader)
-
-        font_id = 0
-        blf.size(font_id, 15)
-        if is_current:
-            blf.color(font_id, 1.0, 0.4, 0.2, 1.0)
-        else:
-            blf.color(font_id, 0.7, 0.7, 0.7, 0.6)
-        blf.position(font_id, tx - 6, ty - th - 20, 0)
-        blf.draw(font_id, str(pt_idx))
-        if is_current:
-            gpu.state.line_width_set(2.0)
-            underline = [(tx - 10, ty - th - 22), (tx + 10, ty - th - 22)]
-            batch = batch_for_shader(shader, 'LINES', {"pos": underline})
-            shader.bind()
-            shader.uniform_float("color", (1.0, 0.4, 0.2, 1.0))
-            batch.draw(shader)
-
-    # Store thumbnail bounds for click detection
-    wd.region_offset_x = wd.region_offset_x  # keep existing
-    # We'll store strip info via computed values in modal
 
     # --- Main editor panel (center) ---
     panel_x0 = cx - half
     panel_y0 = cy - half
     panel_x1 = cx + half
     panel_y1 = cy + half
-    draw_rounded_rect(
-        shader,
-        panel_x0,
-        panel_y0,
-        panel_x1,
-        panel_y1,
-        10.0,
-        (0.08, 0.12, 0.16, 0.0),
-        (0.25, 0.65, 1.0, 0.45),
-    )
+    panel_lines = [
+        (panel_x0, panel_y0), (panel_x1, panel_y0),
+        (panel_x1, panel_y0), (panel_x1, panel_y1),
+        (panel_x1, panel_y1), (panel_x0, panel_y1),
+        (panel_x0, panel_y1), (panel_x0, panel_y0),
+    ]
+    gpu.state.line_width_set(1.2)
+    batch = batch_for_shader(shader, 'LINES', {"pos": panel_lines})
+    shader.bind()
+    shader.uniform_float("color", (0.0, 0.0, 0.0, 0.32))
+    batch.draw(shader)
     draw_single_cross_section(shader, verts, ps, settings,
                                cx, cy, sf, alignment_angle, flip_h, half, True, wd)
 
@@ -1054,7 +984,7 @@ def draw_widget_callback():
     blf.size(font_id, 13)
     blf.color(font_id, 0.7, 0.8, 0.9, 0.7)
     blf.position(font_id, 18.0, 24.0, 0)
-    blf.draw(font_id, "点击上方缩略图切换截面 | 中键插入点 | 右键拖拽框选 | S 缩放点 | Alt+S 缩放显示区域")
+    blf.draw(font_id, "滚轮切换截面 | 中键插入点 | 右键拖拽框选 | S 缩放点 | Alt+S 缩放显示区域")
 
     gpu.state.line_width_set(1.0)
     gpu.state.point_size_set(1.0)
@@ -1228,9 +1158,11 @@ def setup_widget(context):
 
     wd.region_offset_x = region.x
     wd.region_offset_y = region.y
-    wd.widget_size = min(region.width, region.height) * 0.62
-    wd.widget_center_x = region.width / 2.0
-    wd.widget_center_y = region.height / 2.0
+    settings = obj.hair_pipe_settings
+    area_scale = max(0.35, min(1.8, getattr(settings, "widget_area_scale", 1.0)))
+    wd.widget_size = min(region.width, region.height) * 0.62 * area_scale
+    wd.widget_center_x = region.width / 2.0 + region.width * 0.35 * getattr(settings, "widget_offset_x", 0.0)
+    wd.widget_center_y = region.height / 2.0 + region.height * 0.35 * getattr(settings, "widget_offset_y", 0.0)
     wd.widget_scale_factor = 0.0
     wd.is_active = True
     wd.show_full_mesh_grid = False
@@ -1787,7 +1719,7 @@ def find_nearest_cross_section_edge(verts, mx, my, cx, cy, sf, curve_point, poin
 
 
 
-def find_nearest_raw_vertex(verts, mx, my, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h, max_dist=24.0):
+def find_nearest_raw_vertex(verts, mx, my, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h, max_dist=10.0):
     """Find nearest vertex using raw offsets."""
     closest_idx = -1
     closest_dist = max_dist
@@ -2011,6 +1943,28 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     inside_controls = inside_add_button or inside_remove_button or inside_toggle_button or inside_preview_button or inside_flip_button or inside_idx_button
     inside_corr_rot = is_inside_rect(mx, my, wd.corr_rot_x0, wd.corr_rot_y0, wd.corr_rot_x1, wd.corr_rot_y1)
     drag_threshold = 4.0
+
+    if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.value == 'PRESS':
+        if not event.ctrl:
+            return {'PASS_THROUGH'}
+        total_points = len(settings.point_settings)
+        if total_points > 0:
+            previous_selection = get_selected_widget_verts(wd)
+            step = -1 if event.type == 'WHEELUPMOUSE' else 1
+            new_idx = (settings.active_point_index + step) % total_points
+            settings.active_point_index = new_idx
+            select_curve_point_by_index(obj, new_idx)
+            target_ps = settings.point_settings[new_idx]
+            target_count = len(target_ps.cross_section_verts)
+            preserved_selection = {idx for idx in previous_selection if 0 <= idx < target_count}
+            target_ps.active_vert_index = ps.active_vert_index if 0 <= ps.active_vert_index < target_count else -1
+            wd.drag_vert_index = -1
+            wd.left_drag_pending = False
+            wd.left_drag_active = False
+            wd.left_drag_vert_index = -1
+            set_selected_widget_verts(wd, preserved_selection)
+            redraw_view3d(context)
+        return {'RUNNING_MODAL'}
 
     if wd.left_drag_pending:
         moved = math.sqrt((mx - wd.left_drag_start_x) ** 2 + (my - wd.left_drag_start_y) ** 2)
@@ -2327,23 +2281,6 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
 
-        total_points = len(settings.point_settings)
-        thumb_size = 140.0
-        thumb_gap = 24.0
-        thumb_total_w = total_points * thumb_size + (total_points - 1) * thumb_gap
-        thumb_start_x = cx - thumb_total_w * 0.5
-        thumb_y = cy + half + 18 + 30.0
-        thumb_th = thumb_size * 0.5
-        for pt_idx in range(total_points):
-            tx = thumb_start_x + pt_idx * (thumb_size + thumb_gap) + thumb_size * 0.5
-            if abs(mx - tx) <= thumb_th and abs(my - thumb_y) <= thumb_th:
-                settings.active_point_index = pt_idx
-                select_curve_point_by_index(obj, pt_idx)
-                wd.drag_vert_index = -1
-                set_selected_widget_verts(wd, set())
-                redraw_view3d(context)
-                return {'RUNNING_MODAL'}
-
         if not inside_widget:
             ring_idx = find_nearest_active_pipe_ring_vertex(context, ps, mx, my)
             if ring_idx >= 0:
@@ -2402,9 +2339,6 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
 
     if event.type == 'G' and event.value == 'PRESS':
         sel = get_selected_widget_verts(wd)
-        if not sel and 0 <= ps.active_vert_index < len(verts):
-            sel = {ps.active_vert_index}
-            set_selected_widget_verts(wd, sel)
         sel = {vi for vi in sel if 0 <= vi < len(verts) and not getattr(verts[vi], 'is_ghost', False)}
         if sel:
             push_widget_undo(context, "移动横截面顶点")
@@ -2418,9 +2352,6 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
 
     if event.type == 'R' and event.value == 'PRESS':
         sel = get_selected_widget_verts(wd)
-        if not sel and 0 <= ps.active_vert_index < len(verts):
-            sel = {ps.active_vert_index}
-            set_selected_widget_verts(wd, sel)
         sel = {vi for vi in sel if 0 <= vi < len(verts) and not getattr(verts[vi], 'is_ghost', False)}
         if sel:
             push_widget_undo(context, "旋转横截面顶点")
@@ -2442,9 +2373,6 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
 
     if event.type == 'S' and event.value == 'PRESS':
         sel = get_selected_widget_verts(wd)
-        if not sel and 0 <= ps.active_vert_index < len(verts):
-            sel = {ps.active_vert_index}
-            set_selected_widget_verts(wd, sel)
         sel = {vi for vi in sel if 0 <= vi < len(verts) and not getattr(verts[vi], 'is_ghost', False)}
         if sel:
             push_widget_undo(context, "缩放横截面顶点")
