@@ -125,10 +125,12 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         row.scale_y = 1.2
         row.operator("hair_pipe.toggle_cross_section_transition", text=("切换到点正常模式" if getattr(active_ps, "use_transition", False) else "切换到点过渡模式"), icon='IPO_EASE_IN_OUT')
 
+        addon_entry = context.preferences.addons.get("hair_curve_pipe")
+        widget_layout = addon_entry.preferences if addon_entry is not None else settings
         row = box.row(align=True)
-        row.prop(settings, "widget_offset_x", text="左右")
-        row.prop(settings, "widget_offset_y", text="上下")
-        row.prop(settings, "widget_area_scale", text="大小")
+        row.prop(widget_layout, "widget_offset_x", text="左右")
+        row.prop(widget_layout, "widget_offset_y", text="上下")
+        row.prop(widget_layout, "widget_area_scale", text="大小")
 
         if widget_data is None:
             box.label(text="横截面编辑器未初始化，请重新加载插件", icon='ERROR')
@@ -139,6 +141,14 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
                 row.operator("hair_pipe.widget_interact", text="过渡模式下无法编辑横截面", icon='LOCKED')
             elif widget_data.is_active:
                 row.operator("hair_pipe.widget_stop", text="关闭编辑器", icon='PANEL_CLOSE')
+                row = box.row(align=True)
+                row.operator("hair_pipe.widget_add_vertex", text="添加")
+                row.operator("hair_pipe.widget_remove_vertex", text="删除")
+                row.operator("hair_pipe.widget_toggle_ghost", text="幽灵点")
+                row = box.row(align=True)
+                row.operator("hair_pipe.widget_toggle_smooth_preview", text="细分预览", depress=widget_data.show_smooth_preview)
+                row.operator("hair_pipe.widget_toggle_flip", text="水平翻转", depress=widget_data.flip_horizontal)
+                row.operator("hair_pipe.widget_toggle_grid", text="显示网格", depress=widget_data.show_full_mesh_grid)
             else:
                 row.operator("hair_pipe.widget_interact", text="打开编辑器", icon='MOUSE_LMB')
 

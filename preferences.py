@@ -1,6 +1,6 @@
 import bpy
 from bpy.types import AddonPreferences
-from bpy.props import EnumProperty
+from bpy.props import EnumProperty, FloatProperty
 
 WIDGET_MODE_ITEMS = [
     ('TOGGLE', "\u5f00\u5173\u6a21\u5f0f", "\u70b9\u51fb\u6253\u5f00\uff0c\u518d\u70b9\u51fb\u5173\u95ed"),
@@ -16,6 +16,30 @@ class HairPipePreferences(AddonPreferences):
         items=WIDGET_MODE_ITEMS,
         default='HOLD',
     )
+    widget_offset_x: FloatProperty(
+        name="左右",
+        description="横截面编辑器显示区域的水平偏移，保存偏好设置后下次启动保持",
+        default=0.0,
+        min=-1.0,
+        max=1.0,
+        precision=2,
+    )
+    widget_offset_y: FloatProperty(
+        name="上下",
+        description="横截面编辑器显示区域的垂直偏移，保存偏好设置后下次启动保持",
+        default=0.0,
+        min=-1.0,
+        max=1.0,
+        precision=2,
+    )
+    widget_area_scale: FloatProperty(
+        name="大小",
+        description="横截面编辑器显示区域的整体大小，保存偏好设置后下次启动保持",
+        default=1.0,
+        min=0.35,
+        max=1.8,
+        precision=2,
+    )
 
     def draw(self, context):
         layout = self.layout
@@ -23,6 +47,12 @@ class HairPipePreferences(AddonPreferences):
         row = layout.row()
         row.label(text="\u6a2a\u622a\u9762\u7f16\u8f91\u5668\u89e6\u53d1\u6a21\u5f0f:")
         row.prop(self, "widget_mode", text="")
+
+        layout.label(text="横截面编辑器布局:")
+        row = layout.row(align=True)
+        row.prop(self, "widget_offset_x", text="左右")
+        row.prop(self, "widget_offset_y", text="上下")
+        row.prop(self, "widget_area_scale", text="大小")
 
         layout.separator()
         layout.label(text="\u5feb\u6377\u952e\u8bbe\u7f6e", icon='KEYINGSET')

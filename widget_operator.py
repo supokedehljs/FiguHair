@@ -850,31 +850,22 @@ def draw_widget_callback():
     gpu.state.blend_set('ALPHA')
 
     region = context.region
-    if region is not None:
-        dim_w = region.width
-        dim_h = region.height
-        dim_bg = [(0.0, 0.0), (dim_w, 0.0), (dim_w, dim_h), (0.0, dim_h)]
-        batch = batch_for_shader(shader, 'TRIS', {"pos": dim_bg}, indices=[(0, 1, 2), (0, 2, 3)])
-        shader.bind()
-        shader.uniform_float("color", (0.0, 0.0, 0.0, 0.38))
-        batch.draw(shader)
 
     # --- Main editor panel (center) ---
     panel_x0 = cx - half
     panel_y0 = cy - half
     panel_x1 = cx + half
     panel_y1 = cy + half
-    panel_lines = [
-        (panel_x0, panel_y0), (panel_x1, panel_y0),
-        (panel_x1, panel_y0), (panel_x1, panel_y1),
-        (panel_x1, panel_y1), (panel_x0, panel_y1),
-        (panel_x0, panel_y1), (panel_x0, panel_y0),
-    ]
-    gpu.state.line_width_set(1.2)
-    batch = batch_for_shader(shader, 'LINES', {"pos": panel_lines})
-    shader.bind()
-    shader.uniform_float("color", (0.0, 0.0, 0.0, 0.32))
-    batch.draw(shader)
+    draw_rounded_rect(
+        shader,
+        panel_x0,
+        panel_y0,
+        panel_x1,
+        panel_y1,
+        6.0,
+        (0.34, 0.34, 0.34, 1.0),
+        (0.0, 0.0, 0.0, 0.45),
+    )
     draw_single_cross_section(shader, verts, ps, settings,
                                cx, cy, sf, alignment_angle, flip_h, half, True, wd)
 
@@ -909,78 +900,15 @@ def draw_widget_callback():
             shader.uniform_float("color", (0.3, 0.8, 1.0, 0.9))
             batch.draw(shader)
 
-    # --- Buttons ---
-    x0, y0 = cx - half - padding, cy - half - padding
-    button_h = 36.0
-    gap = 8.0
-    by0 = y0 - button_h - 12.0
-    by1 = by0 + button_h
+    wd.add_button_x0 = wd.add_button_y0 = wd.add_button_x1 = wd.add_button_y1 = 0.0
+    wd.remove_button_x0 = wd.remove_button_y0 = wd.remove_button_x1 = wd.remove_button_y1 = 0.0
+    wd.toggle_button_x0 = wd.toggle_button_y0 = wd.toggle_button_x1 = wd.toggle_button_y1 = 0.0
+    wd.rotate_button_x0 = wd.rotate_button_y0 = wd.rotate_button_x1 = wd.rotate_button_y1 = 0.0
+    wd.flip_button_x0 = wd.flip_button_y0 = wd.flip_button_x1 = wd.flip_button_y1 = 0.0
+    wd.idx_button_x0 = wd.idx_button_y0 = wd.idx_button_x1 = wd.idx_button_y1 = 0.0
+    wd.corr_rot_x0 = wd.corr_rot_y0 = wd.corr_rot_x1 = wd.corr_rot_y1 = 0.0
+
     font_id = 0
-    button_defs = [
-        ('add', "添加"),
-        ('remove', "删除"),
-        ('toggle', "幽灵点"),
-        ('preview', "细分预览"),
-        ('flip', "水平翻转"),
-        ('idx', "显示网格"),
-    ]
-    button_widths = [button_width_for_label(font_id, label) for _key, label in button_defs]
-    total_w = sum(button_widths) + gap * (len(button_widths) - 1)
-    cur_x = cx - total_w * 0.5
-    bounds = {}
-    for (key, _label), width in zip(button_defs, button_widths):
-        bounds[key] = (cur_x, by0, cur_x + width, by1)
-        cur_x += width + gap
-
-    add_x0, _, add_x1, _ = bounds['add']
-    rem_x0, _, rem_x1, _ = bounds['remove']
-    tog_x0, _, tog_x1, _ = bounds['toggle']
-    preview_x0, _, preview_x1, _ = bounds['preview']
-    flip_x0, _, flip_x1, _ = bounds['flip']
-    idx_x0, _, idx_x1, _ = bounds['idx']
-    wd.add_button_x0, wd.add_button_y0, wd.add_button_x1, wd.add_button_y1 = bounds['add']
-    wd.remove_button_x0, wd.remove_button_y0, wd.remove_button_x1, wd.remove_button_y1 = bounds['remove']
-    wd.toggle_button_x0, wd.toggle_button_y0, wd.toggle_button_x1, wd.toggle_button_y1 = bounds['toggle']
-    wd.rotate_button_x0, wd.rotate_button_y0, wd.rotate_button_x1, wd.rotate_button_y1 = bounds['preview']
-    wd.flip_button_x0, wd.flip_button_y0, wd.flip_button_x1, wd.flip_button_y1 = bounds['flip']
-    wd.idx_button_x0, wd.idx_button_y0, wd.idx_button_x1, wd.idx_button_y1 = bounds['idx']
-
-    can_remove = all(len(pset.cross_section_verts) > 3 for pset in settings.point_settings)
-    active_is_ghost = 0 <= ps.active_vert_index < n and getattr(verts[ps.active_vert_index], 'is_ghost', False)
-    draw_widget_button(shader, add_x0, by0, add_x1, by1)
-    draw_widget_button(shader, rem_x0, by0, rem_x1, by1, enabled=can_remove)
-    draw_widget_button(shader, tog_x0, by0, tog_x1, by1, active=active_is_ghost)
-    draw_widget_button(shader, preview_x0, by0, preview_x1, by1, active=wd.show_smooth_preview)
-    draw_widget_button(shader, flip_x0, by0, flip_x1, by1, active=flip_h)
-    draw_widget_button(shader, idx_x0, by0, idx_x1, by1, active=wd.show_full_mesh_grid)
-
-    draw_centered_label(font_id, "添加", add_x0, by0, add_x1, by1)
-    draw_centered_label(font_id, "删除", rem_x0, by0, rem_x1, by1, 1.0 if can_remove else 0.38)
-    draw_centered_label(font_id, "幽灵点", tog_x0, by0, tog_x1, by1)
-    draw_centered_label(font_id, "细分预览", preview_x0, by0, preview_x1, by1)
-    draw_centered_label(font_id, "水平翻转", flip_x0, by0, flip_x1, by1)
-    draw_centered_label(font_id, "显示网格", idx_x0, by0, idx_x1, by1)
-
-    # Rotation correction field
-    corr_w = 160.0
-    corr_h = 32.0
-    corr_x0 = cx - corr_w * 0.5
-    corr_x1 = corr_x0 + corr_w
-    corr_y0 = by0 - corr_h - 14.0
-    corr_y1 = corr_y0 + corr_h
-    wd.corr_rot_x0 = corr_x0
-    wd.corr_rot_y0 = corr_y0
-    wd.corr_rot_x1 = corr_x1
-    wd.corr_rot_y1 = corr_y1
-    draw_widget_button(shader, corr_x0, corr_y0, corr_x1, corr_y1, enabled=True,
-                       active=abs(settings.widget_correct_rotation) > 0.01)
-    font_id = 0
-    blf.size(font_id, 14)
-    blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
-    corr_label = f"\u65cb\u8f6c\u4fee\u6b63: {settings.widget_correct_rotation:.1f}\u00b0"
-    blf.position(font_id, corr_x0 + 8.0, corr_y0 + 9.0, 0)
-    blf.draw(font_id, corr_label)
-
     blf.size(font_id, 13)
     blf.color(font_id, 0.7, 0.8, 0.9, 0.7)
     blf.position(font_id, 18.0, 24.0, 0)
@@ -1159,10 +1087,12 @@ def setup_widget(context):
     wd.region_offset_x = region.x
     wd.region_offset_y = region.y
     settings = obj.hair_pipe_settings
-    area_scale = max(0.35, min(1.8, getattr(settings, "widget_area_scale", 1.0)))
+    addon_entry = context.preferences.addons.get("hair_curve_pipe")
+    widget_layout = addon_entry.preferences if addon_entry is not None else settings
+    area_scale = max(0.35, min(1.8, getattr(widget_layout, "widget_area_scale", 1.0)))
     wd.widget_size = min(region.width, region.height) * 0.62 * area_scale
-    wd.widget_center_x = region.width / 2.0 + region.width * 0.35 * getattr(settings, "widget_offset_x", 0.0)
-    wd.widget_center_y = region.height / 2.0 + region.height * 0.35 * getattr(settings, "widget_offset_y", 0.0)
+    wd.widget_center_x = region.width / 2.0 + region.width * 0.35 * getattr(widget_layout, "widget_offset_x", 0.0)
+    wd.widget_center_y = region.height / 2.0 + region.height * 0.35 * getattr(widget_layout, "widget_offset_y", 0.0)
     wd.widget_scale_factor = 0.0
     wd.is_active = True
     wd.show_full_mesh_grid = False
@@ -1901,7 +1831,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
-    if close_on_key_release and event.value == 'RELEASE' and event.type not in {'LEFTMOUSE', 'RIGHTMOUSE', 'MIDDLEMOUSE', 'MOUSEMOVE'}:
+    if close_on_key_release and event.value == 'RELEASE' and event.type == getattr(operator, '_hold_key', None):
         operator._finish(context)
         return {'FINISHED'}
 
@@ -1932,6 +1862,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     alignment_angle = get_view_alignment_angle(context) + math.radians(settings.widget_correct_rotation)
     flip_h = wd.flip_horizontal
     mx, my = operator._get_local_mouse(event, wd)
+    region = context.region
+    if region is not None and (mx < 0 or my < 0 or mx > region.width or my > region.height):
+        return {'PASS_THROUGH'}
     half = wd.widget_size / 2.0
     inside_widget = abs(mx - cx) <= half and abs(my - cy) <= half
     inside_add_button = is_inside_rect(mx, my, wd.add_button_x0, wd.add_button_y0, wd.add_button_x1, wd.add_button_y1)
@@ -2425,6 +2358,119 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     return {'PASS_THROUGH'}
 
 
+def get_widget_edit_context(context):
+    obj = context.active_object
+    if obj is None or getattr(obj, 'type', None) != 'CURVE' or not hasattr(obj, 'hair_pipe_settings'):
+        return None, None, None, None
+    settings = obj.hair_pipe_settings
+    if settings.active_point_index >= len(settings.point_settings):
+        return obj, settings, None, None
+    ps = settings.point_settings[settings.active_point_index]
+    wd = getattr(context.window_manager, 'hair_pipe_widget', None)
+    return obj, settings, ps, wd
+
+
+class HAIRPIPE_OT_widget_add_vertex(bpy.types.Operator):
+    bl_idname = "hair_pipe.widget_add_vertex"
+    bl_label = "添加横截面顶点"
+
+    def execute(self, context):
+        obj, settings, ps, wd = get_widget_edit_context(context)
+        if ps is None:
+            return {'CANCELLED'}
+        push_widget_undo(context, "添加横截面顶点")
+        add_cross_section_vertex(ps, settings)
+        sync_active_cross_section_to_selected_points(context)
+        if wd is not None:
+            wd.drag_vert_index = -1
+        redraw_view3d(context)
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_widget_remove_vertex(bpy.types.Operator):
+    bl_idname = "hair_pipe.widget_remove_vertex"
+    bl_label = "删除横截面顶点"
+
+    def execute(self, context):
+        obj, settings, ps, wd = get_widget_edit_context(context)
+        if ps is None:
+            return {'CANCELLED'}
+        push_widget_undo(context, "删除横截面顶点")
+        remove_cross_section_vertex_all(settings, ps.active_vert_index)
+        sync_active_cross_section_to_selected_points(context)
+        if wd is not None:
+            wd.drag_vert_index = -1
+        redraw_view3d(context)
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_widget_toggle_ghost(bpy.types.Operator):
+    bl_idname = "hair_pipe.widget_toggle_ghost"
+    bl_label = "幽灵点"
+
+    def execute(self, context):
+        obj, settings, ps, wd = get_widget_edit_context(context)
+        if ps is None:
+            return {'CANCELLED'}
+        verts = ps.cross_section_verts
+        selected = {idx for idx in get_selected_widget_verts(wd) if 0 <= idx < len(verts)} if wd is not None else set()
+        if len(selected) == 2:
+            push_widget_undo(context, "解除横截面幽灵线段")
+            changed = toggle_ghost_between_selected_edge_points(ps, selected)
+        elif 0 <= ps.active_vert_index < len(verts):
+            push_widget_undo(context, "切换横截面幽灵点")
+            verts[ps.active_vert_index].is_ghost = not getattr(verts[ps.active_vert_index], 'is_ghost', False)
+            changed = True
+        else:
+            return {'CANCELLED'}
+        if changed:
+            update_ghost_vertices(ps)
+            sync_active_cross_section_to_selected_points(context)
+        if wd is not None:
+            wd.drag_vert_index = -1
+        redraw_view3d(context)
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_widget_toggle_smooth_preview(bpy.types.Operator):
+    bl_idname = "hair_pipe.widget_toggle_smooth_preview"
+    bl_label = "细分预览"
+
+    def execute(self, context):
+        wd = getattr(context.window_manager, 'hair_pipe_widget', None)
+        if wd is None:
+            return {'CANCELLED'}
+        wd.show_smooth_preview = not wd.show_smooth_preview
+        redraw_view3d(context)
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_widget_toggle_flip(bpy.types.Operator):
+    bl_idname = "hair_pipe.widget_toggle_flip"
+    bl_label = "水平翻转"
+
+    def execute(self, context):
+        wd = getattr(context.window_manager, 'hair_pipe_widget', None)
+        if wd is None:
+            return {'CANCELLED'}
+        wd.flip_horizontal = not wd.flip_horizontal
+        redraw_view3d(context)
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_widget_toggle_grid(bpy.types.Operator):
+    bl_idname = "hair_pipe.widget_toggle_grid"
+    bl_label = "显示网格"
+
+    def execute(self, context):
+        wd = getattr(context.window_manager, 'hair_pipe_widget', None)
+        if wd is None:
+            return {'CANCELLED'}
+        wd.show_full_mesh_grid = not wd.show_full_mesh_grid
+        redraw_view3d(context)
+        return {'FINISHED'}
+
+
 class HAIRPIPE_OT_widget_stop(bpy.types.Operator):
     """Close the interactive cross-section editor"""
     bl_idname = "hair_pipe.widget_stop"
@@ -2445,6 +2491,12 @@ classes = (
     HairPipeWidgetSettings,
     HAIRPIPE_OT_widget_interact,
     HAIRPIPE_OT_widget_hold,
+    HAIRPIPE_OT_widget_add_vertex,
+    HAIRPIPE_OT_widget_remove_vertex,
+    HAIRPIPE_OT_widget_toggle_ghost,
+    HAIRPIPE_OT_widget_toggle_smooth_preview,
+    HAIRPIPE_OT_widget_toggle_flip,
+    HAIRPIPE_OT_widget_toggle_grid,
     HAIRPIPE_OT_widget_stop,
 )
 
