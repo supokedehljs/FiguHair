@@ -14,6 +14,7 @@ from .operators import (
     get_effective_point_setting,
     interpolate_cross_sections_smooth,
     get_pipe_source_curve,
+    get_pipe_object_for_curve,
     is_transition_point,
     is_curve_edit_mode,
     get_selected_curve_point_indices,
@@ -31,6 +32,7 @@ from .operators import (
 
 _draw_handle = None
 _addon_keymaps = []
+_PIPE_BASEMESH_STATE_KEY = "hair_pipe_widget_basemesh_state"
 
 
 class HairPipeWidgetSettings(PropertyGroup):
@@ -90,6 +92,7 @@ class HairPipeWidgetSettings(PropertyGroup):
     move_start_y: FloatProperty(default=0.0)
     scale_start_x: FloatProperty(default=0.0)
     scale_start_y: FloatProperty(default=0.0)
+    scale_start_factor: FloatProperty(default=1.0)
     rotate_initial_offsets: bpy.props.StringProperty(default="")
     rotate_button_x0: FloatProperty(default=0.0)
     rotate_button_y0: FloatProperty(default=0.0)
@@ -602,29 +605,21 @@ def draw_active_pipe_cross_section_ring(context, ps):
         selected_indices.add(ps.active_vert_index)
     if selected_indices and projected_rings:
         highlight_lines = []
-        highlight_points = []
         for selected_idx in sorted(selected_indices):
             previous_point = None
             for ring in projected_rings:
                 if selected_idx >= len(ring):
                     continue
                 point = ring[selected_idx]
-                highlight_points.append(point)
                 if previous_point is not None:
                     highlight_lines.append(previous_point)
                     highlight_lines.append(point)
                 previous_point = point
         if highlight_lines:
-            gpu.state.line_width_set(4.0)
+            gpu.state.line_width_set(2.0)
             batch = batch_for_shader(shader, 'LINES', {"pos": highlight_lines})
             shader.bind()
-            shader.uniform_float("color", (1.0, 0.08, 0.02, 1.0))
-            batch.draw(shader)
-        if highlight_points:
-            gpu.state.point_size_set(8.5)
-            batch = batch_for_shader(shader, 'POINTS', {"pos": highlight_points})
-            shader.bind()
-            shader.uniform_float("color", (1.0, 0.95, 0.05, 1.0))
+            shader.uniform_float("color", (1.0, 0.55, 0.0, 0.95))
             batch.draw(shader)
 
     ring_world = [obj.matrix_world @ Vector(v) for v in mesh_verts[best_start:best_start + segments]]
@@ -659,6 +654,54 @@ def draw_active_pipe_cross_section_ring(context, ps):
     gpu.state.blend_set('NONE')
 
 
+def find_nearest_active_pipe_ring_vertex(context, ps, mx, my, max_dist=16.0):
+    region = context.region
+    region_data = context.region_data
+    obj = context.active_object
+    if region is None or region_data is None or obj is None or obj.type != 'CURVE':
+        return -1
+    center = get_active_curve_point_world_position(context)
+    if center is None or len(ps.cross_section_verts) < 3:
+        return -1
+
+    try:
+        mesh_verts, _faces = generate_pipe_mesh(obj, obj.hair_pipe_settings)
+    except Exception:
+        return -1
+    if not mesh_verts:
+        return -1
+
+    segments = len(ps.cross_section_verts)
+    if segments < 3 or len(mesh_verts) < segments:
+        return -1
+
+    best_start = None
+    best_ring_dist = None
+    for start in range(0, len(mesh_verts) - segments + 1, segments):
+        ring = mesh_verts[start:start + segments]
+        ring_center = sum((Vector(v) for v in ring), Vector((0.0, 0.0, 0.0))) / segments
+        ring_center_world = obj.matrix_world @ ring_center
+        dist = (ring_center_world - center).length
+        if best_ring_dist is None or dist < best_ring_dist:
+            best_ring_dist = dist
+            best_start = start
+    if best_start is None:
+        return -1
+
+    closest_idx = -1
+    closest_dist = max_dist
+    ring_world = [obj.matrix_world @ Vector(v) for v in mesh_verts[best_start:best_start + segments]]
+    for idx, world_pos in enumerate(ring_world):
+        screen_pos = view3d_utils.location_3d_to_region_2d(region, region_data, world_pos)
+        if screen_pos is None:
+            continue
+        dist = math.sqrt((mx - screen_pos.x) ** 2 + (my - screen_pos.y) ** 2)
+        if dist < closest_dist:
+            closest_dist = dist
+            closest_idx = idx
+    return closest_idx
+
+
 def rounded_rect_points(x0, y0, x1, y1, radius=8.0, segments=5):
     radius = max(0.0, min(radius, (x1 - x0) * 0.5, (y1 - y0) * 0.5))
     centers = (
@@ -677,15 +720,16 @@ def rounded_rect_points(x0, y0, x1, y1, radius=8.0, segments=5):
 
 def draw_rounded_rect(shader, x0, y0, x1, y1, radius, fill_color, border_color=None):
     points = rounded_rect_points(x0, y0, x1, y1, radius)
-    center = ((x0 + x1) * 0.5, (y0 + y1) * 0.5)
-    vertices = [center] + points
-    indices = []
-    for i in range(1, len(vertices)):
-        indices.append((0, i, 1 if i == len(vertices) - 1 else i + 1))
-    batch = batch_for_shader(shader, 'TRIS', {"pos": vertices}, indices=indices)
-    shader.bind()
-    shader.uniform_float("color", fill_color)
-    batch.draw(shader)
+    if fill_color is not None and fill_color[3] > 0.0:
+        center = ((x0 + x1) * 0.5, (y0 + y1) * 0.5)
+        vertices = [center] + points
+        indices = []
+        for i in range(1, len(vertices)):
+            indices.append((0, i, 1 if i == len(vertices) - 1 else i + 1))
+        batch = batch_for_shader(shader, 'TRIS', {"pos": vertices}, indices=indices)
+        shader.bind()
+        shader.uniform_float("color", fill_color)
+        batch.draw(shader)
 
     if border_color is not None:
         lines = []
@@ -798,13 +842,6 @@ def draw_widget_callback():
     gpu.state.blend_set('ALPHA')
 
     region = context.region
-    dim_w = region.width if region is not None else size * 2.0
-    dim_h = region.height if region is not None else size * 2.0
-    dim_bg = [(0.0, 0.0), (dim_w, 0.0), (dim_w, dim_h), (0.0, dim_h)]
-    batch = batch_for_shader(shader, 'TRIS', {"pos": dim_bg}, indices=[(0, 1, 2), (0, 2, 3)])
-    shader.bind()
-    shader.uniform_float("color", (0.0, 0.0, 0.0, 0.42))
-    batch.draw(shader)
 
     # --- Thumbnail strip at top ---
     total_points = len(settings.point_settings)
@@ -869,6 +906,20 @@ def draw_widget_callback():
     # We'll store strip info via computed values in modal
 
     # --- Main editor panel (center) ---
+    panel_x0 = cx - half
+    panel_y0 = cy - half
+    panel_x1 = cx + half
+    panel_y1 = cy + half
+    draw_rounded_rect(
+        shader,
+        panel_x0,
+        panel_y0,
+        panel_x1,
+        panel_y1,
+        10.0,
+        (0.08, 0.12, 0.16, 0.0),
+        (0.25, 0.65, 1.0, 0.45),
+    )
     draw_single_cross_section(shader, verts, ps, settings,
                                cx, cy, sf, alignment_angle, flip_h, half, True, wd)
 
@@ -974,7 +1025,7 @@ def draw_widget_callback():
     blf.size(font_id, 13)
     blf.color(font_id, 0.7, 0.8, 0.9, 0.7)
     blf.position(font_id, 18.0, 24.0, 0)
-    blf.draw(font_id, "\u70b9\u51fb\u4e0a\u65b9\u7f29\u7565\u56fe\u5207\u6362\u622a\u9762 | \u4e2d\u952e\u63d2\u5165\u70b9 | \u53f3\u952e\u62d6\u62fd\u6846\u9009")
+    blf.draw(font_id, "点击上方缩略图切换截面 | 中键插入点 | 右键拖拽框选 | S 缩放显示区域")
 
     gpu.state.line_width_set(1.0)
     gpu.state.point_size_set(1.0)
@@ -1005,6 +1056,75 @@ def get_view3d_window_region(context):
     return None, None
 
 
+def set_pipe_basemesh_preview(context, curve_obj, enabled):
+    pipe_obj = get_pipe_object_for_curve(curve_obj)
+    if pipe_obj is None:
+        return
+
+    modifier_states = []
+    for modifier in pipe_obj.modifiers:
+        modifier_states.append({
+            "name": modifier.name,
+            "show_viewport": bool(modifier.show_viewport),
+        })
+
+    mesh = pipe_obj.data if getattr(pipe_obj, "type", None) == 'MESH' else None
+    polygon_smooth_states = []
+    if mesh is not None:
+        polygon_smooth_states = [bool(poly.use_smooth) for poly in mesh.polygons]
+
+    if enabled:
+        if not pipe_obj.get(_PIPE_BASEMESH_STATE_KEY):
+            pipe_obj[_PIPE_BASEMESH_STATE_KEY] = json.dumps({
+                "display_type": pipe_obj.display_type,
+                "show_wire": bool(pipe_obj.show_wire),
+                "show_in_front": bool(pipe_obj.show_in_front),
+                "modifier_states": modifier_states,
+                "polygon_smooth_states": polygon_smooth_states,
+                "smooth_shading": bool(getattr(curve_obj.hair_pipe_settings, "smooth_shading", True)),
+            })
+        curve_obj.hair_pipe_settings.smooth_shading = False
+        pipe_obj.display_type = 'TEXTURED'
+        pipe_obj.show_wire = True
+        pipe_obj.show_in_front = True
+        if mesh is not None:
+            mesh.polygons.foreach_set("use_smooth", [False] * len(mesh.polygons))
+            mesh.update()
+        for modifier in pipe_obj.modifiers:
+            if modifier.type == 'SUBSURF':
+                modifier.show_viewport = False
+    else:
+        raw_state = pipe_obj.get(_PIPE_BASEMESH_STATE_KEY)
+        if raw_state:
+            try:
+                state = json.loads(raw_state)
+            except Exception:
+                state = {}
+            pipe_obj.display_type = state.get("display_type", 'TEXTURED')
+            pipe_obj.show_wire = bool(state.get("show_wire", False))
+            pipe_obj.show_in_front = bool(state.get("show_in_front", False))
+            if hasattr(curve_obj, "hair_pipe_settings") and "smooth_shading" in state:
+                curve_obj.hair_pipe_settings.smooth_shading = bool(state.get("smooth_shading", True))
+            if mesh is not None:
+                saved_smooth = state.get("polygon_smooth_states", [])
+                if len(saved_smooth) == len(mesh.polygons):
+                    for poly, use_smooth in zip(mesh.polygons, saved_smooth):
+                        poly.use_smooth = bool(use_smooth)
+                    mesh.update()
+            saved_modifiers = {item.get("name"): item for item in state.get("modifier_states", []) if isinstance(item, dict)}
+            for modifier in pipe_obj.modifiers:
+                saved = saved_modifiers.get(modifier.name)
+                if saved is not None:
+                    modifier.show_viewport = bool(saved.get("show_viewport", modifier.show_viewport))
+            try:
+                del pipe_obj[_PIPE_BASEMESH_STATE_KEY]
+            except Exception:
+                pass
+
+    if context is not None:
+        redraw_view3d(context)
+
+
 def setup_widget(context):
     obj = context.active_object
     if obj is not None and obj.type == 'CURVE':
@@ -1024,8 +1144,9 @@ def setup_widget(context):
     wd.widget_center_y = region.height / 2.0
     wd.widget_scale_factor = 0.0
     wd.is_active = True
-    wd.show_full_mesh_grid = True
+    wd.show_full_mesh_grid = False
     wd.drag_vert_index = -1
+    set_pipe_basemesh_preview(context, obj, True)
     ensure_draw_handler()
     redraw_view3d(context)
     return True
@@ -1634,6 +1755,7 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
     def invoke(self, context, event):
         wd = context.window_manager.hair_pipe_widget
         if wd.is_active:
+            set_pipe_basemesh_preview(context, context.active_object, False)
             wd.is_active = False
             wd.drag_vert_index = -1
             redraw_view3d(context)
@@ -1668,6 +1790,7 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
         return handle_widget_modal(self, context, event, close_on_key_release=False)
 
     def _finish(self, context):
+        set_pipe_basemesh_preview(context, context.active_object, False)
         wd = context.window_manager.hair_pipe_widget
         wd.is_active = False
         wd.drag_vert_index = -1
@@ -1700,6 +1823,7 @@ class HAIRPIPE_OT_widget_hold(bpy.types.Operator):
         return handle_widget_modal(self, context, event, close_on_key_release=True)
 
     def _finish(self, context):
+        set_pipe_basemesh_preview(context, context.active_object, False)
         wd = context.window_manager.hair_pipe_widget
         wd.is_active = False
         wd.drag_vert_index = -1
@@ -1761,6 +1885,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     inside_flip_button = is_inside_rect(mx, my, wd.flip_button_x0, wd.flip_button_y0, wd.flip_button_x1, wd.flip_button_y1)
     inside_idx_button = is_inside_rect(mx, my, wd.idx_button_x0, wd.idx_button_y0, wd.idx_button_x1, wd.idx_button_y1)
     inside_controls = inside_add_button or inside_remove_button or inside_toggle_button or inside_flip_button or inside_idx_button
+    inside_corr_rot = is_inside_rect(mx, my, wd.corr_rot_x0, wd.corr_rot_y0, wd.corr_rot_x1, wd.corr_rot_y1)
     drag_threshold = 4.0
 
     if wd.left_drag_pending:
@@ -1852,34 +1977,20 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         return {'RUNNING_MODAL'}
 
     if wd.scale_active:
-        sel = sorted(get_selected_widget_verts(wd))
-        initial = get_rotate_offsets(wd)
         if event.type == 'MOUSEMOVE':
-            cnt = max(1, len(initial))
-            ctr_x = sum(o[0] for o in initial) / cnt
-            ctr_y = sum(o[1] for o in initial) / cnt
             start_dist = math.sqrt((wd.scale_start_x - cx) ** 2 + (wd.scale_start_y - cy) ** 2)
             now_dist = math.sqrt((mx - cx) ** 2 + (my - cy) ** 2)
             factor = now_dist / max(start_dist, 1.0)
-            for ip, vi in enumerate(sel):
-                if vi < len(verts) and ip < len(initial) and not getattr(verts[vi], 'is_ghost', False):
-                    verts[vi].offset_x = ctr_x + (initial[ip][0] - ctr_x) * factor
-                    verts[vi].offset_y = ctr_y + (initial[ip][1] - ctr_y) * factor
-            update_ghost_vertices(ps)
+            wd.widget_scale_factor = max(8.0, min(50000.0, wd.scale_start_factor * factor))
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
             wd.scale_active = False
-            sync_active_cross_section_to_selected_points(context)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type in {'RIGHTMOUSE', 'ESC'}:
-            for ip, vi in enumerate(sel):
-                if vi < len(verts) and ip < len(initial):
-                    verts[vi].offset_x = initial[ip][0]
-                    verts[vi].offset_y = initial[ip][1]
+            wd.widget_scale_factor = wd.scale_start_factor
             wd.scale_active = False
-            update_ghost_vertices(ps)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         return {'RUNNING_MODAL'}
@@ -2040,7 +2151,6 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             wd.show_full_mesh_grid = not wd.show_full_mesh_grid
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
-        inside_corr_rot = is_inside_rect(mx, my, wd.corr_rot_x0, wd.corr_rot_y0, wd.corr_rot_x1, wd.corr_rot_y1)
         if inside_corr_rot:
             push_widget_undo(context, "旋转修正横截面编辑器")
             wd.corr_rot_dragging = True
@@ -2066,15 +2176,37 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 redraw_view3d(context)
                 return {'RUNNING_MODAL'}
 
-        closest_idx = find_nearest_raw_vertex(verts, mx, my, cx, cy, sf, alignment_angle, flip_h)
-        wd.left_drag_pending = True
-        wd.left_drag_active = False
-        wd.left_drag_start_x = mx
-        wd.left_drag_start_y = my
-        wd.left_drag_vert_index = closest_idx
-        wd.drag_vert_index = closest_idx
-        redraw_view3d(context)
-        return {'RUNNING_MODAL'}
+        if not inside_widget:
+            ring_idx = find_nearest_active_pipe_ring_vertex(context, ps, mx, my)
+            if ring_idx >= 0:
+                ps.active_vert_index = ring_idx
+                if event.shift:
+                    sel = get_selected_widget_verts(wd)
+                    if ring_idx in sel:
+                        sel.discard(ring_idx)
+                    else:
+                        sel.add(ring_idx)
+                    set_selected_widget_verts(wd, sel)
+                else:
+                    set_selected_widget_verts(wd, {ring_idx})
+                wd.left_drag_pending = False
+                wd.left_drag_active = False
+                wd.left_drag_vert_index = -1
+                wd.drag_vert_index = ring_idx
+                redraw_view3d(context)
+                return {'RUNNING_MODAL'}
+
+        if inside_widget:
+            closest_idx = find_nearest_raw_vertex(verts, mx, my, cx, cy, sf, alignment_angle, flip_h)
+            wd.left_drag_pending = True
+            wd.left_drag_active = False
+            wd.left_drag_start_x = mx
+            wd.left_drag_start_y = my
+            wd.left_drag_vert_index = closest_idx
+            wd.drag_vert_index = closest_idx
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        return {'PASS_THROUGH'}
 
     # Rotation correction drag
     if event.type == 'MOUSEMOVE' and wd.corr_rot_dragging:
@@ -2133,19 +2265,11 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         return {'RUNNING_MODAL'}
 
     if event.type == 'S' and event.value == 'PRESS':
-        sel = get_selected_widget_verts(wd)
-        if not sel and 0 <= ps.active_vert_index < len(verts):
-            sel = {ps.active_vert_index}
-            set_selected_widget_verts(wd, sel)
-        sel = {vi for vi in sel if 0 <= vi < len(verts) and not getattr(verts[vi], 'is_ghost', False)}
-        if sel:
-            push_widget_undo(context, "缩放横截面顶点")
-            set_selected_widget_verts(wd, sel)
-            wd.scale_active = True
-            wd.scale_start_x = mx
-            wd.scale_start_y = my
-            store_rotate_offsets(wd, verts, sorted(sel))
-            redraw_view3d(context)
+        wd.scale_active = True
+        wd.scale_start_x = mx
+        wd.scale_start_y = my
+        wd.scale_start_factor = wd.widget_scale_factor
+        redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
     # A - Select All / Deselect All
@@ -2194,6 +2318,7 @@ class HAIRPIPE_OT_widget_stop(bpy.types.Operator):
     bl_label = "关闭横截面编辑器"
 
     def execute(self, context):
+        set_pipe_basemesh_preview(context, context.active_object, False)
         wd = context.window_manager.hair_pipe_widget
         wd.is_active = False
         wd.drag_vert_index = -1
