@@ -662,52 +662,74 @@ def draw_active_pipe_cross_section_ring(context, ps):
     gpu.state.blend_set('NONE')
 
 
-def find_nearest_active_pipe_ring_vertex(context, ps, mx, my, max_dist=16.0):
+def find_nearest_pipe_control_vertex(context, mx, my, max_dist=16.0):
     region = context.region
     region_data = context.region_data
     obj = context.active_object
     if region is None or region_data is None or obj is None or obj.type != 'CURVE':
-        return -1
-    center = get_active_curve_point_world_position(context)
-    if center is None or len(ps.cross_section_verts) < 3:
-        return -1
+        return -1, -1
+
+    settings = obj.hair_pipe_settings
+    if len(settings.point_settings) == 0:
+        return -1, -1
 
     try:
-        mesh_verts, _faces = generate_pipe_mesh(obj, obj.hair_pipe_settings)
+        mesh_verts, _faces = generate_pipe_mesh(obj, settings)
     except Exception:
-        return -1
+        return -1, -1
     if not mesh_verts:
-        return -1
+        return -1, -1
 
-    segments = len(ps.cross_section_verts)
+    segments = len(settings.point_settings[0].cross_section_verts)
     if segments < 3 or len(mesh_verts) < segments:
-        return -1
+        return -1, -1
 
-    best_start = None
-    best_ring_dist = None
+    control_positions = []
+    for spline_data in get_curve_points_data(obj):
+        for point in spline_data.get('points', []):
+            control_positions.append(obj.matrix_world @ point['co'])
+    if not control_positions:
+        return -1, -1
+
+    ring_centers = []
     for start in range(0, len(mesh_verts) - segments + 1, segments):
         ring = mesh_verts[start:start + segments]
         ring_center = sum((Vector(v) for v in ring), Vector((0.0, 0.0, 0.0))) / segments
-        ring_center_world = obj.matrix_world @ ring_center
-        dist = (ring_center_world - center).length
-        if best_ring_dist is None or dist < best_ring_dist:
-            best_ring_dist = dist
-            best_start = start
-    if best_start is None:
-        return -1
+        ring_centers.append((start, obj.matrix_world @ ring_center))
 
-    closest_idx = -1
+    closest_point_idx = -1
+    closest_vert_idx = -1
     closest_dist = max_dist
-    ring_world = [obj.matrix_world @ Vector(v) for v in mesh_verts[best_start:best_start + segments]]
-    for idx, world_pos in enumerate(ring_world):
-        screen_pos = view3d_utils.location_3d_to_region_2d(region, region_data, world_pos)
-        if screen_pos is None:
+    used_starts = set()
+    for point_idx, control_world in enumerate(control_positions[:len(settings.point_settings)]):
+        if is_transition_point(settings.point_settings[point_idx]):
             continue
-        dist = math.sqrt((mx - screen_pos.x) ** 2 + (my - screen_pos.y) ** 2)
-        if dist < closest_dist:
-            closest_dist = dist
-            closest_idx = idx
-    return closest_idx
+        best_start = None
+        best_ring_dist = None
+        for start, ring_center_world in ring_centers:
+            if start in used_starts:
+                continue
+            dist = (ring_center_world - control_world).length
+            if best_ring_dist is None or dist < best_ring_dist:
+                best_ring_dist = dist
+                best_start = start
+        if best_start is None:
+            continue
+        used_starts.add(best_start)
+        ring_world = [obj.matrix_world @ Vector(v) for v in mesh_verts[best_start:best_start + segments]]
+        point_vert_count = len(settings.point_settings[point_idx].cross_section_verts)
+        for vert_idx, world_pos in enumerate(ring_world[:point_vert_count]):
+            if getattr(settings.point_settings[point_idx].cross_section_verts[vert_idx], 'is_ghost', False):
+                continue
+            screen_pos = view3d_utils.location_3d_to_region_2d(region, region_data, world_pos)
+            if screen_pos is None:
+                continue
+            dist = math.sqrt((mx - screen_pos.x) ** 2 + (my - screen_pos.y) ** 2)
+            if dist < closest_dist:
+                closest_dist = dist
+                closest_point_idx = point_idx
+                closest_vert_idx = vert_idx
+    return closest_point_idx, closest_vert_idx
 
 
 def rounded_rect_points(x0, y0, x1, y1, radius=8.0, segments=5):
@@ -862,8 +884,8 @@ def draw_widget_callback():
         panel_y0,
         panel_x1,
         panel_y1,
-        6.0,
-        (0.34, 0.34, 0.34, 1.0),
+        14.0,
+        (0.18, 0.18, 0.18, 0.88),
         (0.0, 0.0, 0.0, 0.45),
     )
     draw_single_cross_section(shader, verts, ps, settings,
@@ -1862,8 +1884,19 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     alignment_angle = get_view_alignment_angle(context) + math.radians(settings.widget_correct_rotation)
     flip_h = wd.flip_horizontal
     mx, my = operator._get_local_mouse(event, wd)
-    region = context.region
-    if region is not None and (mx < 0 or my < 0 or mx > region.width or my > region.height):
+    area = None
+    region = None
+    for candidate_area in context.screen.areas:
+        if candidate_area.x <= event.mouse_x < candidate_area.x + candidate_area.width and candidate_area.y <= event.mouse_y < candidate_area.y + candidate_area.height:
+            area = candidate_area
+            for candidate_region in candidate_area.regions:
+                if candidate_region.x <= event.mouse_x < candidate_region.x + candidate_region.width and candidate_region.y <= event.mouse_y < candidate_region.y + candidate_region.height:
+                    region = candidate_region
+                    break
+            break
+    if area is None or area.type != 'VIEW_3D' or region is None or region.type != 'WINDOW':
+        return {'PASS_THROUGH'}
+    if mx < 0 or my < 0 or mx > region.width or my > region.height:
         return {'PASS_THROUGH'}
     half = wd.widget_size / 2.0
     inside_widget = abs(mx - cx) <= half and abs(my - cy) <= half
@@ -2215,10 +2248,13 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             return {'RUNNING_MODAL'}
 
         if not inside_widget:
-            ring_idx = find_nearest_active_pipe_ring_vertex(context, ps, mx, my)
-            if ring_idx >= 0:
-                ps.active_vert_index = ring_idx
-                if event.shift:
+            point_idx, ring_idx = find_nearest_pipe_control_vertex(context, mx, my)
+            if point_idx >= 0 and ring_idx >= 0:
+                settings.active_point_index = point_idx
+                select_curve_point_by_index(obj, point_idx)
+                target_ps = settings.point_settings[point_idx]
+                target_ps.active_vert_index = ring_idx
+                if event.shift and point_idx == settings.active_point_index:
                     sel = get_selected_widget_verts(wd)
                     if ring_idx in sel:
                         sel.discard(ring_idx)
