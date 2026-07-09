@@ -7,23 +7,25 @@ bl_info = {
     "description": "Generate pipe mesh from curves with per-point custom cross-sections",
     "category": "Add Curve",
 }
- 
-from . import operators, panel, properties, handler, widget_operator, preferences 
- 
-def register():
-    preferences.register() 
-    properties.register() 
-    widget_operator.register() 
-    operators.register() 
-    panel.register() 
-    handler.register_handler() 
- 
-def unregister():
-    preferences.unregister() 
-    handler.unregister_handler() 
-    panel.unregister() 
-    operators.unregister() 
-    widget_operator.unregister() 
-    properties.unregister()
- 
 
+from . import operators, panel, properties, handler, widget_operator, preferences, hair_library
+
+
+def register():
+    preferences.register()
+    properties.register()
+    widget_operator.register()
+    operators.register()
+    hair_library.register()
+    panel.register()
+    handler.register_handler()
+
+
+def unregister():
+    preferences.unregister()
+    handler.unregister_handler()
+    panel.unregister()
+    hair_library.unregister()
+    operators.unregister()
+    widget_operator.unregister()
+    properties.unregister()

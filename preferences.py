@@ -133,6 +133,9 @@ def register_keymaps():
     else:
         kmi = km.keymap_items.new('hair_pipe.widget_interact', 'X', 'PRESS', ctrl=True, shift=True)
     _addon_keymaps.append((km, kmi))
+
+    kmi = km.keymap_items.new('hair_pipe.library_overlay_toggle', 'V', 'PRESS')
+    _addon_keymaps.append((km, kmi))
     _register_keymaps_retries = 0
 
 

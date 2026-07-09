@@ -4,6 +4,11 @@ from .operators import (
     get_curve_point_by_global_index,
     get_context_curve_object,
 )
+from .hair_library import (
+    HAIRPIPE_OT_library_save_current,
+    HAIRPIPE_OT_library_overlay_toggle,
+    sync_state_entries,
+)
 
 
 class HAIRPIPE_PT_main_panel(bpy.types.Panel):
@@ -21,22 +26,22 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         layout = self.layout
         curve_obj = get_context_curve_object(context)
         if curve_obj is None:
-            layout.label(text="\u8bf7\u9009\u62e9\u66f2\u7ebf\u6216 FiguHair \u9884\u89c8\u7f51\u683c", icon='INFO')
+            layout.label(text="请选曲线或 FiguHair 预览网格", icon='INFO')
             return
 
         try:
             settings = curve_obj.hair_pipe_settings
             edit_mode = is_curve_edit_mode(curve_obj)
         except Exception as exc:
-            layout.label(text="FiguHair \u72b6\u6001\u521d\u59cb\u5316\u5931\u8d25", icon='ERROR')
+            layout.label(text="FiguHair 状态初始化失败", icon='ERROR')
             layout.label(text=str(exc)[:80], icon='INFO')
             return
 
         box = layout.box()
-        box.label(text="\u901a\u7528", icon='MESH_CYLINDER')
+        box.label(text="通用", icon='MESH_CYLINDER')
         row = box.row(align=True)
         row.scale_y = 1.35
-        row.operator("hair_pipe.generate_pipe", text="\u751f\u6210 / \u66f4\u65b0\u7ba1\u7ebf")
+        row.operator("hair_pipe.generate_pipe", text="生成 / 更新管线")
         row2 = box.row(align=True)
         row2.scale_y = 1.2
         row2.operator("hair_pipe.duplicate_hair", text="复制头发", icon='DUPLICATE')
@@ -45,19 +50,29 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         row3.operator("hair_pipe.merge_hair_for_export", text="导出合并网格", icon='EXPORT')
         row = box.row(align=True)
         row.operator("hair_pipe.toggle_solo_display", text="单独显示", icon='HIDE_OFF')
-        mode_text = "\u53ea\u9009\u66f2\u7ebf\u6a21\u5f0f" if settings.redirect_selection else "\u5934\u53d1\u7f51\u683c\u53ef\u9009\u6a21\u5f0f"
         row = box.row(align=True)
-        row.prop(settings, "redirect_selection", text=mode_text, toggle=True)
+        row.operator("hair_pipe.library_save_current", text="保存到头发库", icon='FILE_TICK')
+        row = box.row(align=True)
+        row.operator("hair_pipe.library_overlay_toggle", text="打开头发库", icon='ASSET_MANAGER')
+
+        lib_state = getattr(context.window_manager, "hair_pipe_library_state", None)
+        if lib_state is not None:
+            sync_state_entries(lib_state)
+            if len(lib_state.entries) > 0:
+                box.label(text=f"库中共有 {len(lib_state.entries)} 个头发", icon='FILE_BLEND')
+        mode_text = "只选曲线模式" if settings.redirect_selection else "头发网格可选模式"
+        row = box.row(align=True)
+        op = row.operator("hair_pipe.toggle_redirect_selection", text=mode_text, depress=settings.redirect_selection)
 
         box = layout.box()
-        box.label(text="\u9ed8\u8ba4\u8bbe\u7f6e", icon='MESH_CIRCLE')
-        box.prop(settings, "pipe_resolution", text="\u8fc7\u6e21\u7ec6\u5206")
-        box.prop(settings, "transition_mode", text="\u622a\u9762\u8fc7\u6e21")
-        box.prop(settings, "transition_strength", text="\u8fc7\u6e21\u5f3a\u5ea6")
-        box.prop(settings, "strong_smoothing", text="\u5f3a\u529b\u5e73\u6ed1")
+        box.label(text="默认设置", icon='MESH_CIRCLE')
+        box.prop(settings, "pipe_resolution", text="过渡细分")
+        box.prop(settings, "transition_mode", text="截面过渡")
+        box.prop(settings, "transition_strength", text="过渡强度")
+        box.prop(settings, "strong_smoothing", text="强力平滑")
         if settings.strong_smoothing:
-            box.prop(settings, "strong_smoothing_iterations", text="\u5e73\u6ed1\u6b21\u6570")
-        box.prop(settings, "smooth_shading", text="\u5e73\u6ed1\u7740\u8272")
+            box.prop(settings, "strong_smoothing_iterations", text="平滑次数")
+        box.prop(settings, "smooth_shading", text="平滑着色")
         row = box.row(align=True)
         row.prop(settings, "subdivision_levels", text="细分层级")
         icon = 'HIDE_OFF' if settings.default_subdiv else 'HIDE_ON'
@@ -65,7 +80,7 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
 
         from .operators import get_tail_object_for_curve
         tail_box = layout.box()
-        tail_box.label(text="\u672b\u7aef\u7f51\u683c", icon='MESH_CONE')
+        tail_box.label(text="末端网格", icon='MESH_CONE')
         hide_all_row = tail_box.row(align=True)
         hide_all_row.scale_y = 1.1
         hide_all_row.operator("hair_pipe.hide_all_tail_meshes", text="隐藏所有", icon='HIDE_ON')
@@ -73,10 +88,10 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         if tail_obj is None:
             row = tail_box.row(align=True)
             row.scale_y = 1.2
-            row.operator("hair_pipe.create_tail_mesh", text="\u751f\u6210\u672b\u7aef\u7f51\u683c", icon='ADD')
+            row.operator("hair_pipe.create_tail_mesh", text="生成末端网格", icon='ADD')
         else:
             row = tail_box.row(align=True)
-            row.operator("hair_pipe.edit_tail_mesh", text="\u7f16\u8f91", icon='EDITMODE_HLT')
+            row.operator("hair_pipe.edit_tail_mesh", text="编辑", icon='EDITMODE_HLT')
             row.operator("hair_pipe.toggle_tail_visibility", text="", icon='HIDE_OFF' if not tail_obj.hide_viewport else 'HIDE_ON')
             row.operator("hair_pipe.remove_tail_mesh", text="", icon='TRASH')
 
@@ -84,28 +99,27 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
             return
 
         header_box = layout.box()
-        header_box.prop(settings, "auto_update", text="\u7f16\u8f91\u6a21\u5f0f\u64cd\u4f5c", icon='EDITMODE_HLT',
-                        emboss=False)
+        header_box.prop(settings, "auto_update", text="编辑模式操作", icon='EDITMODE_HLT', emboss=False)
+
+        if not settings.auto_update:
+            return
 
         active_idx = min(settings.active_point_index, len(settings.point_settings) - 1)
         active_ps = settings.point_settings[active_idx]
         widget_data = getattr(context.window_manager, "hair_pipe_widget", None)
 
-        if not settings.auto_update:
-            return
-
         box = header_box.box()
         row = box.row(align=True)
         row.scale_y = 1.25
-        op = row.operator("hair_pipe.apply_edge_flow", text="\u622a\u9762\u8fb9\u6d41")
+        op = row.operator("hair_pipe.apply_edge_flow", text="截面边流")
         op.mode = settings.edge_flow_mode
         op.power = settings.edge_flow_power
         op.blend = settings.edge_flow_blend
-        row.operator("hair_pipe.equalize_point_distance", text="\u66f2\u7ebf\u5e73\u6ed1", icon='SMOOTHCURVE')
+        row.operator("hair_pipe.equalize_point_distance", text="曲线平滑", icon='SMOOTHCURVE')
 
         row = box.row(align=True)
-        row.operator("hair_pipe.copy_cross_section", text="\u590d\u5236", icon='COPYDOWN')
-        row.operator("hair_pipe.paste_cross_section", text="\u7c98\u8d34", icon='PASTEDOWN')
+        row.operator("hair_pipe.copy_cross_section", text="复制", icon='COPYDOWN')
+        row.operator("hair_pipe.paste_cross_section", text="粘贴", icon='PASTEDOWN')
 
         row = box.row(align=True)
         row.scale_y = 1.2

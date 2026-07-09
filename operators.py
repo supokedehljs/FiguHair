@@ -1,7 +1,7 @@
 import bpy
 import math
 from mathutils import Matrix, Vector
-from bpy.props import IntProperty, FloatProperty, EnumProperty, BoolProperty
+from bpy.props import IntProperty, FloatProperty, EnumProperty, BoolProperty, StringProperty
 
 
 def ensure_curve_defaults(curve_obj):

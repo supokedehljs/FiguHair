@@ -544,33 +544,35 @@ def draw_active_pipe_cross_section_ring(context, ps):
     if best_start is None:
         return
 
-    show_full_grid = bool(getattr(context.window_manager.hair_pipe_widget, 'show_full_mesh_grid', False))
-    if show_full_grid:
-        ring_count = len(mesh_verts) // segments
-        view_forward = region_data.view_rotation @ Vector((0.0, 0.0, -1.0))
-        camera_dir = -safe_normalized(view_forward)
-        world_rings = []
-        projected_rings = []
-        front_masks = []
-        for ring_idx in range(ring_count):
-            start = ring_idx * segments
-            ring_world = [obj.matrix_world @ Vector(vert) for vert in mesh_verts[start:start + segments]]
-            if len(ring_world) != segments:
-                continue
-            ring_center = sum(ring_world, Vector((0.0, 0.0, 0.0))) / segments
-            projected = []
-            for world_pos in ring_world:
-                screen_pos = view3d_utils.location_3d_to_region_2d(region, region_data, world_pos)
-                if screen_pos is None:
-                    projected = []
-                    break
-                projected.append((screen_pos.x, screen_pos.y))
-            if len(projected) != segments:
-                continue
-            world_rings.append(ring_world)
-            projected_rings.append(projected)
-            front_masks.append([(world_pos - ring_center).dot(camera_dir) >= 0.0 for world_pos in ring_world])
+    wd = context.window_manager.hair_pipe_widget
+    show_full_grid = bool(getattr(wd, 'show_full_mesh_grid', False))
+    ring_count = len(mesh_verts) // segments
+    view_forward = region_data.view_rotation @ Vector((0.0, 0.0, -1.0))
+    camera_dir = -safe_normalized(view_forward)
+    projected_rings = []
+    front_masks = []
+    for ring_idx in range(ring_count):
+        start = ring_idx * segments
+        ring_world = [obj.matrix_world @ Vector(vert) for vert in mesh_verts[start:start + segments]]
+        if len(ring_world) != segments:
+            continue
+        ring_center = sum(ring_world, Vector((0.0, 0.0, 0.0))) / segments
+        projected = []
+        for world_pos in ring_world:
+            screen_pos = view3d_utils.location_3d_to_region_2d(region, region_data, world_pos)
+            if screen_pos is None:
+                projected = []
+                break
+            projected.append((screen_pos.x, screen_pos.y))
+        if len(projected) != segments:
+            continue
+        projected_rings.append(projected)
+        front_masks.append([(world_pos - ring_center).dot(camera_dir) >= 0.0 for world_pos in ring_world])
 
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    gpu.state.blend_set('ALPHA')
+
+    if show_full_grid:
         grid_lines = []
         for ring, front_mask in zip(projected_rings, front_masks):
             for idx, point in enumerate(ring):
@@ -589,12 +591,40 @@ def draw_active_pipe_cross_section_ring(context, ps):
                     grid_lines.append(next_ring[idx])
 
         if grid_lines:
-            shader = gpu.shader.from_builtin('UNIFORM_COLOR')
-            gpu.state.blend_set('ALPHA')
             gpu.state.line_width_set(1.6)
             batch = batch_for_shader(shader, 'LINES', {"pos": grid_lines})
             shader.bind()
             shader.uniform_float("color", (0.2, 0.85, 1.0, 0.72))
+            batch.draw(shader)
+
+    selected_indices = {idx for idx in get_selected_widget_verts(wd) if 0 <= idx < segments}
+    if 0 <= ps.active_vert_index < segments:
+        selected_indices.add(ps.active_vert_index)
+    if selected_indices and projected_rings:
+        highlight_lines = []
+        highlight_points = []
+        for selected_idx in sorted(selected_indices):
+            previous_point = None
+            for ring in projected_rings:
+                if selected_idx >= len(ring):
+                    continue
+                point = ring[selected_idx]
+                highlight_points.append(point)
+                if previous_point is not None:
+                    highlight_lines.append(previous_point)
+                    highlight_lines.append(point)
+                previous_point = point
+        if highlight_lines:
+            gpu.state.line_width_set(4.0)
+            batch = batch_for_shader(shader, 'LINES', {"pos": highlight_lines})
+            shader.bind()
+            shader.uniform_float("color", (1.0, 0.08, 0.02, 1.0))
+            batch.draw(shader)
+        if highlight_points:
+            gpu.state.point_size_set(8.5)
+            batch = batch_for_shader(shader, 'POINTS', {"pos": highlight_points})
+            shader.bind()
+            shader.uniform_float("color", (1.0, 0.95, 0.05, 1.0))
             batch.draw(shader)
 
     ring_world = [obj.matrix_world @ Vector(v) for v in mesh_verts[best_start:best_start + segments]]
@@ -994,6 +1024,7 @@ def setup_widget(context):
     wd.widget_center_y = region.height / 2.0
     wd.widget_scale_factor = 0.0
     wd.is_active = True
+    wd.show_full_mesh_grid = True
     wd.drag_vert_index = -1
     ensure_draw_handler()
     redraw_view3d(context)
