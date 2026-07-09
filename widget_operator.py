@@ -77,6 +77,7 @@ class HairPipeWidgetSettings(PropertyGroup):
     idx_button_y1: FloatProperty(default=0.0)
     flip_horizontal: BoolProperty(default=False)
     selected_verts: bpy.props.StringProperty(default="")
+    source_curve_name: bpy.props.StringProperty(default="")
     box_select_active: BoolProperty(default=False)
     box_x0: FloatProperty(default=0.0)
     box_y0: FloatProperty(default=0.0)
@@ -646,16 +647,20 @@ def draw_active_pipe_cross_section_ring(context, ps):
         shader.uniform_float("color", (1.0, 0.55, 0.0, 1.0))
         batch.draw(shader)
 
-    visible_points = [
-        point for idx, point in enumerate(projected)
-        if idx < len(ps.cross_section_verts) and not getattr(ps.cross_section_verts[idx], 'is_ghost', False)
-    ]
-    if visible_points:
-        gpu.state.point_size_set(7.0)
-        batch = batch_for_shader(shader, 'POINTS', {"pos": visible_points})
-        shader.bind()
-        shader.uniform_float("color", (1.0, 1.0, 0.15, 0.95))
-        batch.draw(shader)
+    selected_indices = get_selected_widget_verts(wd)
+    normal_points = []
+    selected_points = []
+    for idx, point in enumerate(projected):
+        if idx >= len(ps.cross_section_verts) or getattr(ps.cross_section_verts[idx], 'is_ghost', False):
+            continue
+        if idx in selected_indices:
+            selected_points.append(point)
+        else:
+            normal_points.append(point)
+    if normal_points:
+        draw_circle_points(shader, normal_points, (1.0, 0.55, 0.0, 0.95), 3.4, segments=18)
+    if selected_points:
+        draw_circle_points(shader, selected_points, (1.0, 1.0, 0.15, 1.0), 4.2, segments=18)
 
     gpu.state.point_size_set(1.0)
     gpu.state.line_width_set(1.0)
@@ -1025,7 +1030,19 @@ def set_curve_overlay_hidden(context, curve_obj, enabled):
         redraw_view3d(context)
 
 
+def get_widget_source_curve(context):
+    wd = getattr(context.window_manager, 'hair_pipe_widget', None) if context is not None else None
+    if wd is not None and getattr(wd, 'source_curve_name', ''):
+        obj = bpy.data.objects.get(wd.source_curve_name)
+        if obj is not None and obj.type == 'CURVE':
+            return obj
+    obj = context.active_object if context is not None else None
+    return obj if obj is not None and getattr(obj, 'type', None) == 'CURVE' else None
+
+
 def set_pipe_basemesh_preview(context, curve_obj, enabled):
+    if curve_obj is None:
+        return
     pipe_obj = get_pipe_object_for_curve(curve_obj)
     if pipe_obj is None:
         return
@@ -1096,10 +1113,11 @@ def set_pipe_basemesh_preview(context, curve_obj, enabled):
 
 def setup_widget(context):
     obj = context.active_object
-    if obj is not None and obj.type == 'CURVE':
-        sync_point_settings(obj)
-        if is_curve_edit_mode(obj):
-            sync_active_point_from_selection(obj)
+    if obj is None or obj.type != 'CURVE' or not is_curve_edit_mode(obj):
+        return False
+
+    sync_point_settings(obj)
+    sync_active_point_from_selection(obj)
 
     wd = context.window_manager.hair_pipe_widget
     area, region = get_view3d_window_region(context)
@@ -1116,6 +1134,7 @@ def setup_widget(context):
     wd.widget_center_x = region.width / 2.0 + region.width * 0.35 * getattr(widget_layout, "widget_offset_x", 0.0)
     wd.widget_center_y = region.height / 2.0 + region.height * 0.35 * getattr(widget_layout, "widget_offset_y", 0.0)
     wd.widget_scale_factor = 0.0
+    wd.source_curve_name = obj.name
     wd.is_active = True
     wd.show_full_mesh_grid = False
     wd.drag_vert_index = -1
@@ -1746,7 +1765,7 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         obj = context.active_object
-        if obj is None or obj.type != 'CURVE':
+        if obj is None or obj.type != 'CURVE' or not is_curve_edit_mode(obj):
             return False
         s = obj.hair_pipe_settings
         if len(s.point_settings) == 0:
@@ -1759,8 +1778,9 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
     def invoke(self, context, event):
         wd = context.window_manager.hair_pipe_widget
         if wd.is_active:
-            set_curve_overlay_hidden(context, context.active_object, False)
-            set_pipe_basemesh_preview(context, context.active_object, False)
+            source_curve = get_widget_source_curve(context)
+            set_curve_overlay_hidden(context, source_curve, False)
+            set_pipe_basemesh_preview(context, source_curve, False)
             wd.is_active = False
             wd.drag_vert_index = -1
             redraw_view3d(context)
@@ -1795,8 +1815,9 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
         return handle_widget_modal(self, context, event, close_on_key_release=False)
 
     def _finish(self, context):
-        set_curve_overlay_hidden(context, context.active_object, False)
-        set_pipe_basemesh_preview(context, context.active_object, False)
+        source_curve = get_widget_source_curve(context)
+        set_curve_overlay_hidden(context, source_curve, False)
+        set_pipe_basemesh_preview(context, source_curve, False)
         wd = context.window_manager.hair_pipe_widget
         wd.is_active = False
         wd.drag_vert_index = -1
@@ -1858,7 +1879,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         return {'FINISHED'}
 
     obj = context.active_object
-    if obj is None or obj.type != 'CURVE':
+    if obj is None or obj.type != 'CURVE' or not is_curve_edit_mode(obj):
         operator._finish(context)
         return {'CANCELLED'}
 
@@ -2364,17 +2385,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         return {'RUNNING_MODAL'}
 
     if event.type == 'RIGHTMOUSE' and event.value == 'PRESS':
-        wd.move_active = False
-        wd.rotate_active = False
-        wd.scale_active = False
-        wd.display_scale_active = False
-        wd.box_select_active = False
-        wd.left_drag_pending = False
-        wd.left_drag_active = False
-        wd.left_drag_vert_index = -1
-        wd.lasso_select_active = False
-        operator._finish(context)
-        return {'FINISHED'}
+        return {'PASS_THROUGH'}
 
     # ESC - close editor
     if event.type == 'ESC':
