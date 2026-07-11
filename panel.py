@@ -25,8 +25,25 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         curve_obj = get_context_curve_object(context)
+
+        box = layout.box()
+        box.label(text="通用", icon='MESH_CYLINDER')
+        if curve_obj is not None:
+            row = box.row(align=True)
+            row.scale_y = 1.35
+            row.operator("hair_pipe.generate_pipe", text="生成 / 更新管线")
+            row2 = box.row(align=True)
+            row2.scale_y = 1.2
+            row2.operator("hair_pipe.duplicate_hair", text="复制头发", icon='DUPLICATE')
+            row3 = box.row(align=True)
+            row3.scale_y = 1.2
+            row3.operator("hair_pipe.merge_hair_for_export", text="导出合并网格", icon='EXPORT')
+        row = box.row(align=True)
+        row.scale_y = 1.2
+        row.operator("hair_pipe.mesh_to_hair_curve", text="管状网格转头发曲线", icon='CURVE_DATA')
+
         if curve_obj is None:
-            layout.label(text="请选曲线或 FiguHair 预览网格", icon='INFO')
+            layout.label(text="请选择曲线、FiguHair 预览网格，或普通管状网格进行转换", icon='INFO')
             return
 
         try:
@@ -36,18 +53,6 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
             layout.label(text="FiguHair 状态初始化失败", icon='ERROR')
             layout.label(text=str(exc)[:80], icon='INFO')
             return
-
-        box = layout.box()
-        box.label(text="通用", icon='MESH_CYLINDER')
-        row = box.row(align=True)
-        row.scale_y = 1.35
-        row.operator("hair_pipe.generate_pipe", text="生成 / 更新管线")
-        row2 = box.row(align=True)
-        row2.scale_y = 1.2
-        row2.operator("hair_pipe.duplicate_hair", text="复制头发", icon='DUPLICATE')
-        row3 = box.row(align=True)
-        row3.scale_y = 1.2
-        row3.operator("hair_pipe.merge_hair_for_export", text="导出合并网格", icon='EXPORT')
         row = box.row(align=True)
         row.operator("hair_pipe.toggle_solo_display", text="单独显示", icon='HIDE_OFF')
         row = box.row(align=True)

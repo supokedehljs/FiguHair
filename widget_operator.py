@@ -934,9 +934,10 @@ def draw_widget_callback():
     alignment_angle = get_view_alignment_angle(context) + math.radians(settings.widget_correct_rotation)
     flip_h = wd.flip_horizontal
 
-    base_radius = settings.default_radius
-    if base_radius < 1e-6:
-        base_radius = 0.05
+    max_extent = 0.0
+    for vert in verts:
+        max_extent = max(max_extent, abs(vert.offset_x), abs(vert.offset_y))
+    base_radius = max(max_extent, settings.default_radius, 0.05)
     if wd.widget_scale_factor <= 1e-8:
         wd.widget_scale_factor = half / (base_radius * 2.4)
     sf = wd.widget_scale_factor
@@ -1197,7 +1198,11 @@ def setup_widget(context):
         return False
 
     sync_point_settings(obj)
-    sync_active_point_from_selection(obj)
+    if not sync_active_point_from_selection(obj):
+        obj.hair_pipe_settings.active_point_index = min(
+            obj.hair_pipe_settings.active_point_index,
+            max(0, len(obj.hair_pipe_settings.point_settings) - 1),
+        )
 
     wd = context.window_manager.hair_pipe_widget
     area, region = get_view3d_window_region(context)

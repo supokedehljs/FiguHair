@@ -2278,6 +2278,448 @@ def apply_edge_flow_to_target_indices(curve_obj, settings, target_indices, mode,
     return changed
 
 
+def _edge_key(a, b):
+    return (a, b) if a < b else (b, a)
+
+
+def _ordered_boundary_loops(mesh):
+    edge_faces = {}
+    for poly in mesh.polygons:
+        verts = list(poly.vertices)
+        for idx, v0 in enumerate(verts):
+            v1 = verts[(idx + 1) % len(verts)]
+            edge_faces.setdefault(_edge_key(v0, v1), []).append(poly.index)
+
+    boundary_adj = {}
+    for edge, faces in edge_faces.items():
+        if len(faces) == 1:
+            a, b = edge
+            boundary_adj.setdefault(a, []).append(b)
+            boundary_adj.setdefault(b, []).append(a)
+
+    loops = []
+    visited_edges = set()
+    for start, neighbors in boundary_adj.items():
+        for first_next in neighbors:
+            edge = _edge_key(start, first_next)
+            if edge in visited_edges:
+                continue
+            loop = [start]
+            prev = start
+            cur = first_next
+            visited_edges.add(edge)
+            while True:
+                loop.append(cur)
+                next_candidates = [v for v in boundary_adj.get(cur, []) if v != prev]
+                if not next_candidates:
+                    break
+                nxt = next_candidates[0]
+                next_edge = _edge_key(cur, nxt)
+                if nxt == start:
+                    visited_edges.add(next_edge)
+                    break
+                if next_edge in visited_edges:
+                    break
+                visited_edges.add(next_edge)
+                prev, cur = cur, nxt
+            if len(loop) >= 3:
+                loops.append(loop)
+    return loops
+
+
+def _mesh_edge_maps(mesh):
+    edge_to_faces = {}
+    vertex_to_edges = {}
+    for poly in mesh.polygons:
+        verts = list(poly.vertices)
+        for idx, v0 in enumerate(verts):
+            v1 = verts[(idx + 1) % len(verts)]
+            key = _edge_key(v0, v1)
+            edge_to_faces.setdefault(key, []).append(poly.index)
+            vertex_to_edges.setdefault(v0, set()).add(key)
+            vertex_to_edges.setdefault(v1, set()).add(key)
+    return edge_to_faces, vertex_to_edges
+
+
+def _connected_unvisited_edges(seed_edge, available_edges):
+    component = set()
+    stack = [seed_edge]
+    while stack:
+        edge = stack.pop()
+        if edge in component or edge not in available_edges:
+            continue
+        component.add(edge)
+        a, b = edge
+        for other in available_edges:
+            if other in component:
+                continue
+            if a in other or b in other:
+                stack.append(other)
+    return component
+
+
+def _order_cycle_edges(edges):
+    if not edges:
+        return None
+    adj = {}
+    for a, b in edges:
+        adj.setdefault(a, []).append(b)
+        adj.setdefault(b, []).append(a)
+    if any(len(neighbors) != 2 for neighbors in adj.values()):
+        return None
+    start = next(iter(adj))
+    loop = [start]
+    prev = None
+    cur = start
+    for _ in range(len(adj)):
+        neighbors = adj[cur]
+        nxt = neighbors[0] if neighbors[0] != prev else neighbors[1]
+        if nxt == start:
+            return loop if len(loop) == len(adj) else None
+        if nxt in loop:
+            return None
+        loop.append(nxt)
+        prev, cur = cur, nxt
+    return None
+
+
+def _ring_from_cap_faces(mesh):
+    candidates = []
+    for poly in mesh.polygons:
+        if len(poly.vertices) >= 3:
+            candidates.append((poly.index, list(poly.vertices)))
+    return max(candidates, key=lambda item: len(item[1])) if candidates else (None, None)
+
+
+def _extract_rings_by_ordered_quads(mesh, start_ring, edge_to_faces, initially_used_faces=None):
+    rings = [start_ring]
+    used_faces = set(initially_used_faces or [])
+    max_steps = max(1, len(mesh.polygons) + 1)
+    for _ in range(max_steps):
+        next_ring, step_faces = _step_ring_by_ordered_quads(mesh, rings[-1], used_faces, edge_to_faces)
+        if next_ring is None:
+            break
+        if set(next_ring) == set(rings[-1]):
+            break
+        rings.append(next_ring)
+        used_faces.update(step_faces)
+    return rings if len(rings) >= 2 else None
+
+
+def extract_tube_rings_from_mesh(mesh):
+    edge_to_faces, vertex_to_edges = _mesh_edge_maps(mesh)
+    boundary_loops = _ordered_boundary_loops(mesh)
+    cap_face_index = None
+    if boundary_loops:
+        start_ring = max(boundary_loops, key=len)
+    else:
+        cap_face_index, start_ring = _ring_from_cap_faces(mesh)
+    if not start_ring or len(start_ring) < 3:
+        return None
+
+    quad_rings = _extract_rings_by_ordered_quads(
+        mesh,
+        start_ring,
+        edge_to_faces,
+        {cap_face_index} if cap_face_index is not None else None,
+    )
+    if quad_rings and len(quad_rings) >= 3:
+        return quad_rings
+
+    rings = [start_ring]
+    current_ring = start_ring
+    used_edges = set(_edge_key(current_ring[i], current_ring[(i + 1) % len(current_ring)]) for i in range(len(current_ring)))
+    used_vertices = set(current_ring)
+    max_steps = max(1, len(mesh.vertices))
+
+    for _ in range(max_steps):
+        candidate_edges = set()
+        for vert_idx in current_ring:
+            for edge in vertex_to_edges.get(vert_idx, set()):
+                if edge not in used_edges:
+                    candidate_edges.add(edge)
+        if not candidate_edges:
+            break
+
+        best_loop = None
+        best_component = None
+        for seed in list(candidate_edges):
+            component = _connected_unvisited_edges(seed, candidate_edges)
+            loop = _order_cycle_edges(component)
+            if not loop:
+                continue
+            outside_count = sum(1 for v in loop if v not in used_vertices)
+            if outside_count == 0:
+                continue
+            if best_loop is None or outside_count > sum(1 for v in best_loop if v not in used_vertices):
+                best_loop = loop
+                best_component = component
+        if not best_loop or not best_component:
+            break
+
+        if len(best_loop) != len(start_ring):
+            break
+        rings.append(best_loop)
+        used_edges.update(best_component)
+        used_vertices.update(best_loop)
+        current_ring = best_loop
+
+    if len(rings) >= 3:
+        return rings
+
+    open_rings = _extract_open_tube_rings_by_faces(mesh, boundary_loops, edge_to_faces)
+    if open_rings and len(open_rings) > len(rings):
+        return open_rings
+    return rings if len(rings) >= 2 else None
+
+
+def _extract_open_tube_rings_by_faces(mesh, loops, edge_to_faces):
+    if not loops:
+        return None
+    start_ring = max(loops, key=len)
+    rings = [start_ring]
+    used_faces = set()
+    max_steps = max(1, len(mesh.polygons) + 1)
+    for _ in range(max_steps):
+        next_ring, step_faces = _step_ring_by_ordered_quads(mesh, rings[-1], used_faces, edge_to_faces)
+        if next_ring is None:
+            break
+        rings.append(next_ring)
+        used_faces.update(step_faces)
+        next_set = set(next_ring)
+        if any(next_set == set(loop) for loop in loops if set(loop) != set(start_ring)):
+            break
+    if len(rings) < 2:
+        return None
+    return rings
+
+
+def _step_ring_by_ordered_quads(mesh, ring, used_faces, edge_to_faces):
+    count = len(ring)
+    next_edges = []
+    step_faces = []
+    ring_set = set(ring)
+    for idx in range(count):
+        a = ring[idx]
+        b = ring[(idx + 1) % count]
+        face_index = None
+        for candidate in edge_to_faces.get(_edge_key(a, b), []):
+            if candidate not in used_faces and len(mesh.polygons[candidate].vertices) == 4:
+                face_index = candidate
+                break
+        if face_index is None:
+            return None, []
+        verts = list(mesh.polygons[face_index].vertices)
+        opposite = [v for v in verts if v not in ring_set]
+        if len(opposite) != 2:
+            return None, []
+        next_edges.append(_edge_key(opposite[0], opposite[1]))
+        step_faces.append(face_index)
+    next_ring = _order_cycle_edges(set(next_edges))
+    if not next_ring or len(next_ring) != count:
+        return None, []
+    return next_ring, step_faces
+
+
+def _ring_center_from_indices(ring, positions):
+    center = Vector((0.0, 0.0, 0.0))
+    for vert_idx in ring:
+        center += positions[vert_idx]
+    return center / max(1, len(ring))
+
+
+def _best_aligned_ring_order(previous_ring, current_ring, positions, previous_center, current_center):
+    count = len(current_ring)
+    if count <= 2 or len(previous_ring) != count:
+        return current_ring
+    previous_offsets = [positions[v] - previous_center for v in previous_ring]
+    best_score = None
+    best_ring = current_ring
+    for flip in (False, True):
+        candidate = list(reversed(current_ring)) if flip else list(current_ring)
+        for shift in range(count):
+            ordered = candidate[shift:] + candidate[:shift]
+            score = 0.0
+            for idx, vert_idx in enumerate(ordered):
+                offset = positions[vert_idx] - current_center
+                score += (offset - previous_offsets[idx]).length_squared
+            if best_score is None or score < best_score:
+                best_score = score
+                best_ring = ordered
+    return best_ring
+
+
+def _align_ring_orders(rings, positions, centers):
+    if not rings:
+        return rings
+    aligned = [list(rings[0])]
+    for idx in range(1, len(rings)):
+        aligned.append(_best_aligned_ring_order(
+            aligned[-1],
+            list(rings[idx]),
+            positions,
+            centers[idx - 1],
+            centers[idx],
+        ))
+    return aligned
+
+
+def _curve_tangent_at_center(centers, idx):
+    if len(centers) <= 1:
+        return Vector((0.0, 0.0, 1.0))
+    if idx == 0:
+        return centers[1] - centers[0]
+    if idx == len(centers) - 1:
+        return centers[-1] - centers[-2]
+    return centers[idx + 1] - centers[idx - 1]
+
+
+def _minimal_twist_frames_for_centers(centers):
+    if not centers:
+        return []
+    first_tangent = safe_normalized(_curve_tangent_at_center(centers, 0))
+    normal, binormal = get_cross_section_frame(first_tangent)
+    frames = [(first_tangent, normal.copy(), binormal.copy())]
+    prev_tangent = first_tangent
+    for idx in range(1, len(centers)):
+        tangent = safe_normalized(_curve_tangent_at_center(centers, idx), prev_tangent)
+        if prev_tangent.length >= 1e-8 and tangent.length >= 1e-8:
+            try:
+                transport = prev_tangent.rotation_difference(tangent)
+                normal = transport @ normal
+            except ValueError:
+                pass
+        normal = normal - tangent * normal.dot(tangent)
+        if normal.length < 1e-8:
+            normal, binormal = get_cross_section_frame(tangent)
+        else:
+            normal.normalize()
+            binormal = tangent.cross(normal).normalized()
+        frames.append((tangent, normal.copy(), binormal.copy()))
+        prev_tangent = tangent
+    return frames
+
+
+def _signed_polygon_area_2d(points):
+    area = 0.0
+    count = len(points)
+    for idx in range(count):
+        x0, y0 = points[idx]
+        x1, y1 = points[(idx + 1) % count]
+        area += x0 * y1 - x1 * y0
+    return area * 0.5
+
+
+def make_hair_curve_from_tube_mesh(context, mesh_obj):
+    depsgraph = context.evaluated_depsgraph_get()
+    eval_obj = mesh_obj.evaluated_get(depsgraph)
+    mesh = bpy.data.meshes.new_from_object(eval_obj, depsgraph=depsgraph)
+    try:
+        rings = extract_tube_rings_from_mesh(mesh)
+        if not rings:
+            return None, "无法识别管状网格：需要清晰的横截面边环，建议使用四边面管状拓扑"
+
+        world_positions = [mesh_obj.matrix_world @ vert.co for vert in mesh.vertices]
+        centers = [_ring_center_from_indices(ring, world_positions) for ring in rings]
+        rings = _align_ring_orders(rings, world_positions, centers)
+        frames = _minimal_twist_frames_for_centers(centers)
+
+        curve_data = bpy.data.curves.new(mesh_obj.name + "_Curve", 'CURVE')
+        curve_data.dimensions = '3D'
+        curve_data.resolution_u = 1
+        spline = curve_data.splines.new('NURBS')
+        spline.points.add(len(centers) - 1)
+        spline.order_u = min(4, len(centers))
+        spline.use_endpoint_u = True
+        for idx, center in enumerate(centers):
+            spline.points[idx].co = (center.x, center.y, center.z, 1.0)
+            spline.points[idx].radius = 1.0
+            spline.points[idx].tilt = 0.0
+            spline.points[idx].select = (idx == 0)
+
+        curve_obj = bpy.data.objects.new(mesh_obj.name + "_FiguHairCurve", curve_data)
+        target_collection = mesh_obj.users_collection[0] if mesh_obj.users_collection else context.scene.collection
+        target_collection.objects.link(curve_obj)
+        curve_obj.matrix_world = Matrix.Identity(4)
+        curve_obj["hair_pipe_base_name"] = mesh_obj.name + " Restored"
+        ensure_figuhair_root(curve_obj)
+        ensure_curve_defaults(curve_obj)
+        settings = curve_obj.hair_pipe_settings
+        settings.pipe_resolution = 0
+        settings.default_segments = len(rings[0])
+        settings.default_subdiv = False
+        settings.subdivision_levels = 0
+        settings.redirect_selection = True
+        sync_point_settings(curve_obj)
+
+        first_area_checked = False
+        reverse_all_sections = False
+        for idx, ring in enumerate(rings):
+            _, normal, binormal = frames[idx]
+            raw_offsets = []
+            for vert_idx in ring:
+                offset = world_positions[vert_idx] - centers[idx]
+                raw_offsets.append((offset.dot(normal), offset.dot(binormal)))
+            if not first_area_checked and len(raw_offsets) >= 3:
+                reverse_all_sections = _signed_polygon_area_2d(raw_offsets) < 0.0
+                first_area_checked = True
+            if reverse_all_sections:
+                raw_offsets = list(reversed(raw_offsets))
+
+            ps = settings.point_settings[idx]
+            ps.cross_section_verts.clear()
+            ps.rotation = 0.0
+            ps.scale = 1.0
+            for offset_x, offset_y in raw_offsets:
+                v = ps.cross_section_verts.add()
+                v.offset_x = offset_x
+                v.offset_y = offset_y
+                v.is_ghost = False
+            ps.active_vert_index = 0
+
+        normalize_cross_section_topology(settings)
+        update_all_ghost_vertices(settings)
+        if len(settings.point_settings) > 0:
+            settings.active_point_index = 0
+        mesh_obj["hair_pipe_import_source"] = True
+        if "hair_pipe_source_curve" in mesh_obj:
+            del mesh_obj["hair_pipe_source_curve"]
+        mesh_obj.hide_select = False
+        return curve_obj, None
+    finally:
+        bpy.data.meshes.remove(mesh)
+
+
+class HAIRPIPE_OT_mesh_to_hair_curve(bpy.types.Operator):
+    """Convert an open quad tube mesh back into a FiguHair curve"""
+    bl_idname = "hair_pipe.mesh_to_hair_curve"
+    bl_label = "管状网格转头发曲线"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == 'MESH'
+
+    def execute(self, context):
+        mesh_obj = context.active_object
+        curve_obj, error = make_hair_curve_from_tube_mesh(context, mesh_obj)
+        if error:
+            self.report({'ERROR'}, error)
+            return {'CANCELLED'}
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        curve_obj.select_set(True)
+        context.view_layer.objects.active = curve_obj
+        bpy.ops.hair_pipe.generate_pipe()
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        curve_obj.select_set(True)
+        context.view_layer.objects.active = curve_obj
+        self.report({'INFO'}, "已从管状网格生成 FiguHair 头发曲线")
+        return {'FINISHED'}
+
+
 class HAIRPIPE_OT_generate_pipe(bpy.types.Operator):
     """Generate pipe mesh from curve with per-point custom cross-sections"""
     bl_idname = "hair_pipe.generate_pipe"
@@ -3433,6 +3875,7 @@ def _is_figuhair_family_obj(obj):
 
 
 classes = (
+    HAIRPIPE_OT_mesh_to_hair_curve,
     HAIRPIPE_OT_generate_pipe,
     HAIRPIPE_OT_sync_points,
     HAIRPIPE_OT_toggle_cross_section_transition,
