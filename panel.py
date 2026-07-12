@@ -35,6 +35,7 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
             row2 = box.row(align=True)
             row2.scale_y = 1.2
             row2.operator("hair_pipe.duplicate_hair", text="复制头发", icon='DUPLICATE')
+            row2.operator("hair_pipe.delete_hair", text="删除头发", icon='TRASH')
             row3 = box.row(align=True)
             row3.scale_y = 1.2
             row3.operator("hair_pipe.merge_hair_for_export", text="导出合并网格", icon='EXPORT')

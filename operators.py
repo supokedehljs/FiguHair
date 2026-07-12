@@ -8,9 +8,10 @@ def ensure_curve_defaults(curve_obj):
     if curve_obj is None or curve_obj.type != 'CURVE':
         return
     curve_obj.data.dimensions = '3D'
-    curve_obj.data.resolution_u = 1
+    curve_obj.data.resolution_u = max(getattr(curve_obj.data, 'resolution_u', 0), 16)
+    curve_obj.data.render_resolution_u = max(getattr(curve_obj.data, 'render_resolution_u', 0), 16)
     for spline in curve_obj.data.splines:
-        spline.resolution_u = 1
+        spline.resolution_u = max(getattr(spline, 'resolution_u', 0), 16)
 
 
 def get_curve_points_data(curve_obj):
@@ -3606,6 +3607,94 @@ class HAIRPIPE_OT_edit_tail_mesh(bpy.types.Operator):
 
 
 
+class HAIRPIPE_OT_delete_hair(bpy.types.Operator):
+    """Delete selected complete FiguHair hair sets"""
+    bl_idname = "hair_pipe.delete_hair"
+    bl_label = "删除头发"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return get_context_curve_object(context) is not None
+
+    def execute(self, context):
+        selected_objects = list(getattr(context, 'selected_objects', ()))
+        curve_objects = []
+        seen_curves = set()
+
+        def add_curve(curve_obj):
+            if curve_obj is not None and curve_obj.type == 'CURVE' and curve_obj.name not in seen_curves:
+                curve_objects.append(curve_obj)
+                seen_curves.add(curve_obj.name)
+
+        for obj in selected_objects:
+            if obj is None:
+                continue
+            if obj.type == 'CURVE':
+                add_curve(obj)
+            elif obj.type == 'EMPTY':
+                add_curve(get_curve_from_figuhair_root(obj))
+            else:
+                add_curve(get_pipe_source_curve(obj))
+                add_curve(get_tail_source_curve(obj))
+
+        if not curve_objects:
+            add_curve(get_context_curve_object(context))
+
+        objects_to_delete = []
+        seen_objects = set()
+
+        def add_object(obj):
+            if obj is not None and obj.name not in seen_objects:
+                objects_to_delete.append(obj)
+                seen_objects.add(obj.name)
+
+        for curve_obj in curve_objects:
+            root_obj = get_figuhair_root(curve_obj)
+            pipe_obj = get_pipe_object_for_curve(curve_obj)
+            tail_obj = get_tail_object_for_curve(curve_obj)
+            if root_obj is not None:
+                for child in list(root_obj.children):
+                    add_object(child)
+                add_object(root_obj)
+            add_object(pipe_obj)
+            add_object(tail_obj)
+            add_object(curve_obj)
+
+        if not objects_to_delete:
+            self.report({'WARNING'}, "没有找到可删除的头发")
+            return {'CANCELLED'}
+
+        if context.mode != 'OBJECT':
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except Exception:
+                pass
+
+        mesh_data = []
+        curve_data = []
+        for obj in objects_to_delete:
+            data = getattr(obj, 'data', None)
+            if obj.type == 'MESH' and data is not None:
+                mesh_data.append(data)
+            elif obj.type == 'CURVE' and data is not None:
+                curve_data.append(data)
+
+        for obj in objects_to_delete:
+            if obj.name in bpy.data.objects:
+                bpy.data.objects.remove(obj, do_unlink=True)
+
+        for mesh in mesh_data:
+            if mesh.users == 0:
+                bpy.data.meshes.remove(mesh)
+        for curve in curve_data:
+            if curve.users == 0:
+                bpy.data.curves.remove(curve)
+
+        self.report({'INFO'}, f"已删除 {len(curve_objects)} 个头发")
+        return {'FINISHED'}
+
+
 class HAIRPIPE_OT_duplicate_hair(bpy.types.Operator):
     """Duplicate the entire hair (root empty, curve, pipe mesh, tail mesh) and rename"""
     bl_idname = "hair_pipe.duplicate_hair"
@@ -3898,6 +3987,7 @@ classes = (
     HAIRPIPE_OT_toggle_tail_visibility,
     HAIRPIPE_OT_hide_all_tail_meshes,
     HAIRPIPE_OT_edit_tail_mesh,
+    HAIRPIPE_OT_delete_hair,
     HAIRPIPE_OT_duplicate_hair,
     HAIRPIPE_OT_merge_hair_for_export,
 )
