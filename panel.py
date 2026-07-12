@@ -7,6 +7,7 @@ from .operators import (
 from .hair_library import (
     HAIRPIPE_OT_library_save_current,
     HAIRPIPE_OT_library_overlay_toggle,
+    HAIRPIPE_OT_library_open_folder,
     sync_state_entries,
 )
 
@@ -60,6 +61,7 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         row.operator("hair_pipe.library_save_current", text="保存到头发库", icon='FILE_TICK')
         row = box.row(align=True)
         row.operator("hair_pipe.library_overlay_toggle", text="打开头发库", icon='ASSET_MANAGER')
+        row.operator("hair_pipe.library_open_folder", text="打开文件夹", icon='FILE_FOLDER')
 
         lib_state = getattr(context.window_manager, "hair_pipe_library_state", None)
         if lib_state is not None:
