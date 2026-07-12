@@ -50,7 +50,7 @@ class HairLibraryEntryItem(PropertyGroup):
 class HairLibraryOverlayState(PropertyGroup):
     is_open: BoolProperty(name="Is Open", default=False)
     active_entry_index: IntProperty(name="Active Entry Index", default=0)
-    card_scale: FloatProperty(name="Card Scale", default=1.0, min=0.5, max=2.0)
+    card_scale: FloatProperty(name="Card Scale", default=1.0, min=0.45, max=2.5)
     scroll_offset: FloatProperty(name="Scroll Offset", default=0.0, min=0.0)
     panel_offset_x: FloatProperty(name="Panel Offset X", default=0.0)
     panel_offset_y: FloatProperty(name="Panel Offset Y", default=0.0)
@@ -607,8 +607,8 @@ def _draw_overlay():
     grid_x1 = inner_x1 - 18
     grid_y0 = inner_y0 + 18
     grid_y1 = inner_y1 - drag_h - 14
-    gap = 18
-    card_size = 220
+    card_size = max(96, min(360, 220 * state.card_scale))
+    gap = max(10, min(28, 18 * state.card_scale))
     cols = max(1, int((grid_x1 - grid_x0 + gap) // (card_size + gap)))
     total_rows = max(1, math.ceil(len(state.entries) / cols))
     content_h = total_rows * card_size + (total_rows - 1) * gap
@@ -701,12 +701,18 @@ class HAIRPIPE_OT_library_overlay_toggle(bpy.types.Operator):
                 context.area.tag_redraw()
             return {'FINISHED'}
         if event.type == 'WHEELUPMOUSE':
-            overlay.scroll_offset = max(0.0, overlay.scroll_offset - 72.0)
+            if event.ctrl:
+                overlay.card_scale = min(2.5, overlay.card_scale + 0.08)
+            else:
+                overlay.scroll_offset = max(0.0, overlay.scroll_offset - 72.0)
             if context.area:
                 context.area.tag_redraw()
             return {'RUNNING_MODAL'}
         if event.type == 'WHEELDOWNMOUSE':
-            overlay.scroll_offset += 72.0
+            if event.ctrl:
+                overlay.card_scale = max(0.45, overlay.card_scale - 0.08)
+            else:
+                overlay.scroll_offset += 72.0
             if context.area:
                 context.area.tag_redraw()
             return {'RUNNING_MODAL'}
