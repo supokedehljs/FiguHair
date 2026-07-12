@@ -34,6 +34,8 @@ _library_previews = None
 _draw_handle = None
 _overlay_bounds = []
 _overlay_button_bounds = []
+_overlay_drag_bounds = None
+_overlay_resize_bounds = None
 _image_cache = {}
 
 
@@ -50,6 +52,20 @@ class HairLibraryOverlayState(PropertyGroup):
     active_entry_index: IntProperty(name="Active Entry Index", default=0)
     card_scale: FloatProperty(name="Card Scale", default=1.0, min=0.5, max=2.0)
     scroll_offset: FloatProperty(name="Scroll Offset", default=0.0, min=0.0)
+    panel_offset_x: FloatProperty(name="Panel Offset X", default=0.0)
+    panel_offset_y: FloatProperty(name="Panel Offset Y", default=0.0)
+    panel_width: FloatProperty(name="Panel Width", default=980.0, min=420.0, max=1800.0)
+    panel_height: FloatProperty(name="Panel Height", default=720.0, min=320.0, max=1200.0)
+    is_dragging: BoolProperty(name="Dragging", default=False)
+    is_resizing: BoolProperty(name="Resizing", default=False)
+    drag_start_mouse_x: FloatProperty(name="Drag Start Mouse X", default=0.0)
+    drag_start_mouse_y: FloatProperty(name="Drag Start Mouse Y", default=0.0)
+    drag_start_panel_x: FloatProperty(name="Drag Start Panel X", default=0.0)
+    drag_start_panel_y: FloatProperty(name="Drag Start Panel Y", default=0.0)
+    resize_start_width: FloatProperty(name="Resize Start Width", default=980.0)
+    resize_start_height: FloatProperty(name="Resize Start Height", default=720.0)
+    resize_anchor_left: FloatProperty(name="Resize Anchor Left", default=0.0)
+    resize_anchor_top: FloatProperty(name="Resize Anchor Top", default=0.0)
     selected_entry_ids: StringProperty(name="Selected Entries", default="")
     entries: CollectionProperty(type=HairLibraryEntryItem)
 
@@ -84,7 +100,12 @@ def get_asset_dir():
 def get_thumbnail_path_for_blend(blend_path):
     if not blend_path:
         return ""
-    base_path, _ext = os.path.splitext(blend_path)
+    abs_blend_path = bpy.path.abspath(blend_path)
+    base_path, _ext = os.path.splitext(abs_blend_path)
+    for ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+        thumbnail_path = base_path + ext
+        if os.path.exists(thumbnail_path):
+            return thumbnail_path
     return base_path + ".png"
 
 
@@ -95,9 +116,13 @@ def load_index():
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, list) else []
+        entries = data if isinstance(data, list) else []
     except Exception:
         return []
+    valid_entries = [entry for entry in entries if os.path.exists(entry.get("blend_path", ""))]
+    if len(valid_entries) != len(entries):
+        save_index(valid_entries)
+    return valid_entries
 
 
 def save_index(entries):
@@ -233,6 +258,7 @@ def _save_clipboard_thumbnail_with_powershell(target_path):
 
 
 def _save_clipboard_thumbnail_to_path(target_path):
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
     if ImageGrab is not None:
         try:
             image = ImageGrab.grabclipboard()
@@ -244,7 +270,9 @@ def _save_clipboard_thumbnail_to_path(target_path):
                 return True
         elif image is not None:
             try:
-                image.save(target_path)
+                if getattr(image, "mode", "") not in {"RGB", "RGBA"}:
+                    image = image.convert("RGBA")
+                image.save(target_path, format="PNG")
                 return True
             except Exception:
                 pass
@@ -447,6 +475,11 @@ def _load_thumbnail_image(path):
         return image
     try:
         image = bpy.data.images.load(path, check_existing=True)
+        try:
+            image.colorspace_settings.name = 'Non-Color'
+        except Exception:
+            pass
+        image.alpha_mode = 'STRAIGHT'
         _image_cache[path] = image
         return image
     except Exception:
@@ -457,6 +490,7 @@ def _draw_image_rect(image, x0, y0, x1, y1):
     if image is None:
         return False
     try:
+        texture = gpu.texture.from_image(image)
         shader = gpu.shader.from_builtin('IMAGE')
         batch = batch_for_shader(shader, 'TRI_FAN', {
             "pos": [(x0, y0), (x1, y0), (x1, y1), (x0, y1)],
@@ -464,7 +498,7 @@ def _draw_image_rect(image, x0, y0, x1, y1):
         })
         gpu.state.blend_set('ALPHA')
         shader.bind()
-        shader.uniform_sampler("image", image.bindcode)
+        shader.uniform_sampler("image", texture)
         batch.draw(shader)
         return True
     except Exception:
@@ -514,9 +548,11 @@ def _event_over_overlay(event, context):
 
 
 def _draw_overlay():
-    global _overlay_bounds, _overlay_button_bounds
+    global _overlay_bounds, _overlay_button_bounds, _overlay_drag_bounds, _overlay_resize_bounds
     _overlay_bounds = []
     _overlay_button_bounds = []
+    _overlay_drag_bounds = None
+    _overlay_resize_bounds = None
     wm = bpy.context.window_manager
     overlay = getattr(wm, "hair_pipe_library_overlay", None)
     if overlay is None or not overlay.is_open:
@@ -538,47 +574,41 @@ def _draw_overlay():
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
     gpu.state.blend_set('ALPHA')
 
-    panel_w = min(width - 64, 980)
-    panel_h = min(height - 64, 720)
-    inner_x0 = (width - panel_w) * 0.5
-    inner_y0 = (height - panel_h) * 0.5
+    panel_w = min(max(state.panel_width, 420.0), width - 32)
+    panel_h = min(max(state.panel_height, 320.0), height - 32)
+    inner_x0 = (width - panel_w) * 0.5 + state.panel_offset_x
+    inner_y0 = (height - panel_h) * 0.5 + state.panel_offset_y
+    inner_x0 = max(8, min(width - panel_w - 8, inner_x0))
+    inner_y0 = max(8, min(height - panel_h - 8, inner_y0))
     inner_x1 = inner_x0 + panel_w
     inner_y1 = inner_y0 + panel_h
-    _rounded_rect(shader, inner_x0, inner_y0, inner_x1, inner_y1, 16, (0.045, 0.045, 0.055, 0.94))
+    _rounded_rect(shader, inner_x0 + 5, inner_y0 - 5, inner_x1 + 5, inner_y1 - 5, 12, (0.0, 0.0, 0.0, 0.28))
+    _rounded_rect(shader, inner_x0, inner_y0, inner_x1, inner_y1, 12, (0.105, 0.105, 0.115, 0.94))
+    _rounded_rect(shader, inner_x0 + 1, inner_y0 + 1, inner_x1 - 1, inner_y1 - 1, 11, (0.15, 0.15, 0.165, 0.34))
 
-    font_id = 0
-    selected_ids = get_selected_library_entry_ids(state)
-    blf.size(font_id, 18)
-    blf.color(font_id, 0.96, 0.97, 1.0, 1.0)
-    blf.position(font_id, inner_x0 + 22, inner_y1 - 34, 0)
-    blf.draw(font_id, f"头发库  {len(state.entries)}")
+    drag_h = 34
+    _overlay_drag_bounds = (inner_x0, inner_y1 - drag_h, inner_x1, inner_y1)
+    _rounded_rect(shader, inner_x0, inner_y1 - drag_h, inner_x1, inner_y1, 12, (0.16, 0.16, 0.175, 0.96))
+    blf.size(0, 12)
+    blf.color(0, 0.72, 0.74, 0.78, 0.92)
+    blf.position(0, inner_x0 + 18, inner_y1 - 23, 0)
+    blf.draw(0, "FiguHair Library")
 
-    def draw_button(key, label, x1):
-        bw = 88
-        bh = 28
-        x0 = x1 - bw
-        y0 = inner_y1 - 42
-        y1 = y0 + bh
-        _overlay_button_bounds.append((x0, y0, x1, y1, key))
-        _rounded_rect(shader, x0, y0, x1, y1, 7, (0.16, 0.18, 0.22, 0.95))
-        blf.size(font_id, 12)
-        blf.color(font_id, 0.92, 0.94, 0.98, 1.0)
-        blf.position(font_id, x0 + 13, y0 + 8, 0)
-        blf.draw(font_id, label)
-        return x0 - 8
+    resize_size = 22
+    _overlay_resize_bounds = (inner_x1 - resize_size, inner_y0, inner_x1, inner_y0 + resize_size)
+    for i in range(3):
+        x0 = inner_x1 - 6 - i * 6
+        y0 = inner_y0 + 5
+        x1 = inner_x1 - 4
+        y1 = inner_y0 + 7 + i * 6
+        _rounded_rect(shader, x0, y0, x1, y1, 1, (0.56, 0.58, 0.62, 0.78))
 
-    bx = inner_x1 - 18
-    bx = draw_button("close", "关闭", bx)
-    bx = draw_button("import", "确定", bx)
-    bx = draw_button("delete", "删除选中", bx)
-    draw_button("folder", "文件夹", bx)
-
-    grid_x0 = inner_x0 + 24
-    grid_x1 = inner_x1 - 24
-    grid_y0 = inner_y0 + 24
-    grid_y1 = inner_y1 - 62
-    gap = 14
-    card_size = 126
+    grid_x0 = inner_x0 + 18
+    grid_x1 = inner_x1 - 18
+    grid_y0 = inner_y0 + 18
+    grid_y1 = inner_y1 - drag_h - 14
+    gap = 18
+    card_size = 220
     cols = max(1, int((grid_x1 - grid_x0 + gap) // (card_size + gap)))
     total_rows = max(1, math.ceil(len(state.entries) / cols))
     content_h = total_rows * card_size + (total_rows - 1) * gap
@@ -586,6 +616,10 @@ def _draw_overlay():
     max_scroll = max(0.0, content_h - view_h)
     state.scroll_offset = min(max(getattr(state, 'scroll_offset', 0.0), 0.0), max_scroll)
     y_start = grid_y1 - card_size + state.scroll_offset
+
+    font_id = 0
+    gpu.state.scissor_test_set(True)
+    gpu.state.scissor_set(int(grid_x0), int(grid_y0), int(grid_x1 - grid_x0), int(grid_y1 - grid_y0))
 
     for idx, entry in enumerate(state.entries):
         col = idx % cols
@@ -596,28 +630,28 @@ def _draw_overlay():
         y1 = y0 + card_size
         if y1 < grid_y0 or y0 > grid_y1:
             continue
-        is_selected = entry.entry_id in selected_ids
         _overlay_bounds.append((x0, y0, x1, y1, idx))
-        bg = (0.115, 0.12, 0.14, 0.98)
-        border = (1.0, 0.62, 0.08, 1.0) if is_selected else (0.25, 0.27, 0.31, 0.95)
-        _rounded_rect(shader, x0, y0, x1, y1, 10, border)
-        _rounded_rect(shader, x0 + 3, y0 + 3, x1 - 3, y1 - 3, 8, bg)
-        thumb_image = _load_thumbnail_image(entry.thumbnail_path)
-        if not _draw_image_rect(thumb_image, x0 + 8, y0 + 8, x1 - 8, y1 - 8):
-            _rounded_rect(shader, x0 + 8, y0 + 8, x1 - 8, y1 - 8, 7, (0.075, 0.08, 0.095, 1.0))
+        _rounded_rect(shader, x0, y0, x1, y1, 8, (0.08, 0.08, 0.09, 0.88))
+        thumb_image = _load_thumbnail_image(get_thumbnail_path_for_blend(entry.blend_path))
+        if not _draw_image_rect(thumb_image, x0 + 4, y0 + 4, x1 - 4, y1 - 4):
+            _rounded_rect(shader, x0 + 4, y0 + 4, x1 - 4, y1 - 4, 6, (0.075, 0.08, 0.095, 1.0))
+            label = "无缩略图"
             blf.size(font_id, 12)
+            text_w, text_h = blf.dimensions(font_id, label)
             blf.color(font_id, 0.56, 0.60, 0.68, 0.9)
-            blf.position(font_id, x0 + 35, y0 + card_size * 0.5 - 5, 0)
-            blf.draw(font_id, "无缩略图")
+            blf.position(font_id, x0 + (card_size - text_w) * 0.5, y0 + (card_size - text_h) * 0.5, 0)
+            blf.draw(font_id, label)
+
+    gpu.state.scissor_test_set(False)
 
     if max_scroll > 1e-3:
-        track_x0 = inner_x1 - 14
-        track_x1 = inner_x1 - 8
-        _rounded_rect(shader, track_x0, grid_y0, track_x1, grid_y1, 3, (0.12, 0.13, 0.15, 0.9))
+        track_x0 = inner_x1 - 12
+        track_x1 = inner_x1 - 6
+        _rounded_rect(shader, track_x0, grid_y0, track_x1, grid_y1, 3, (0.18, 0.18, 0.20, 1.0))
         thumb_h = max(36, view_h * min(1.0, view_h / content_h))
         thumb_y1 = grid_y1 - (state.scroll_offset / max_scroll) * (view_h - thumb_h)
         thumb_y0 = thumb_y1 - thumb_h
-        _rounded_rect(shader, track_x0, thumb_y0, track_x1, thumb_y1, 3, (0.55, 0.58, 0.64, 0.95))
+        _rounded_rect(shader, track_x0, thumb_y0, track_x1, thumb_y1, 3, (0.58, 0.58, 0.62, 1.0))
 
     gpu.state.blend_set('NONE')
 
@@ -667,49 +701,87 @@ class HAIRPIPE_OT_library_overlay_toggle(bpy.types.Operator):
                 context.area.tag_redraw()
             return {'FINISHED'}
         if event.type == 'WHEELUPMOUSE':
-            overlay.scroll_offset = max(0.0, overlay.scroll_offset - 54.0)
+            overlay.scroll_offset = max(0.0, overlay.scroll_offset - 72.0)
             if context.area:
                 context.area.tag_redraw()
             return {'RUNNING_MODAL'}
         if event.type == 'WHEELDOWNMOUSE':
-            overlay.scroll_offset += 54.0
+            overlay.scroll_offset += 72.0
             if context.area:
                 context.area.tag_redraw()
             return {'RUNNING_MODAL'}
+        if overlay.is_dragging and event.type == 'MOUSEMOVE':
+            overlay.panel_offset_x = overlay.drag_start_panel_x + (event.mouse_region_x - overlay.drag_start_mouse_x)
+            overlay.panel_offset_y = overlay.drag_start_panel_y + (event.mouse_region_y - overlay.drag_start_mouse_y)
+            if context.area:
+                context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+        if overlay.is_resizing and event.type == 'MOUSEMOVE':
+            new_width = max(420.0, overlay.resize_start_width + (event.mouse_region_x - overlay.drag_start_mouse_x))
+            new_height = max(320.0, overlay.resize_start_height - (event.mouse_region_y - overlay.drag_start_mouse_y))
+            overlay.panel_width = new_width
+            overlay.panel_height = new_height
+            if context.region:
+                region_w = context.region.width
+                region_h = context.region.height
+                overlay.panel_offset_x = overlay.resize_anchor_left - (region_w - new_width) * 0.5
+                overlay.panel_offset_y = overlay.resize_anchor_top - new_height - (region_h - new_height) * 0.5
+            if context.area:
+                context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+        if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
+            overlay.is_dragging = False
+            overlay.is_resizing = False
+            return {'RUNNING_MODAL'}
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
-            x = event.mouse_region_x
-            y = event.mouse_region_y
-            for x0, y0, x1, y1, key in _overlay_button_bounds:
-                if x0 <= x <= x1 and y0 <= y <= y1:
-                    if key == "close":
-                        overlay.is_open = False
-                        remove_draw_handler()
-                        if context.area:
-                            context.area.tag_redraw()
-                        return {'FINISHED'}
-                    if key == "folder":
-                        bpy.ops.hair_pipe.library_open_folder()
-                    elif key == "delete":
-                        bpy.ops.hair_pipe.library_delete_selected()
-                    elif key == "import":
-                        selected_ids = get_selected_library_entry_ids(overlay)
-                        for entry_id in selected_ids:
-                            append_hair_from_library(context, entry_id)
-                        overlay.is_open = False
-                        remove_draw_handler()
-                        if context.area:
-                            context.area.tag_redraw()
-                        return {'FINISHED'}
-                    if context.area:
-                        context.area.tag_redraw()
+            inside_window = False
+            if _overlay_resize_bounds is not None:
+                x0, y0, x1, y1 = _overlay_resize_bounds
+                if x0 <= event.mouse_region_x <= x1 and y0 <= event.mouse_region_y <= y1:
+                    overlay.is_resizing = True
+                    overlay.drag_start_mouse_x = event.mouse_region_x
+                    overlay.drag_start_mouse_y = event.mouse_region_y
+                    overlay.resize_start_width = overlay.panel_width
+                    overlay.resize_start_height = overlay.panel_height
+                    if _overlay_drag_bounds is not None:
+                        left, _bar_bottom, _right, top = _overlay_drag_bounds
+                        overlay.resize_anchor_left = left
+                        overlay.resize_anchor_top = top
                     return {'RUNNING_MODAL'}
-            idx = _find_entry_from_pos(x, y)
+            if _overlay_drag_bounds is not None:
+                x0, y0, x1, y1 = _overlay_drag_bounds
+                if x0 <= event.mouse_region_x <= x1 and y0 <= event.mouse_region_y <= y1:
+                    inside_window = True
+                    overlay.is_dragging = True
+                    overlay.drag_start_mouse_x = event.mouse_region_x
+                    overlay.drag_start_mouse_y = event.mouse_region_y
+                    overlay.drag_start_panel_x = overlay.panel_offset_x
+                    overlay.drag_start_panel_y = overlay.panel_offset_y
+                    return {'RUNNING_MODAL'}
+            idx = _find_entry_from_pos(event.mouse_region_x, event.mouse_region_y)
             if idx >= 0 and idx < len(overlay.entries):
-                toggle_selected_library_entry(overlay, overlay.entries[idx].entry_id)
+                append_hair_from_library(context, overlay.entries[idx].entry_id)
+                overlay.is_open = False
+                remove_draw_handler()
                 if context.area:
                     context.area.tag_redraw()
-                return {'RUNNING_MODAL'}
+                return {'FINISHED'}
+            if _overlay_drag_bounds is not None:
+                x0, _y0, x1, y1 = _overlay_drag_bounds
+                panel_left = x0
+                panel_right = x1
+                panel_top = y1
+                panel_bottom = min(y for _x0, y, _x1, _y1, _idx in _overlay_bounds) if _overlay_bounds else y1 - overlay.panel_height
+                inside_window = panel_left <= event.mouse_region_x <= panel_right and panel_bottom <= event.mouse_region_y <= panel_top
+            if not inside_window:
+                overlay.is_open = False
+                remove_draw_handler()
+                if context.area:
+                    context.area.tag_redraw()
+                return {'PASS_THROUGH'}
             return {'RUNNING_MODAL'}
+        if event.type in {'MIDDLEMOUSE', 'RIGHTMOUSE', 'LEFTMOUSE'}:
+            return {'PASS_THROUGH'}
         return {'RUNNING_MODAL'}
 
 
@@ -854,21 +926,23 @@ class HAIRPIPE_OT_library_paste_thumbnail(bpy.types.Operator):
 
     def execute(self, context):
         state = context.window_manager.hair_pipe_library_state
-        preview_path = os.path.join(get_library_root(), "pending_thumbnail.png")
-        if os.path.exists(preview_path):
-            try:
-                os.remove(preview_path)
-            except Exception:
-                pass
+        preview_path = os.path.join(get_asset_dir(), f"pending_thumbnail_{int(time.time() * 1000)}.png")
         if not _save_clipboard_thumbnail_to_path(preview_path):
             self.report({'ERROR'}, "没有读取到剪贴板图片")
             return {'CANCELLED'}
+        old_preview_path = bpy.path.abspath(state.pending_thumbnail_path) if state.pending_thumbnail_path else ""
         state.pending_thumbnail_path = preview_path
+        if old_preview_path and os.path.exists(old_preview_path) and os.path.basename(old_preview_path).startswith("pending_thumbnail_"):
+            try:
+                os.remove(old_preview_path)
+            except Exception:
+                pass
         if _library_previews is not None:
             try:
                 _library_previews.clear()
             except Exception:
                 pass
+        _image_cache.pop(preview_path, None)
         return {'FINISHED'}
 
 
@@ -922,6 +996,11 @@ class HAIRPIPE_OT_library_save_current(bpy.types.Operator):
         if entry_id is None:
             self.report({'ERROR'}, "无法保存当前头发")
             return {'CANCELLED'}
+        if thumbnail_path and os.path.exists(thumbnail_path) and os.path.basename(thumbnail_path).startswith("pending_thumbnail_"):
+            try:
+                os.remove(thumbnail_path)
+            except Exception:
+                pass
         state.pending_thumbnail_path = ""
         sync_state_entries(context.window_manager.hair_pipe_library_state)
         sync_overlay_entries(context.window_manager.hair_pipe_library_overlay)
