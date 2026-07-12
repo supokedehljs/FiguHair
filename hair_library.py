@@ -215,6 +215,33 @@ def get_curve_bundle_objects(curve_obj):
     return [obj for obj in objs if obj is not None]
 
 
+def get_selected_hair_bundle_objects(context):
+    from .operators import get_figuhair_root
+
+    selected = list(context.selected_objects or [])
+    curve_objs = []
+    for obj in selected:
+        if obj.type == 'CURVE' and get_figuhair_root(obj) is not None:
+            curve_objs.append(obj)
+        elif obj.type == 'EMPTY' and obj.get("hair_pipe_root"):
+            curve_obj = next((child for child in obj.children_recursive if child.type == 'CURVE' and get_figuhair_root(child) == obj), None)
+            if curve_obj is not None:
+                curve_objs.append(curve_obj)
+
+    active = context.active_object
+    if not curve_objs and active is not None and active.type == 'CURVE':
+        curve_objs.append(active)
+
+    bundle = []
+    seen = set()
+    for curve_obj in curve_objs:
+        for obj in get_curve_bundle_objects(curve_obj):
+            if obj.name not in seen:
+                seen.add(obj.name)
+                bundle.append(obj)
+    return bundle
+
+
 def _save_clipboard_thumbnail_with_powershell(target_path):
     if os.name != 'nt':
         return False
@@ -318,10 +345,7 @@ def _copy_thumbnail_to_path(source_path, target_path):
 
 
 def save_current_hair_to_library(context, entry_name, thumbnail_source_path=""):
-    curve_obj = context.active_object
-    if curve_obj is None or curve_obj.type != 'CURVE':
-        return None
-    bundle = get_curve_bundle_objects(curve_obj)
+    bundle = get_selected_hair_bundle_objects(context)
     if not bundle:
         return None
 
@@ -608,7 +632,7 @@ def _draw_overlay():
     grid_y0 = inner_y0 + 18
     grid_y1 = inner_y1 - drag_h - 14
     card_size = max(96, min(360, 220 * state.card_scale))
-    gap = max(10, min(28, 18 * state.card_scale))
+    gap = max(6, min(16, 10 * state.card_scale))
     cols = max(1, int((grid_x1 - grid_x0 + gap) // (card_size + gap)))
     total_rows = max(1, math.ceil(len(state.entries) / cols))
     content_h = total_rows * card_size + (total_rows - 1) * gap
@@ -631,10 +655,9 @@ def _draw_overlay():
         if y1 < grid_y0 or y0 > grid_y1:
             continue
         _overlay_bounds.append((x0, y0, x1, y1, idx))
-        _rounded_rect(shader, x0, y0, x1, y1, 8, (0.08, 0.08, 0.09, 0.88))
         thumb_image = _load_thumbnail_image(get_thumbnail_path_for_blend(entry.blend_path))
-        if not _draw_image_rect(thumb_image, x0 + 4, y0 + 4, x1 - 4, y1 - 4):
-            _rounded_rect(shader, x0 + 4, y0 + 4, x1 - 4, y1 - 4, 6, (0.075, 0.08, 0.095, 1.0))
+        if not _draw_image_rect(thumb_image, x0, y0, x1, y1):
+            _rounded_rect(shader, x0, y0, x1, y1, 14, (0.075, 0.08, 0.095, 1.0))
             label = "无缩略图"
             blf.size(font_id, 12)
             text_w, text_h = blf.dimensions(font_id, label)
@@ -983,6 +1006,8 @@ class HAIRPIPE_OT_library_save_current(bpy.types.Operator):
     def draw(self, context):
         layout = self.layout
         state = context.window_manager.hair_pipe_library_state
+        bundle_count = len(get_selected_hair_bundle_objects(context))
+        layout.label(text=f"将保存 {bundle_count} 个对象到同一个卡片", icon='INFO')
         layout.prop(self, "entry_name", text="名字")
         box = layout.box()
         row = box.row(align=True)
