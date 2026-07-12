@@ -696,56 +696,6 @@ def draw_active_pipe_cross_section_ring(context, ps):
         if selected_points:
             draw_circle_points(shader, selected_points, (1.0, 1.0, 0.15, 1.0), 4.2, segments=18)
 
-        top_point = None
-        left_point = None
-        top_idx = -1
-        left_idx = -1
-        for idx, point in enumerate(projected):
-            if idx >= len(point_setting.cross_section_verts) or getattr(point_setting.cross_section_verts[idx], 'is_ghost', False):
-                continue
-            if top_point is None or point[1] > top_point[1]:
-                top_point = point
-                top_idx = idx
-            if left_point is None or point[0] < left_point[0]:
-                left_point = point
-                left_idx = idx
-        if top_point is not None:
-            marker_radius = 7.0 if is_active_ring else 6.0
-            draw_circle_points(shader, [top_point], (0.0, 1.0, 0.2, 1.0), marker_radius, segments=24)
-            draw_circle_outline(shader, [top_point], (0.02, 0.05, 0.02, 1.0), marker_radius + 2.2, segments=28, line_width=2.0)
-            marker_lines = [
-                (top_point[0] - 10.0, top_point[1]), (top_point[0] + 10.0, top_point[1]),
-                (top_point[0], top_point[1] - 10.0), (top_point[0], top_point[1] + 10.0),
-            ]
-            gpu.state.line_width_set(2.2)
-            batch = batch_for_shader(shader, 'LINES', {"pos": marker_lines})
-            shader.bind()
-            shader.uniform_float("color", (0.0, 1.0, 0.2, 1.0))
-            batch.draw(shader)
-            font_id = 0
-            blf.size(font_id, 13)
-            blf.color(font_id, 0.0, 1.0, 0.2, 1.0)
-            blf.position(font_id, top_point[0] + 11.0, top_point[1] + 8.0, 0)
-            blf.draw(font_id, f"TOP {top_idx}")
-        if left_point is not None:
-            marker_radius = 7.0 if is_active_ring else 6.0
-            draw_circle_points(shader, [left_point], (0.15, 0.55, 1.0, 1.0), marker_radius, segments=24)
-            draw_circle_outline(shader, [left_point], (0.02, 0.04, 0.08, 1.0), marker_radius + 2.2, segments=28, line_width=2.0)
-            marker_lines = [
-                (left_point[0] - 10.0, left_point[1]), (left_point[0] + 10.0, left_point[1]),
-                (left_point[0], left_point[1] - 10.0), (left_point[0], left_point[1] + 10.0),
-            ]
-            gpu.state.line_width_set(2.2)
-            batch = batch_for_shader(shader, 'LINES', {"pos": marker_lines})
-            shader.bind()
-            shader.uniform_float("color", (0.15, 0.55, 1.0, 1.0))
-            batch.draw(shader)
-            font_id = 0
-            blf.size(font_id, 13)
-            blf.color(font_id, 0.15, 0.55, 1.0, 1.0)
-            blf.position(font_id, left_point[0] + 11.0, left_point[1] - 18.0, 0)
-            blf.draw(font_id, f"LEFT {left_idx}")
-
     gpu.state.point_size_set(1.0)
     gpu.state.line_width_set(1.0)
     gpu.state.blend_set('NONE')
@@ -1718,26 +1668,26 @@ def get_view_alignment_angle(context):
     return -math.pi / 2.0 - math.atan2(direction.y, direction.x)
 
 
-def get_active_view_extreme_cross_section_indices(context, ps):
+def get_active_view_cross_section_projection(context, ps):
     region = context.region
     region_data = context.region_data
     obj = context.active_object
     if region is None or region_data is None or obj is None or obj.type != 'CURVE':
-        return -1, -1
+        return []
     segments = len(ps.cross_section_verts)
     if segments < 3:
-        return -1, -1
+        return []
 
     try:
         mesh_verts, _faces = generate_pipe_mesh(obj, obj.hair_pipe_settings)
     except Exception:
-        return -1, -1
+        return []
     if not mesh_verts or len(mesh_verts) < segments:
-        return -1, -1
+        return []
 
     active_center = get_active_curve_point_world_position(context)
     if active_center is None:
-        return -1, -1
+        return []
 
     best_start = None
     best_dist = None
@@ -1750,59 +1700,87 @@ def get_active_view_extreme_cross_section_indices(context, ps):
             best_dist = dist
             best_start = start
     if best_start is None:
-        return -1, -1
+        return []
 
-    top_idx = -1
-    left_idx = -1
-    top_point = None
-    left_point = None
+    projected = []
     for idx, vert in enumerate(mesh_verts[best_start:best_start + segments]):
         if idx >= len(ps.cross_section_verts) or getattr(ps.cross_section_verts[idx], 'is_ghost', False):
             continue
         screen_pos = view3d_utils.location_3d_to_region_2d(region, region_data, obj.matrix_world @ Vector(vert))
         if screen_pos is None:
             continue
-        point = (screen_pos.x, screen_pos.y)
-        if top_point is None or point[1] > top_point[1]:
+        projected.append((idx, screen_pos.x, screen_pos.y))
+    return projected
+
+
+def get_active_view_extreme_cross_section_indices(context, ps):
+    projected = get_active_view_cross_section_projection(context, ps)
+    top_idx = -1
+    left_idx = -1
+    top_point = None
+    left_point = None
+    for idx, x, y in projected:
+        point = (x, y)
+        if top_point is None or y > top_point[1]:
             top_point = point
             top_idx = idx
-        if left_point is None or point[0] < left_point[0]:
+        if left_point is None or x < left_point[0]:
             left_point = point
             left_idx = idx
     return top_idx, left_idx
 
 
+def normalize_indexed_points(points):
+    if not points:
+        return {}, 1.0
+    cx = sum(point[1] for point in points) / len(points)
+    cy = sum(point[2] for point in points) / len(points)
+    centered = [(idx, x - cx, y - cy) for idx, x, y in points]
+    scale = max((math.sqrt(x * x + y * y) for _idx, x, y in centered), default=1.0)
+    if scale < 1e-8:
+        scale = 1.0
+    return {idx: (x / scale, y / scale) for idx, x, y in centered}, scale
+
+
 def get_auto_widget_alignment_from_view(context, ps):
-    top_idx, left_idx = get_active_view_extreme_cross_section_indices(context, ps)
+    view_points = get_active_view_cross_section_projection(context, ps)
     verts = ps.cross_section_verts
     real_indices = [idx for idx, vert in enumerate(verts) if not getattr(vert, 'is_ghost', False)]
-    if top_idx < 0 or left_idx < 0 or top_idx >= len(verts) or left_idx >= len(verts) or len(real_indices) < 3:
+    view_map, _view_scale = normalize_indexed_points(view_points)
+    shared_indices = [idx for idx in real_indices if idx in view_map]
+    if len(shared_indices) < 3:
         return get_view_alignment_angle(context), False
 
-    def transformed_points(angle, flip_h):
+    top_idx = max(shared_indices, key=lambda idx: view_map[idx][1])
+    left_idx = min(shared_indices, key=lambda idx: view_map[idx][0])
+
+    def widget_map(angle, flip_h):
         points = []
-        for idx in real_indices:
+        for idx in shared_indices:
             x, y = get_raw_offset(verts[idx])
             rx, ry = rotate_2d(x, y, angle)
             if flip_h:
                 rx = -rx
             points.append((idx, rx, ry))
-        return points
+        normalized, _scale = normalize_indexed_points(points)
+        return normalized
 
     def alignment_score(angle, flip_h):
-        points = transformed_points(angle, flip_h)
-        max_y = max(point[2] for point in points)
-        min_x = min(point[1] for point in points)
-        top_point = next((point for point in points if point[0] == top_idx), None)
-        left_point = next((point for point in points if point[0] == left_idx), None)
-        if top_point is None or left_point is None:
+        candidate = widget_map(angle, flip_h)
+        if len(candidate) != len(shared_indices):
             return float('inf')
-        span = max(
-            max(point[1] for point in points) - min_x,
-            max_y - min(point[2] for point in points),
-            1e-8,
-        )
-        return ((max_y - top_point[2]) / span) ** 2 + ((left_point[1] - min_x) / span) ** 2
+        shape_error = 0.0
+        for idx in shared_indices:
+            vx, vy = view_map[idx]
+            wx, wy = candidate[idx]
+            shape_error += (wx - vx) ** 2 + (wy - vy) ** 2
+        shape_error /= max(1, len(shared_indices))
+
+        max_y = max(candidate[idx][1] for idx in shared_indices)
+        min_x = min(candidate[idx][0] for idx in shared_indices)
+        top_error = (max_y - candidate[top_idx][1]) ** 2
+        left_error = (candidate[left_idx][0] - min_x) ** 2
+        return shape_error + (top_error + left_error) * 0.35
 
     best_angle = 0.0
     best_flip = False
@@ -1816,13 +1794,22 @@ def get_auto_widget_alignment_from_view(context, ps):
                 best_angle = angle
                 best_flip = flip_h
 
-    refine_start = best_angle - math.radians(2.0)
-    for step in range(41):
-        angle = refine_start + math.radians(step * 0.1)
-        score = alignment_score(angle, best_flip)
-        if score < best_score:
-            best_score = score
-            best_angle = angle
+    step_size = math.radians(0.1)
+    search_radius = math.radians(2.0)
+    for _ in range(3):
+        improved_angle = best_angle
+        improved_score = best_score
+        steps = max(1, int(search_radius / step_size))
+        for step in range(-steps, steps + 1):
+            angle = best_angle + step * step_size
+            score = alignment_score(angle, best_flip)
+            if score < improved_score:
+                improved_score = score
+                improved_angle = angle
+        best_angle = improved_angle
+        best_score = improved_score
+        search_radius *= 0.25
+        step_size *= 0.25
 
     return best_angle, best_flip
 
