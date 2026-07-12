@@ -99,6 +99,9 @@ class HairPipeWidgetSettings(PropertyGroup):
     scale_start_x: FloatProperty(default=0.0)
     scale_start_y: FloatProperty(default=0.0)
     scale_start_factor: FloatProperty(default=1.0)
+    auto_alignment_angle: FloatProperty(default=0.0)
+    auto_alignment_flip_h: BoolProperty(default=False)
+    auto_alignment_initialized: BoolProperty(default=False)
     rotate_initial_offsets: bpy.props.StringProperty(default="")
     rotate_button_x0: FloatProperty(default=0.0)
     rotate_button_y0: FloatProperty(default=0.0)
@@ -523,9 +526,6 @@ def draw_active_pipe_cross_section_ring(context, ps):
     obj = context.active_object
     if region is None or region_data is None or obj is None or obj.type != 'CURVE':
         return
-    center = get_active_curve_point_world_position(context)
-    if center is None:
-        return
     if len(ps.cross_section_verts) < 3:
         return
 
@@ -540,19 +540,43 @@ def draw_active_pipe_cross_section_ring(context, ps):
     if segments < 3 or len(mesh_verts) < segments:
         return
 
-    world_center = center
-    best_start = None
-    best_dist = None
+    selected_curve_indices = get_selected_curve_point_indices(obj) if is_curve_edit_mode(obj) else []
+    active_idx = obj.hair_pipe_settings.active_point_index
+    if active_idx not in selected_curve_indices:
+        selected_curve_indices.append(active_idx)
+
+    control_positions = []
+    for spline_data in get_curve_points_data(obj):
+        for point_data in spline_data.get('points', []):
+            control_positions.append(obj.matrix_world @ point_data['co'])
+
+    ring_candidates = []
     for start in range(0, len(mesh_verts) - segments + 1, segments):
         ring = mesh_verts[start:start + segments]
         ring_center = sum((Vector(v) for v in ring), Vector((0.0, 0.0, 0.0))) / segments
-        ring_center_world = obj.matrix_world @ ring_center
-        dist = (ring_center_world - world_center).length
-        if best_dist is None or dist < best_dist:
-            best_dist = dist
-            best_start = start
+        ring_candidates.append((start, obj.matrix_world @ ring_center))
 
-    if best_start is None:
+    selected_ring_starts = []
+    used_starts = set()
+    for point_idx in selected_curve_indices:
+        if not (0 <= point_idx < len(control_positions)):
+            continue
+        point_setting = obj.hair_pipe_settings.point_settings[point_idx] if point_idx < len(obj.hair_pipe_settings.point_settings) else None
+        if point_setting is not None and is_transition_point(point_setting):
+            continue
+        world_center = control_positions[point_idx]
+        best_start = None
+        best_dist = None
+        for start, ring_center_world in ring_candidates:
+            dist = (ring_center_world - world_center).length
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_start = start
+        if best_start is not None and best_start not in used_starts:
+            selected_ring_starts.append((point_idx, best_start))
+            used_starts.add(best_start)
+
+    if not selected_ring_starts:
         return
 
     wd = context.window_manager.hair_pipe_widget
@@ -566,6 +590,8 @@ def draw_active_pipe_cross_section_ring(context, ps):
         start = ring_idx * segments
         ring_world = [obj.matrix_world @ Vector(vert) for vert in mesh_verts[start:start + segments]]
         if len(ring_world) != segments:
+            projected_rings.append(None)
+            front_masks.append(None)
             continue
         ring_center = sum(ring_world, Vector((0.0, 0.0, 0.0))) / segments
         projected = []
@@ -576,6 +602,8 @@ def draw_active_pipe_cross_section_ring(context, ps):
                 break
             projected.append((screen_pos.x, screen_pos.y))
         if len(projected) != segments:
+            projected_rings.append(None)
+            front_masks.append(None)
             continue
         projected_rings.append(projected)
         front_masks.append([(world_pos - ring_center).dot(camera_dir) >= 0.0 for world_pos in ring_world])
@@ -585,7 +613,8 @@ def draw_active_pipe_cross_section_ring(context, ps):
 
     if show_full_grid:
         grid_lines = []
-        for ring, front_mask in zip(projected_rings, front_masks):
+        valid_projected = [(ring, mask) for ring, mask in zip(projected_rings, front_masks) if ring is not None and mask is not None]
+        for ring, front_mask in valid_projected:
             for idx, point in enumerate(ring):
                 next_idx = (idx + 1) % len(ring)
                 if front_mask[idx] or front_mask[next_idx]:
@@ -596,6 +625,8 @@ def draw_active_pipe_cross_section_ring(context, ps):
             next_ring = projected_rings[ring_idx + 1]
             mask = front_masks[ring_idx]
             next_mask = front_masks[ring_idx + 1]
+            if ring is None or next_ring is None or mask is None or next_mask is None:
+                continue
             for idx in range(min(len(ring), len(next_ring))):
                 if mask[idx] or next_mask[idx]:
                     grid_lines.append(ring[idx])
@@ -609,12 +640,12 @@ def draw_active_pipe_cross_section_ring(context, ps):
             batch.draw(shader)
 
     selected_indices = {idx for idx in get_selected_widget_verts(wd) if 0 <= idx < segments}
-    if selected_indices and projected_rings:
+    if selected_indices and any(ring is not None for ring in projected_rings):
         highlight_lines = []
         for selected_idx in sorted(selected_indices):
             previous_point = None
             for ring in projected_rings:
-                if selected_idx >= len(ring):
+                if ring is None or selected_idx >= len(ring):
                     continue
                 point = ring[selected_idx]
                 if previous_point is not None:
@@ -628,42 +659,92 @@ def draw_active_pipe_cross_section_ring(context, ps):
             shader.uniform_float("color", (1.0, 0.55, 0.0, 0.95))
             batch.draw(shader)
 
-    ring_world = [obj.matrix_world @ Vector(v) for v in mesh_verts[best_start:best_start + segments]]
-    projected = []
-    for world_pos in ring_world:
-        screen_pos = view3d_utils.location_3d_to_region_2d(region, region_data, world_pos)
-        if screen_pos is None:
-            return
-        projected.append((screen_pos.x, screen_pos.y))
-
-    lines = []
-    for idx, point in enumerate(projected):
-        lines.append(point)
-        lines.append(projected[(idx + 1) % len(projected)])
-
-    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
-    gpu.state.blend_set('ALPHA')
-    if lines:
-        gpu.state.line_width_set(2.0)
-        batch = batch_for_shader(shader, 'LINES', {"pos": lines})
-        shader.bind()
-        shader.uniform_float("color", (1.0, 0.55, 0.0, 1.0))
-        batch.draw(shader)
-
-    selected_indices = get_selected_widget_verts(wd)
-    normal_points = []
-    selected_points = []
-    for idx, point in enumerate(projected):
-        if idx >= len(ps.cross_section_verts) or getattr(ps.cross_section_verts[idx], 'is_ghost', False):
+    widget_selected_indices = get_selected_widget_verts(wd)
+    for point_idx, ring_start in selected_ring_starts:
+        ring_idx = ring_start // segments
+        if ring_idx >= len(projected_rings):
             continue
-        if idx in selected_indices:
-            selected_points.append(point)
-        else:
-            normal_points.append(point)
-    if normal_points:
-        draw_circle_points(shader, normal_points, (1.0, 0.55, 0.0, 0.95), 3.4, segments=18)
-    if selected_points:
-        draw_circle_points(shader, selected_points, (1.0, 1.0, 0.15, 1.0), 4.2, segments=18)
+        projected = projected_rings[ring_idx]
+        if projected is None:
+            continue
+
+        lines = []
+        for idx, point in enumerate(projected):
+            lines.append(point)
+            lines.append(projected[(idx + 1) % len(projected)])
+
+        is_active_ring = point_idx == active_idx
+        if lines:
+            gpu.state.line_width_set(2.4 if is_active_ring else 1.8)
+            batch = batch_for_shader(shader, 'LINES', {"pos": lines})
+            shader.bind()
+            shader.uniform_float("color", (1.0, 0.55, 0.0, 1.0) if is_active_ring else (1.0, 0.78, 0.05, 0.78))
+            batch.draw(shader)
+
+        point_setting = obj.hair_pipe_settings.point_settings[point_idx] if point_idx < len(obj.hair_pipe_settings.point_settings) else ps
+        normal_points = []
+        selected_points = []
+        for idx, point in enumerate(projected):
+            if idx >= len(point_setting.cross_section_verts) or getattr(point_setting.cross_section_verts[idx], 'is_ghost', False):
+                continue
+            if is_active_ring and idx in widget_selected_indices:
+                selected_points.append(point)
+            else:
+                normal_points.append(point)
+        if normal_points:
+            draw_circle_points(shader, normal_points, (1.0, 0.55, 0.0, 0.95) if is_active_ring else (1.0, 0.78, 0.05, 0.72), 3.4 if is_active_ring else 3.0, segments=18)
+        if selected_points:
+            draw_circle_points(shader, selected_points, (1.0, 1.0, 0.15, 1.0), 4.2, segments=18)
+
+        top_point = None
+        left_point = None
+        top_idx = -1
+        left_idx = -1
+        for idx, point in enumerate(projected):
+            if idx >= len(point_setting.cross_section_verts) or getattr(point_setting.cross_section_verts[idx], 'is_ghost', False):
+                continue
+            if top_point is None or point[1] > top_point[1]:
+                top_point = point
+                top_idx = idx
+            if left_point is None or point[0] < left_point[0]:
+                left_point = point
+                left_idx = idx
+        if top_point is not None:
+            marker_radius = 7.0 if is_active_ring else 6.0
+            draw_circle_points(shader, [top_point], (0.0, 1.0, 0.2, 1.0), marker_radius, segments=24)
+            draw_circle_outline(shader, [top_point], (0.02, 0.05, 0.02, 1.0), marker_radius + 2.2, segments=28, line_width=2.0)
+            marker_lines = [
+                (top_point[0] - 10.0, top_point[1]), (top_point[0] + 10.0, top_point[1]),
+                (top_point[0], top_point[1] - 10.0), (top_point[0], top_point[1] + 10.0),
+            ]
+            gpu.state.line_width_set(2.2)
+            batch = batch_for_shader(shader, 'LINES', {"pos": marker_lines})
+            shader.bind()
+            shader.uniform_float("color", (0.0, 1.0, 0.2, 1.0))
+            batch.draw(shader)
+            font_id = 0
+            blf.size(font_id, 13)
+            blf.color(font_id, 0.0, 1.0, 0.2, 1.0)
+            blf.position(font_id, top_point[0] + 11.0, top_point[1] + 8.0, 0)
+            blf.draw(font_id, f"TOP {top_idx}")
+        if left_point is not None:
+            marker_radius = 7.0 if is_active_ring else 6.0
+            draw_circle_points(shader, [left_point], (0.15, 0.55, 1.0, 1.0), marker_radius, segments=24)
+            draw_circle_outline(shader, [left_point], (0.02, 0.04, 0.08, 1.0), marker_radius + 2.2, segments=28, line_width=2.0)
+            marker_lines = [
+                (left_point[0] - 10.0, left_point[1]), (left_point[0] + 10.0, left_point[1]),
+                (left_point[0], left_point[1] - 10.0), (left_point[0], left_point[1] + 10.0),
+            ]
+            gpu.state.line_width_set(2.2)
+            batch = batch_for_shader(shader, 'LINES', {"pos": marker_lines})
+            shader.bind()
+            shader.uniform_float("color", (0.15, 0.55, 1.0, 1.0))
+            batch.draw(shader)
+            font_id = 0
+            blf.size(font_id, 13)
+            blf.color(font_id, 0.15, 0.55, 1.0, 1.0)
+            blf.position(font_id, left_point[0] + 11.0, left_point[1] - 18.0, 0)
+            blf.draw(font_id, f"LEFT {left_idx}")
 
     gpu.state.point_size_set(1.0)
     gpu.state.line_width_set(1.0)
@@ -931,8 +1012,9 @@ def draw_widget_callback():
 
     padding = 18
     half = size / 2.0 - padding
-    alignment_angle = get_view_alignment_angle(context) + math.radians(settings.widget_correct_rotation)
-    flip_h = wd.flip_horizontal
+    alignment_angle, auto_flip_h = get_stable_widget_alignment(context, ps, wd)
+    alignment_angle += math.radians(settings.widget_correct_rotation)
+    flip_h = auto_flip_h ^ wd.flip_horizontal
 
     max_extent = 0.0
     for vert in verts:
@@ -1222,6 +1304,7 @@ def setup_widget(context):
     wd.source_curve_name = obj.name
     wd.is_active = True
     wd.show_full_mesh_grid = False
+    wd.auto_alignment_initialized = False
     wd.drag_vert_index = -1
     set_pipe_basemesh_preview(context, obj, True)
     set_curve_overlay_hidden(context, obj, True)
@@ -1635,6 +1718,131 @@ def get_view_alignment_angle(context):
     return -math.pi / 2.0 - math.atan2(direction.y, direction.x)
 
 
+def get_active_view_extreme_cross_section_indices(context, ps):
+    region = context.region
+    region_data = context.region_data
+    obj = context.active_object
+    if region is None or region_data is None or obj is None or obj.type != 'CURVE':
+        return -1, -1
+    segments = len(ps.cross_section_verts)
+    if segments < 3:
+        return -1, -1
+
+    try:
+        mesh_verts, _faces = generate_pipe_mesh(obj, obj.hair_pipe_settings)
+    except Exception:
+        return -1, -1
+    if not mesh_verts or len(mesh_verts) < segments:
+        return -1, -1
+
+    active_center = get_active_curve_point_world_position(context)
+    if active_center is None:
+        return -1, -1
+
+    best_start = None
+    best_dist = None
+    for start in range(0, len(mesh_verts) - segments + 1, segments):
+        ring = mesh_verts[start:start + segments]
+        ring_center = sum((Vector(v) for v in ring), Vector((0.0, 0.0, 0.0))) / segments
+        ring_center_world = obj.matrix_world @ ring_center
+        dist = (ring_center_world - active_center).length
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best_start = start
+    if best_start is None:
+        return -1, -1
+
+    top_idx = -1
+    left_idx = -1
+    top_point = None
+    left_point = None
+    for idx, vert in enumerate(mesh_verts[best_start:best_start + segments]):
+        if idx >= len(ps.cross_section_verts) or getattr(ps.cross_section_verts[idx], 'is_ghost', False):
+            continue
+        screen_pos = view3d_utils.location_3d_to_region_2d(region, region_data, obj.matrix_world @ Vector(vert))
+        if screen_pos is None:
+            continue
+        point = (screen_pos.x, screen_pos.y)
+        if top_point is None or point[1] > top_point[1]:
+            top_point = point
+            top_idx = idx
+        if left_point is None or point[0] < left_point[0]:
+            left_point = point
+            left_idx = idx
+    return top_idx, left_idx
+
+
+def get_auto_widget_alignment_from_view(context, ps):
+    top_idx, left_idx = get_active_view_extreme_cross_section_indices(context, ps)
+    verts = ps.cross_section_verts
+    real_indices = [idx for idx, vert in enumerate(verts) if not getattr(vert, 'is_ghost', False)]
+    if top_idx < 0 or left_idx < 0 or top_idx >= len(verts) or left_idx >= len(verts) or len(real_indices) < 3:
+        return get_view_alignment_angle(context), False
+
+    def transformed_points(angle, flip_h):
+        points = []
+        for idx in real_indices:
+            x, y = get_raw_offset(verts[idx])
+            rx, ry = rotate_2d(x, y, angle)
+            if flip_h:
+                rx = -rx
+            points.append((idx, rx, ry))
+        return points
+
+    def alignment_score(angle, flip_h):
+        points = transformed_points(angle, flip_h)
+        max_y = max(point[2] for point in points)
+        min_x = min(point[1] for point in points)
+        top_point = next((point for point in points if point[0] == top_idx), None)
+        left_point = next((point for point in points if point[0] == left_idx), None)
+        if top_point is None or left_point is None:
+            return float('inf')
+        span = max(
+            max(point[1] for point in points) - min_x,
+            max_y - min(point[2] for point in points),
+            1e-8,
+        )
+        return ((max_y - top_point[2]) / span) ** 2 + ((left_point[1] - min_x) / span) ** 2
+
+    best_angle = 0.0
+    best_flip = False
+    best_score = float('inf')
+    for flip_h in (False, True):
+        for degree in range(360):
+            angle = math.radians(degree)
+            score = alignment_score(angle, flip_h)
+            if score < best_score:
+                best_score = score
+                best_angle = angle
+                best_flip = flip_h
+
+    refine_start = best_angle - math.radians(2.0)
+    for step in range(41):
+        angle = refine_start + math.radians(step * 0.1)
+        score = alignment_score(angle, best_flip)
+        if score < best_score:
+            best_score = score
+            best_angle = angle
+
+    return best_angle, best_flip
+
+
+def get_stable_widget_alignment(context, ps, wd):
+    is_editing = any((
+        getattr(wd, 'move_active', False),
+        getattr(wd, 'rotate_active', False),
+        getattr(wd, 'scale_active', False),
+    ))
+    if is_editing and getattr(wd, 'auto_alignment_initialized', False):
+        return wd.auto_alignment_angle, wd.auto_alignment_flip_h
+
+    angle, flip_h = get_auto_widget_alignment_from_view(context, ps)
+    wd.auto_alignment_angle = angle
+    wd.auto_alignment_flip_h = flip_h
+    wd.auto_alignment_initialized = True
+    return angle, flip_h
+
+
 def rotate_2d(x, y, angle):
     cos_a = math.cos(angle)
     sin_a = math.sin(angle)
@@ -1987,8 +2195,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     cx = wd.widget_center_x
     cy = wd.widget_center_y
     sf = wd.widget_scale_factor
-    alignment_angle = get_view_alignment_angle(context) + math.radians(settings.widget_correct_rotation)
-    flip_h = wd.flip_horizontal
+    alignment_angle, auto_flip_h = get_stable_widget_alignment(context, ps, wd)
+    alignment_angle += math.radians(settings.widget_correct_rotation)
+    flip_h = auto_flip_h ^ wd.flip_horizontal
     view_area, view_region = get_view3d_window_region(context)
     if view_region is None:
         operator._finish(context)
