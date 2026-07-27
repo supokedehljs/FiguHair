@@ -2672,8 +2672,8 @@ def make_hair_curve_from_tube_mesh(context, mesh_obj):
         settings = curve_obj.hair_pipe_settings
         settings.pipe_resolution = 0
         settings.default_segments = len(rings[0])
-        settings.default_subdiv = False
-        settings.subdivision_levels = 0
+        settings.default_subdiv = True
+        settings.subdivision_levels = 2
         settings.redirect_selection = True
         sync_point_settings(curve_obj)
 
@@ -2716,32 +2716,63 @@ def make_hair_curve_from_tube_mesh(context, mesh_obj):
 
 
 class HAIRPIPE_OT_mesh_to_hair_curve(bpy.types.Operator):
-    """Convert an open quad tube mesh back into a FiguHair curve"""
+    """Convert selected quad tube meshes back into FiguHair curves"""
     bl_idname = "hair_pipe.mesh_to_hair_curve"
     bl_label = "管状网格转头发曲线"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        obj = context.active_object
-        return obj is not None and obj.type == 'MESH'
+        return any(obj.type == 'MESH' for obj in context.selected_objects)
 
     def execute(self, context):
-        mesh_obj = context.active_object
-        curve_obj, error = make_hair_curve_from_tube_mesh(context, mesh_obj)
-        if error:
-            self.report({'ERROR'}, error)
+        mesh_objects = [obj for obj in context.selected_objects if obj.type == 'MESH']
+        if not mesh_objects:
+            self.report({'ERROR'}, "请选择一个或多个管状网格")
             return {'CANCELLED'}
+
+        converted_curves = []
+        errors = []
+        for mesh_obj in mesh_objects:
+            curve_obj, error = make_hair_curve_from_tube_mesh(context, mesh_obj)
+            if error:
+                errors.append(f"{mesh_obj.name}: {error}")
+                continue
+
+            for obj in context.selected_objects:
+                obj.select_set(False)
+            curve_obj.select_set(True)
+            context.view_layer.objects.active = curve_obj
+            result = bpy.ops.hair_pipe.generate_pipe()
+            if 'FINISHED' not in result:
+                errors.append(f"{mesh_obj.name}: 生成 FiguHair 管线失败")
+                curve_data = curve_obj.data
+                bpy.data.objects.remove(curve_obj, do_unlink=True)
+                if curve_data.users == 0:
+                    bpy.data.curves.remove(curve_data)
+                continue
+
+            converted_curves.append(curve_obj)
+            mesh_data = mesh_obj.data
+            bpy.data.objects.remove(mesh_obj, do_unlink=True)
+            if mesh_data.users == 0:
+                bpy.data.meshes.remove(mesh_data)
+
         for obj in context.selected_objects:
             obj.select_set(False)
-        curve_obj.select_set(True)
-        context.view_layer.objects.active = curve_obj
-        bpy.ops.hair_pipe.generate_pipe()
-        for obj in context.selected_objects:
-            obj.select_set(False)
-        curve_obj.select_set(True)
-        context.view_layer.objects.active = curve_obj
-        self.report({'INFO'}, "已从管状网格生成 FiguHair 头发曲线")
+        for curve_obj in converted_curves:
+            curve_obj.select_set(True)
+        if converted_curves:
+            context.view_layer.objects.active = converted_curves[-1]
+
+        if errors and not converted_curves:
+            self.report({'ERROR'}, errors[0])
+            return {'CANCELLED'}
+        if errors:
+            self.report({'WARNING'}, f"已转换 {len(converted_curves)} 个网格，{len(errors)} 个失败")
+            return {'FINISHED'}
+
+        self.report({'INFO'}, f"已从 {len(converted_curves)} 个管状网格生成 FiguHair 头发曲线")
         return {'FINISHED'}
 
 
