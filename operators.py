@@ -2497,9 +2497,10 @@ def _extract_open_tube_rings_by_faces(mesh, loops, edge_to_faces):
 
 def _step_ring_by_ordered_quads(mesh, ring, used_faces, edge_to_faces):
     count = len(ring)
-    next_edges = []
     step_faces = []
     ring_set = set(ring)
+    next_by_current = {}
+
     for idx in range(count):
         a = ring[idx]
         b = ring[(idx + 1) % count]
@@ -2510,14 +2511,38 @@ def _step_ring_by_ordered_quads(mesh, ring, used_faces, edge_to_faces):
                 break
         if face_index is None:
             return None, []
+
         verts = list(mesh.polygons[face_index].vertices)
-        opposite = [v for v in verts if v not in ring_set]
-        if len(opposite) != 2:
+        if sum(1 for v in verts if v in ring_set) != 2:
             return None, []
-        next_edges.append(_edge_key(opposite[0], opposite[1]))
+
+        try:
+            a_pos = verts.index(a)
+            b_pos = verts.index(b)
+        except ValueError:
+            return None, []
+
+        if verts[(a_pos + 1) % 4] == b:
+            next_a = verts[(a_pos - 1) % 4]
+            next_b = verts[(b_pos + 1) % 4]
+        elif verts[(b_pos + 1) % 4] == a:
+            next_a = verts[(a_pos + 1) % 4]
+            next_b = verts[(b_pos - 1) % 4]
+        else:
+            return None, []
+
+        if next_a in ring_set or next_b in ring_set or next_a == next_b:
+            return None, []
+        if next_by_current.get(a, next_a) != next_a or next_by_current.get(b, next_b) != next_b:
+            return None, []
+        next_by_current[a] = next_a
+        next_by_current[b] = next_b
         step_faces.append(face_index)
-    next_ring = _order_cycle_edges(set(next_edges))
-    if not next_ring or len(next_ring) != count:
+
+    if len(next_by_current) != count:
+        return None, []
+    next_ring = [next_by_current[vert_idx] for vert_idx in ring]
+    if len(set(next_ring)) != count:
         return None, []
     return next_ring, step_faces
 
@@ -2622,7 +2647,6 @@ def make_hair_curve_from_tube_mesh(context, mesh_obj):
 
         world_positions = [mesh_obj.matrix_world @ vert.co for vert in mesh.vertices]
         centers = [_ring_center_from_indices(ring, world_positions) for ring in rings]
-        rings = _align_ring_orders(rings, world_positions, centers)
         frames = _minimal_twist_frames_for_centers(centers)
 
         curve_data = bpy.data.curves.new(mesh_obj.name + "_Curve", 'CURVE')
