@@ -748,25 +748,13 @@ def build_minimal_twist_rings(ring_specs, is_cyclic=False):
         return []
 
     rings = []
-    first_center, first_tangent, first_offsets = ring_specs[0]
-    tangent = safe_normalized(first_tangent)
-    normal, binormal = get_cross_section_frame(tangent)
+    _anchor_center, anchor_tangent, _anchor_offsets = max(ring_specs, key=lambda spec: spec[0].z)
+    anchor_tangent = safe_normalized(anchor_tangent)
+    anchor_normal, _anchor_binormal = get_cross_section_frame(anchor_tangent)
 
-    if first_offsets:
-        rings.append(make_ring_from_frame(first_center, normal, binormal, first_offsets))
-    else:
-        rings.append([first_center])
-
-    prev_tangent = tangent
-    for center, raw_tangent, offsets in ring_specs[1:]:
-        tangent = safe_normalized(raw_tangent, prev_tangent)
-        if prev_tangent.length >= 1e-8 and tangent.length >= 1e-8:
-            try:
-                transport = prev_tangent.rotation_difference(tangent)
-                normal = transport @ normal
-            except ValueError:
-                pass
-        normal = normal - tangent * normal.dot(tangent)
+    for center, raw_tangent, offsets in ring_specs:
+        tangent = safe_normalized(raw_tangent, anchor_tangent)
+        normal = anchor_normal - tangent * anchor_normal.dot(tangent)
         if normal.length < 1e-8:
             normal, binormal = get_cross_section_frame(tangent)
         else:
@@ -776,7 +764,6 @@ def build_minimal_twist_rings(ring_specs, is_cyclic=False):
             rings.append(make_ring_from_frame(center, normal, binormal, offsets))
         else:
             rings.append([center])
-        prev_tangent = tangent
 
     return rings
 
