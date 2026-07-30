@@ -14,6 +14,8 @@ from .operators import (
     verts_to_world_space,
     redirect_pipe_selection,
     get_curve_from_figuhair_root,
+    get_pipe_source_curve,
+    get_tail_source_curve,
 )
 
 
@@ -73,7 +75,7 @@ def sync_figuhair_visibility():
             if tail_obj is not None:
                 previous_tail_hidden = _tail_visibility_states.get(tail_obj.name)
                 current_tail_hidden = object_hidden(tail_obj)
-                if previous_tail_hidden is None or current_tail_hidden != previous_tail_hidden:
+                if (previous_tail_hidden is None or current_tail_hidden != previous_tail_hidden) and not (root_hidden or curve_hidden or pipe_hidden):
                     tail_obj["hair_pipe_tail_user_hidden"] = current_tail_hidden
                 user_tail_hidden = bool(tail_obj.get("hair_pipe_tail_user_hidden", current_tail_hidden))
                 _tail_visibility_states[tail_obj.name] = current_tail_hidden
@@ -88,12 +90,14 @@ def sync_figuhair_visibility():
                     set_object_hidden(tail_obj, True)
                 continue
 
-            prev_root_hidden, prev_curve_hidden, _prev_pipe_hidden = previous
+            prev_root_hidden, prev_curve_hidden, prev_pipe_hidden = previous
             driven_hidden = None
             if root_hidden != prev_root_hidden:
                 driven_hidden = root_hidden
             elif curve_hidden != prev_curve_hidden and not curve_overlay_hidden:
                 driven_hidden = curve_hidden
+            if driven_hidden is None and pipe_hidden != prev_pipe_hidden:
+                driven_hidden = pipe_hidden
 
             if driven_hidden is not None:
                 set_object_hidden(root_obj, driven_hidden)

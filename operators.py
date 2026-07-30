@@ -3954,6 +3954,121 @@ class HAIRPIPE_OT_edit_tail_mesh(bpy.types.Operator):
 
 
 
+class HAIRPIPE_OT_hide_hair(bpy.types.Operator):
+    """Hide selected complete FiguHair sets"""
+    bl_idname = "hair_pipe.hide_hair"
+    bl_label = "隐藏头发"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and get_context_curve_object(context) is not None
+
+    def execute(self, context):
+        curves = []
+        for obj in list(context.selected_objects):
+            curve_obj = (
+                obj if obj.type == 'CURVE'
+                else get_curve_from_figuhair_root(obj) if obj.type == 'EMPTY'
+                else get_pipe_source_curve(obj) or get_tail_source_curve(obj)
+            )
+            if curve_obj is not None and curve_obj not in curves:
+                curves.append(curve_obj)
+
+        for curve_obj in curves:
+            root_obj = get_figuhair_root(curve_obj)
+            family = (
+                root_obj,
+                curve_obj,
+                get_pipe_object_for_curve(curve_obj),
+                get_tail_object_for_curve(curve_obj),
+            )
+            for obj in family:
+                if obj is not None:
+                    obj.hide_set(True)
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_show_all_hair(bpy.types.Operator):
+    """Show all complete FiguHair sets"""
+    bl_idname = "hair_pipe.show_all_hair"
+    bl_label = "显示全部头发"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def execute(self, context):
+        bpy.ops.object.hide_view_clear(select=False)
+        for obj in bpy.data.objects:
+            if _is_figuhair_family_obj(obj):
+                obj.hide_viewport = False
+                obj.hide_set(False)
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_family_local_view(bpy.types.Operator):
+    """Toggle Blender local view for complete FiguHair sets"""
+    bl_idname = "hair_pipe.family_local_view"
+    bl_label = "整套头发单独显示"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (
+            context.mode == 'OBJECT'
+            and context.area is not None
+            and context.area.type == 'VIEW_3D'
+            and get_context_curve_object(context) is not None
+        )
+
+    def execute(self, context):
+        if getattr(context.space_data, "local_view", None) is not None:
+            bpy.ops.view3d.localview()
+            return {'FINISHED'}
+
+        curves = []
+        for obj in list(context.selected_objects):
+            curve_obj = (
+                obj if obj.type == 'CURVE'
+                else get_curve_from_figuhair_root(obj) if obj.type == 'EMPTY'
+                else get_pipe_source_curve(obj) or get_tail_source_curve(obj)
+            )
+            if curve_obj is not None and curve_obj not in curves:
+                curves.append(curve_obj)
+        if not curves:
+            curve_obj = get_context_curve_object(context)
+            if curve_obj is not None:
+                curves.append(curve_obj)
+
+        family = []
+        for curve_obj in curves:
+            for obj in (
+                get_figuhair_root(curve_obj),
+                curve_obj,
+                get_pipe_object_for_curve(curve_obj),
+                get_tail_object_for_curve(curve_obj),
+            ):
+                if obj is not None and obj not in family:
+                    family.append(obj)
+
+        for obj in list(context.selected_objects):
+            obj.select_set(False)
+        for obj in family:
+            obj.hide_set(False)
+            obj.select_set(True)
+        bpy.ops.view3d.localview()
+
+        for obj in family:
+            obj.select_set(False)
+        for curve_obj in curves:
+            curve_obj.select_set(True)
+        if curves:
+            context.view_layer.objects.active = curves[-1]
+        return {'FINISHED'}
+
+
 class HAIRPIPE_OT_delete_hair(bpy.types.Operator):
     """Delete selected complete FiguHair hair sets"""
     bl_idname = "hair_pipe.delete_hair"
@@ -4334,17 +4449,53 @@ classes = (
     HAIRPIPE_OT_toggle_tail_visibility,
     HAIRPIPE_OT_hide_all_tail_meshes,
     HAIRPIPE_OT_edit_tail_mesh,
+    HAIRPIPE_OT_hide_hair,
+    HAIRPIPE_OT_show_all_hair,
+    HAIRPIPE_OT_family_local_view,
     HAIRPIPE_OT_delete_hair,
     HAIRPIPE_OT_duplicate_hair,
     HAIRPIPE_OT_merge_hair_for_export,
 )
 
 
+_addon_keymaps = []
+
+
+def register_keymaps():
+    wm = bpy.context.window_manager
+    keyconfig = wm.keyconfigs.addon if wm is not None else None
+    if keyconfig is None:
+        return
+    keymap = keyconfig.keymaps.new(name='Object Mode', space_type='EMPTY')
+    bindings = (
+        ('hair_pipe.hide_hair', 'H', 'PRESS', {}),
+        ('hair_pipe.show_all_hair', 'H', 'PRESS', {'alt': True}),
+        ('hair_pipe.duplicate_hair', 'D', 'PRESS', {'shift': True}),
+        ('hair_pipe.delete_hair', 'X', 'PRESS', {}),
+        ('hair_pipe.delete_hair', 'DEL', 'PRESS', {}),
+        ('hair_pipe.family_local_view', 'NUMPAD_SLASH', 'PRESS', {}),
+    )
+    for operator, key_type, value, modifiers in bindings:
+        item = keymap.keymap_items.new(operator, key_type, value, **modifiers)
+        _addon_keymaps.append((keymap, item))
+
+
+def unregister_keymaps():
+    for keymap, item in reversed(_addon_keymaps):
+        try:
+            keymap.keymap_items.remove(item)
+        except (ReferenceError, RuntimeError):
+            pass
+    _addon_keymaps.clear()
+
+
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+    register_keymaps()
 
 
 def unregister():
+    unregister_keymaps()
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
