@@ -743,18 +743,81 @@ def make_ring_from_interpolated(center, tangent, interp_offsets):
     return make_ring_from_frame(center, normal, binormal, interp_offsets)
 
 
+def _transport_cross_section_normal(prev_tangent, tangent, prev_normal):
+    prev_tangent = safe_normalized(prev_tangent)
+    tangent = safe_normalized(tangent, prev_tangent)
+    tangent_dot = max(-1.0, min(1.0, prev_tangent.dot(tangent)))
+
+    if tangent_dot < -0.999999:
+        normal = prev_normal - tangent * prev_normal.dot(tangent)
+    else:
+        try:
+            normal = prev_tangent.rotation_difference(tangent) @ prev_normal
+        except ValueError:
+            normal = prev_normal.copy()
+        normal = normal - tangent * normal.dot(tangent)
+
+    if normal.length < 1e-8:
+        normal, _binormal = get_cross_section_frame(tangent)
+    else:
+        normal.normalize()
+    return normal
+
+
+def _minimal_twist_frames_from_tangents(raw_tangents, is_cyclic=False):
+    if not raw_tangents:
+        return []
+
+    first_tangent = safe_normalized(raw_tangents[0])
+    normal, binormal = get_cross_section_frame(first_tangent)
+    frames = [(first_tangent, normal.copy(), binormal.copy())]
+    prev_tangent = first_tangent
+
+    for raw_tangent in raw_tangents[1:]:
+        tangent = safe_normalized(raw_tangent, prev_tangent)
+        normal = _transport_cross_section_normal(prev_tangent, tangent, normal)
+        binormal = tangent.cross(normal).normalized()
+        frames.append((tangent, normal.copy(), binormal.copy()))
+        prev_tangent = tangent
+
+    if is_cyclic and len(frames) > 2:
+        seam_normal = _transport_cross_section_normal(frames[-1][0], frames[0][0], frames[-1][1])
+        first_tangent = frames[0][0]
+        first_normal = frames[0][1]
+        seam_angle = math.atan2(
+            first_tangent.dot(seam_normal.cross(first_normal)),
+            max(-1.0, min(1.0, seam_normal.dot(first_normal))),
+        )
+        frame_count = len(frames)
+        corrected = []
+        for idx, (tangent, frame_normal, _frame_binormal) in enumerate(frames):
+            correction = seam_angle * idx / frame_count
+            if abs(correction) > 1e-12:
+                frame_normal = Matrix.Rotation(correction, 3, tangent) @ frame_normal
+            frame_normal = frame_normal - tangent * frame_normal.dot(tangent)
+            frame_normal.normalize()
+            corrected.append((tangent, frame_normal, tangent.cross(frame_normal).normalized()))
+        frames = corrected
+
+    return frames
+
+
 def build_minimal_twist_rings(ring_specs, is_cyclic=False):
     if not ring_specs:
         return []
 
     rings = []
-    _anchor_center, anchor_tangent, _anchor_offsets = max(ring_specs, key=lambda spec: spec[0].z)
-    anchor_tangent = safe_normalized(anchor_tangent)
-    anchor_normal, _anchor_binormal = get_cross_section_frame(anchor_tangent)
+    frames = _minimal_twist_frames_from_tangents(
+        [raw_tangent for _center, raw_tangent, _offsets in ring_specs],
+        is_cyclic,
+    )
 
-    for center, raw_tangent, offsets in ring_specs:
-        tangent = safe_normalized(raw_tangent, anchor_tangent)
-        normal = anchor_normal - tangent * anchor_normal.dot(tangent)
+
+
+    for (center, _raw_tangent, offsets), (_tangent, normal, binormal) in zip(ring_specs, frames):
+        tangent = _tangent
+
+
         if normal.length < 1e-8:
             normal, binormal = get_cross_section_frame(tangent)
         else:
@@ -2789,7 +2852,7 @@ def _curve_tangent_at_center(centers, idx):
     return centers[idx + 1] - centers[idx - 1]
 
 
-def _minimal_twist_frames_for_centers(centers):
+def _minimal_twist_frames_for_centers_legacy_unused(centers):
     if not centers:
         return []
     first_tangent = safe_normalized(_curve_tangent_at_center(centers, 0))
@@ -2813,6 +2876,11 @@ def _minimal_twist_frames_for_centers(centers):
         frames.append((tangent, normal.copy(), binormal.copy()))
         prev_tangent = tangent
     return frames
+
+
+def _minimal_twist_frames_for_centers(centers):
+    tangents = [_curve_tangent_at_center(centers, idx) for idx in range(len(centers))]
+    return _minimal_twist_frames_from_tangents(tangents)
 
 
 def _signed_polygon_area_2d(points):
