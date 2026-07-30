@@ -802,12 +802,47 @@ def _minimal_twist_frames_from_tangents(raw_tangents, is_cyclic=False):
     return frames
 
 
+def _endpoint_driven_frames(centers, raw_tangents, is_cyclic=False):
+    if not raw_tangents:
+        return []
+    if is_cyclic or len(centers) < 2:
+        return _minimal_twist_frames_from_tangents(raw_tangents, is_cyclic)
+
+    endpoint_axis = safe_normalized(centers[-1] - centers[0], raw_tangents[0])
+    anchor_normal, anchor_binormal = get_cross_section_frame(endpoint_axis)
+    frames = []
+
+    for raw_tangent in raw_tangents:
+        tangent = safe_normalized(raw_tangent, endpoint_axis)
+        tangent_dot = max(-1.0, min(1.0, endpoint_axis.dot(tangent)))
+        if tangent_dot < -0.999999:
+            normal = anchor_normal - tangent * anchor_normal.dot(tangent)
+            if normal.length < 1e-8:
+                normal = anchor_binormal - tangent * anchor_binormal.dot(tangent)
+        else:
+            try:
+                normal = endpoint_axis.rotation_difference(tangent) @ anchor_normal
+            except ValueError:
+                normal = anchor_normal.copy()
+            normal = normal - tangent * normal.dot(tangent)
+
+        if normal.length < 1e-8:
+            normal, binormal = get_cross_section_frame(tangent)
+        else:
+            normal.normalize()
+            binormal = tangent.cross(normal).normalized()
+        frames.append((tangent, normal, binormal))
+
+    return frames
+
+
 def build_minimal_twist_rings(ring_specs, is_cyclic=False):
     if not ring_specs:
         return []
 
     rings = []
-    frames = _minimal_twist_frames_from_tangents(
+    frames = _endpoint_driven_frames(
+        [center for center, _raw_tangent, _offsets in ring_specs],
         [raw_tangent for _center, raw_tangent, _offsets in ring_specs],
         is_cyclic,
     )
@@ -2880,7 +2915,7 @@ def _minimal_twist_frames_for_centers_legacy_unused(centers):
 
 def _minimal_twist_frames_for_centers(centers):
     tangents = [_curve_tangent_at_center(centers, idx) for idx in range(len(centers))]
-    return _minimal_twist_frames_from_tangents(tangents)
+    return _endpoint_driven_frames(centers, tangents)
 
 
 def _signed_polygon_area_2d(points):
