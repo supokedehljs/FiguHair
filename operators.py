@@ -1,6 +1,7 @@
 import bpy
 import math
 import json
+from pathlib import Path
 from mathutils import Matrix, Vector
 from bpy.props import IntProperty, FloatProperty, EnumProperty, BoolProperty, StringProperty
 
@@ -743,6 +744,58 @@ def make_ring_from_interpolated(center, tangent, interp_offsets):
     return make_ring_from_frame(center, normal, binormal, interp_offsets)
 
 
+_ROLL_DIAGNOSTIC_LOG_PATH = Path(bpy.app.tempdir) / "figuhair_roll_diagnostics.log"
+_ROLL_DIAGNOSTIC_STATE = {}
+
+
+def _frame_roll_angle(tangent, normal):
+    reference_normal, reference_binormal = get_cross_section_frame(tangent)
+    return math.degrees(math.atan2(
+        tangent.dot(reference_normal.cross(normal)),
+        max(-1.0, min(1.0, reference_normal.dot(normal))),
+    ))
+
+
+def _write_roll_diagnostic(curve_obj, spline_index, ring_specs, frames, is_cyclic):
+    if is_cyclic or len(frames) < 2:
+        return
+
+    signature = tuple(round(value, 5) for spec in ring_specs for value in spec[0])
+    key = (curve_obj.as_pointer(), spline_index)
+    previous = _ROLL_DIAGNOSTIC_STATE.get(key)
+    current = [(tangent.copy(), normal.copy()) for tangent, normal, _binormal in frames]
+    _ROLL_DIAGNOSTIC_STATE[key] = (signature, current)
+    if previous is None or previous[0] == signature:
+        return
+
+    old_frames = previous[1]
+    samples = sorted({0, len(frames) // 2, len(frames) - 1})
+    messages = []
+    for idx in samples:
+        old_idx = round(idx * (len(old_frames) - 1) / max(1, len(frames) - 1))
+        old_tangent, old_normal = old_frames[old_idx]
+        tangent, normal, _binormal = frames[idx]
+        transported_old_normal = _transport_cross_section_normal(old_tangent, tangent, old_normal)
+        roll_delta = math.degrees(math.atan2(
+            tangent.dot(transported_old_normal.cross(normal)),
+            max(-1.0, min(1.0, transported_old_normal.dot(normal))),
+        ))
+        tangent_delta = math.degrees(math.acos(max(-1.0, min(1.0, old_tangent.dot(tangent)))))
+        messages.append(
+            f"ring={idx}/{len(frames) - 1} tangent_change={tangent_delta:.3f}deg "
+            f"frame_roll_change={roll_delta:.3f}deg current_roll={_frame_roll_angle(tangent, normal):.3f}deg"
+        )
+
+    start_tangent, start_normal, _binormal = frames[0]
+    with _ROLL_DIAGNOSTIC_LOG_PATH.open("a", encoding="utf-8") as log_file:
+        log_file.write(
+            f"\ncurve={curve_obj.name!r} spline={spline_index} type=NURBS_OR_OPEN "
+            f"start_tangent=({start_tangent.x:.5f},{start_tangent.y:.5f},{start_tangent.z:.5f}) "
+            f"start_roll={_frame_roll_angle(start_tangent, start_normal):.3f}deg\n"
+        )
+        log_file.write("\n".join(messages) + "\n")
+
+
 def _transport_cross_section_normal(prev_tangent, tangent, prev_normal):
     prev_tangent = safe_normalized(prev_tangent)
     tangent = safe_normalized(tangent, prev_tangent)
@@ -764,12 +817,20 @@ def _transport_cross_section_normal(prev_tangent, tangent, prev_normal):
     return normal
 
 
-def _minimal_twist_frames_from_tangents(raw_tangents, is_cyclic=False):
+def _minimal_twist_frames_from_tangents(raw_tangents, is_cyclic=False, start_normal=None):
     if not raw_tangents:
         return []
 
     first_tangent = safe_normalized(raw_tangents[0])
-    normal, binormal = get_cross_section_frame(first_tangent)
+    if start_normal is None:
+        normal, binormal = get_cross_section_frame(first_tangent)
+    else:
+        normal = start_normal - first_tangent * start_normal.dot(first_tangent)
+        if normal.length < 1e-8:
+            normal, binormal = get_cross_section_frame(first_tangent)
+        else:
+            normal.normalize()
+            binormal = first_tangent.cross(normal).normalized()
     frames = [(first_tangent, normal.copy(), binormal.copy())]
     prev_tangent = first_tangent
 
@@ -802,41 +863,74 @@ def _minimal_twist_frames_from_tangents(raw_tangents, is_cyclic=False):
     return frames
 
 
-def _endpoint_driven_frames(centers, raw_tangents, is_cyclic=False):
+def _endpoint_driven_frames(centers, raw_tangents, is_cyclic=False, start_normal=None, roll_mode='START_FIXED'):
     if not raw_tangents:
         return []
-    if is_cyclic or len(centers) < 2:
+    if is_cyclic or start_normal is None:
         return _minimal_twist_frames_from_tangents(raw_tangents, is_cyclic)
 
-    endpoint_axis = safe_normalized(centers[-1] - centers[0], raw_tangents[0])
-    anchor_normal, anchor_binormal = get_cross_section_frame(endpoint_axis)
+    first_tangent = safe_normalized(raw_tangents[0])
+    anchor_normal = start_normal.copy()
+    anchor_binormal = first_tangent.cross(anchor_normal)
+    if anchor_binormal.length < 1e-8:
+        _unused_normal, anchor_binormal = get_cross_section_frame(first_tangent)
+    else:
+        anchor_binormal.normalize()
+
+    if roll_mode == 'PARALLEL_TRANSPORT':
+        return _minimal_twist_frames_from_tangents(raw_tangents, False, anchor_normal)
+
+    if roll_mode == 'WORLD_UP':
+        anchor_normal = Vector((0.0, 0.0, 1.0))
+        anchor_binormal = Vector((0.0, 1.0, 0.0))
+
     frames = []
-
     for raw_tangent in raw_tangents:
-        tangent = safe_normalized(raw_tangent, endpoint_axis)
-        tangent_dot = max(-1.0, min(1.0, endpoint_axis.dot(tangent)))
-        if tangent_dot < -0.999999:
-            normal = anchor_normal - tangent * anchor_normal.dot(tangent)
-            if normal.length < 1e-8:
-                normal = anchor_binormal - tangent * anchor_binormal.dot(tangent)
-        else:
-            try:
-                normal = endpoint_axis.rotation_difference(tangent) @ anchor_normal
-            except ValueError:
-                normal = anchor_normal.copy()
-            normal = normal - tangent * normal.dot(tangent)
-
+        tangent = safe_normalized(raw_tangent, first_tangent)
+        normal = anchor_normal - tangent * anchor_normal.dot(tangent)
+        if normal.length < 1e-8:
+            normal = anchor_binormal - tangent * anchor_binormal.dot(tangent)
         if normal.length < 1e-8:
             normal, binormal = get_cross_section_frame(tangent)
         else:
             normal.normalize()
             binormal = tangent.cross(normal).normalized()
         frames.append((tangent, normal, binormal))
-
     return frames
 
 
-def build_minimal_twist_rings(ring_specs, is_cyclic=False):
+def _get_start_roll_normal(curve_obj, start_tangent):
+    """Return a START-anchored frame normal without changing it for other points."""
+    anchor_normal = curve_obj.get("hair_pipe_start_roll_anchor_normal")
+    anchor_tangent = curve_obj.get("hair_pipe_start_roll_anchor_tangent")
+    start_changed = bool(curve_obj.get("hair_pipe_start_point_changed", False))
+
+    if not anchor_normal or not anchor_tangent:
+        anchor_normal, _binormal = get_cross_section_frame(start_tangent)
+        anchor_tangent = start_tangent.copy()
+    else:
+        anchor_normal = Vector(anchor_normal)
+        anchor_tangent = safe_normalized(Vector(anchor_tangent), start_tangent)
+        if start_changed:
+            anchor_normal = _transport_cross_section_normal(anchor_tangent, start_tangent, anchor_normal)
+            anchor_tangent = start_tangent.copy()
+
+    normal = anchor_normal - start_tangent * anchor_normal.dot(start_tangent)
+    if normal.length < 1e-8:
+        normal, _binormal = get_cross_section_frame(start_tangent)
+    else:
+        normal.normalize()
+
+    curve_obj["hair_pipe_start_roll_anchor_normal"] = tuple(anchor_normal)
+    curve_obj["hair_pipe_start_roll_anchor_tangent"] = tuple(anchor_tangent)
+    curve_obj["hair_pipe_start_point_changed"] = False
+    return normal
+
+
+def build_minimal_twist_rings(
+    ring_specs, is_cyclic=False, start_normal=None, curve_obj=None, spline_index=0,
+    roll_mode='START_FIXED',
+):
     if not ring_specs:
         return []
 
@@ -845,9 +939,11 @@ def build_minimal_twist_rings(ring_specs, is_cyclic=False):
         [center for center, _raw_tangent, _offsets in ring_specs],
         [raw_tangent for _center, raw_tangent, _offsets in ring_specs],
         is_cyclic,
+        start_normal,
+        roll_mode,
     )
-
-
+    if curve_obj is not None:
+        _write_roll_diagnostic(curve_obj, spline_index, ring_specs, frames, is_cyclic)
 
     for (center, _raw_tangent, offsets), (_tangent, normal, binormal) in zip(ring_specs, frames):
         tangent = _tangent
@@ -1017,7 +1113,7 @@ def generate_pipe_mesh(curve_obj, settings):
     point_settings = settings.point_settings
     global_point_idx = 0
 
-    for spline_data in splines_data:
+    for spline_index, spline_data in enumerate(splines_data):
         points = spline_data['points']
         resolution = max(0, settings.pipe_resolution)
         is_cyclic = spline_data['cyclic']
@@ -1167,7 +1263,13 @@ def generate_pipe_mesh(curve_obj, settings):
                 is_cyclic,
             )
 
-        rings = build_minimal_twist_rings(ring_specs, is_cyclic)
+        start_normal = None
+        if not is_cyclic and ring_specs:
+            start_normal = _get_start_roll_normal(curve_obj, safe_normalized(ring_specs[0][1]))
+        rings = build_minimal_twist_rings(
+            ring_specs, is_cyclic, start_normal, curve_obj, spline_index,
+            settings.roll_mode,
+        )
         global_point_idx += num_points
         if not rings:
             continue
@@ -1380,6 +1482,8 @@ def sync_point_settings(curve_obj):
     total_points = len(new_signatures)
     current = len(settings.point_settings)
     old_signatures = _load_curve_point_signatures(curve_obj)
+    if old_signatures and new_signatures and old_signatures[0] != new_signatures[0]:
+        curve_obj["hair_pipe_start_point_changed"] = True
     old_data = [_point_setting_to_data(point_setting) for point_setting in settings.point_settings]
 
     if current < total_points:

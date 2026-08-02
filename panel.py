@@ -77,6 +77,7 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         box.prop(settings, "pipe_resolution", text="过渡细分")
         box.prop(settings, "transition_mode", text="截面过渡")
         box.prop(settings, "transition_strength", text="过渡强度")
+        box.prop(settings, "roll_mode", text="滚转算法")
         box.prop(settings, "strong_smoothing", text="强力平滑")
         if settings.strong_smoothing:
             box.prop(settings, "strong_smoothing_iterations", text="平滑次数")
