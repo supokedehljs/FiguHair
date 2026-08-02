@@ -42,6 +42,7 @@ class HairPipeWidgetSettings(PropertyGroup):
     widget_center_y: FloatProperty(default=0.0)
     widget_size: FloatProperty(default=320.0)
     widget_scale_factor: FloatProperty(default=1.0)
+    fitted_point_index: IntProperty(default=-1)
     is_active: BoolProperty(default=False)
     drag_vert_index: IntProperty(default=-1)
     drag_panel: IntProperty(default=0)
@@ -912,6 +913,22 @@ def button_width_for_label(font_id, text, min_width=64.0, padding_x=28.0):
     return max(min_width, width + padding_x)
 
 
+def fit_widget_scale_to_cross_section(wd, verts, half, alignment_angle, flip_h):
+    points = []
+    for vert in verts:
+        x, y = rotate_2d(vert.offset_x, vert.offset_y, alignment_angle)
+        if flip_h:
+            x = -x
+        points.append((x, y))
+    if not points:
+        return
+
+    max_x = max(abs(x) for x, _y in points)
+    max_y = max(abs(y) for _x, y in points)
+    max_extent = max(max_x, max_y, 1e-6)
+    wd.widget_scale_factor = max(8.0, min(50000.0, half * 0.76 / max_extent))
+
+
 def draw_widget_callback(): 
     """Draw the cross-section widget with thumbnail strip at top."""
     try:
@@ -966,12 +983,9 @@ def draw_widget_callback():
     alignment_angle += math.radians(settings.widget_correct_rotation)
     flip_h = auto_flip_h ^ wd.flip_horizontal
 
-    max_extent = 0.0
-    for vert in verts:
-        max_extent = max(max_extent, abs(vert.offset_x), abs(vert.offset_y))
-    base_radius = max(max_extent, settings.default_radius, 0.05)
-    if wd.widget_scale_factor <= 1e-8:
-        wd.widget_scale_factor = half / (base_radius * 2.4)
+    if wd.widget_scale_factor <= 1e-8 or wd.fitted_point_index != settings.active_point_index:
+        fit_widget_scale_to_cross_section(wd, verts, half, alignment_angle, flip_h)
+        wd.fitted_point_index = settings.active_point_index
     sf = wd.widget_scale_factor
 
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
@@ -1251,6 +1265,7 @@ def setup_widget(context):
     wd.widget_center_x = region.width / 2.0 + region.width * 0.35 * getattr(widget_layout, "widget_offset_x", 0.0)
     wd.widget_center_y = region.height / 2.0 + region.height * 0.35 * getattr(widget_layout, "widget_offset_y", 0.0)
     wd.widget_scale_factor = 0.0
+    wd.fitted_point_index = -1
     wd.source_curve_name = obj.name
     wd.is_active = True
     wd.show_full_mesh_grid = False
@@ -2249,6 +2264,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             step = -1 if event.type == 'WHEELUPMOUSE' else 1
             new_idx = (settings.active_point_index + step) % total_points
             settings.active_point_index = new_idx
+            wd.auto_alignment_initialized = False
+            wd.fitted_point_index = -1
             select_curve_point_by_index(obj, new_idx)
             target_ps = settings.point_settings[new_idx]
             target_count = len(target_ps.cross_section_verts)
