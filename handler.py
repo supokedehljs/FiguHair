@@ -201,9 +201,19 @@ _timer_registered = False
 
 
 def selection_sync_timer():
+    global _is_redirecting_selection
     try:
         obj = getattr(bpy.context, 'active_object', None)
-        if obj is not None and obj.type == 'CURVE' and is_curve_edit_mode(obj):
+        if obj is not None and obj.type == 'MESH' and not _is_redirecting_selection:
+            # Selecting an object does not reliably emit a depsgraph update.
+            # This timer is the authoritative fallback for clicks, including
+            # Blender's ordinary duplicate operation on a FiguHair hierarchy.
+            _is_redirecting_selection = True
+            try:
+                redirect_pipe_selection(bpy.context, obj)
+            finally:
+                _is_redirecting_selection = False
+        elif obj is not None and obj.type == 'CURVE' and is_curve_edit_mode(obj):
             sync_active_point_from_selection(obj)
             if time.perf_counter() - _last_rebuild_time > 0.35:
                 rebuild_existing_pipe(obj)
@@ -215,7 +225,7 @@ def selection_sync_timer():
         sync_figuhair_visibility()
     except AttributeError:
         pass
-    return 0.35
+    return 0.1
 
 
 @persistent

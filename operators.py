@@ -3017,9 +3017,17 @@ def _minimal_twist_frames_for_centers_legacy_unused(centers):
     return frames
 
 
-def _minimal_twist_frames_for_centers(centers):
+def _conversion_frames_for_start_fixed(centers):
+    """Use the exact START-fixed frame convention used after conversion."""
+    if not centers:
+        return [], None, None
     tangents = [_curve_tangent_at_center(centers, idx) for idx in range(len(centers))]
-    return _endpoint_driven_frames(centers, tangents)
+    first_tangent = safe_normalized(tangents[0])
+    anchor_normal, _anchor_binormal = get_cross_section_frame(first_tangent)
+    frames = _endpoint_driven_frames(
+        centers, tangents, False, anchor_normal, 'START_FIXED',
+    )
+    return frames, anchor_normal, first_tangent
 
 
 def _signed_polygon_area_2d(points):
@@ -3043,7 +3051,7 @@ def make_hair_curve_from_tube_mesh(context, mesh_obj):
 
         world_positions = [mesh_obj.matrix_world @ vert.co for vert in mesh.vertices]
         centers = [_ring_center_from_indices(ring, world_positions) for ring in rings]
-        frames = _minimal_twist_frames_for_centers(centers)
+        frames, start_anchor_normal, start_anchor_tangent = _conversion_frames_for_start_fixed(centers)
 
         curve_data = bpy.data.curves.new(mesh_obj.name + "_Curve", 'CURVE')
         curve_data.dimensions = '3D'
@@ -3071,6 +3079,10 @@ def make_hair_curve_from_tube_mesh(context, mesh_obj):
         settings.default_subdiv = True
         settings.subdivision_levels = 2
         settings.redirect_selection = True
+        settings.roll_mode = 'START_FIXED'
+        if start_anchor_normal is not None:
+            curve_obj["hair_pipe_start_roll_anchor_normal"] = tuple(start_anchor_normal)
+            curve_obj["hair_pipe_start_roll_anchor_tangent"] = tuple(start_anchor_tangent)
         sync_point_settings(curve_obj)
 
         first_area_checked = False
