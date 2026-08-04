@@ -3710,6 +3710,95 @@ class HAIRPIPE_OT_toggle_redirect_selection(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _reverse_cross_section_setting(point_setting, settings):
+    data = _point_setting_to_data(point_setting)
+    # Reversing a curve flips its tangent and therefore its binormal. Mirror
+    # local Y and the signed rotation so the physical section stays unchanged.
+    data["rotation"] = -data["rotation"]
+    data["verts"] = [
+        {
+            "offset_x": vert["offset_x"],
+            "offset_y": -vert["offset_y"],
+            "is_ghost": vert.get("is_ghost", False),
+        }
+        for vert in reversed(data["verts"])
+    ]
+    _apply_point_setting_data(point_setting, data, settings)
+
+
+def _reverse_spline_points(spline):
+    if spline.type == 'BEZIER':
+        saved = [
+            (point.co.copy(), point.handle_left.copy(), point.handle_right.copy(), point.radius, point.tilt)
+            for point in spline.bezier_points
+        ]
+        for point, (co, left, right, radius, tilt) in zip(spline.bezier_points, reversed(saved)):
+            point.co = co
+            point.handle_left = right
+            point.handle_right = left
+            point.radius = radius
+            point.tilt = -tilt
+    else:
+        saved = [(point.co.copy(), point.radius, point.tilt) for point in spline.points]
+        for point, (co, radius, tilt) in zip(spline.points, reversed(saved)):
+            point.co = co
+            point.radius = radius
+            point.tilt = -tilt
+
+
+class HAIRPIPE_OT_reverse_curve_direction(bpy.types.Operator):
+    """Reverse the active hair curve without changing its visible sections"""
+    bl_idname = "hair_pipe.reverse_curve_direction"
+    bl_label = "翻转曲线方向"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        curve_obj = get_context_curve_object(context)
+        return curve_obj is not None and is_curve_edit_mode(curve_obj)
+
+    def execute(self, context):
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            return {'CANCELLED'}
+        try:
+            curve_obj.update_from_editmode()
+        except Exception:
+            pass
+        settings = curve_obj.hair_pipe_settings
+        sync_point_settings(curve_obj)
+        point_offset = 0
+        for spline in curve_obj.data.splines:
+            count = len(spline.bezier_points) if spline.type == 'BEZIER' else len(spline.points)
+            section_settings = list(settings.point_settings[point_offset:point_offset + count])
+            for point_setting in section_settings:
+                _reverse_cross_section_setting(point_setting, settings)
+            # RNA collection items cannot be reordered; exchange their data in place.
+            section_data = [_point_setting_to_data(point_setting) for point_setting in reversed(section_settings)]
+            for point_setting, data in zip(section_settings, section_data):
+                _apply_point_setting_data(point_setting, data, settings)
+            _reverse_spline_points(spline)
+            point_offset += count
+
+        settings.active_point_index = max(0, len(settings.point_settings) - 1 - settings.active_point_index)
+        # Preserve the old world-space START reference as the new START anchor.
+        splines_data = get_curve_points_data(curve_obj)
+        if splines_data and len(splines_data[0]["points"]) > 1:
+            first_spline = splines_data[0]
+            first_points = first_spline["points"]
+            if first_spline["type"] == 'BEZIER':
+                new_start_tangent = get_bezier_control_tangent(first_points, 0, first_spline["cyclic"])
+            else:
+                new_start_tangent = safe_normalized(first_points[1]["co"] - first_points[0]["co"])
+            curve_obj["hair_pipe_start_roll_anchor_tangent"] = tuple(new_start_tangent)
+        curve_obj["hair_pipe_start_point_changed"] = False
+        _store_curve_point_signatures(curve_obj, _curve_point_position_signatures(curve_obj))
+        update_all_ghost_vertices(settings)
+        curve_obj.data.update()
+        self.report({'INFO'}, "曲线方向已翻转；横截面与滚转已保留")
+        return {'FINISHED'}
+
+
 class HAIRPIPE_OT_equalize_point_distance(bpy.types.Operator):
     """Redistribute selected curve points to be equally spaced along the curve"""
     bl_idname = "hair_pipe.equalize_point_distance"
@@ -4559,6 +4648,7 @@ classes = (
     HAIRPIPE_OT_copy_cs_to_all,
     HAIRPIPE_OT_apply_global_mesh_selectability,
     HAIRPIPE_OT_toggle_redirect_selection,
+    HAIRPIPE_OT_reverse_curve_direction,
     HAIRPIPE_OT_equalize_point_distance,
     HAIRPIPE_OT_create_tail_mesh,
     HAIRPIPE_OT_remove_tail_mesh,

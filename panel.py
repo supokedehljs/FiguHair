@@ -125,6 +125,7 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         op.power = settings.edge_flow_power
         op.blend = settings.edge_flow_blend
         row.operator("hair_pipe.equalize_point_distance", text="曲线平滑", icon='SMOOTHCURVE')
+        row.operator("hair_pipe.reverse_curve_direction", text="翻转方向", icon='ARROW_LEFTRIGHT')
 
         row = box.row(align=True)
         row.operator("hair_pipe.copy_cross_section", text="复制", icon='COPYDOWN')

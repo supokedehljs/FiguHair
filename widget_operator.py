@@ -1830,7 +1830,12 @@ def get_auto_widget_alignment_from_view(context, ps):
 
 
 def get_stable_widget_alignment(context, ps, wd):
-    if getattr(wd, 'auto_alignment_initialized', False):
+    is_editing = any((
+        getattr(wd, 'move_active', False),
+        getattr(wd, 'rotate_active', False),
+        getattr(wd, 'scale_active', False),
+    ))
+    if is_editing and getattr(wd, 'auto_alignment_initialized', False):
         return wd.auto_alignment_angle, wd.auto_alignment_flip_h
 
     angle, flip_h = get_auto_widget_alignment_from_view(context, ps)
