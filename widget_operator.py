@@ -162,6 +162,7 @@ class HairPipeWidgetSettings(PropertyGroup):
         default='CROSS',
     )
     longitudinal_radius: FloatProperty(default=3.0, min=1.0, max=1000.0)
+    longitudinal_move_mode: IntProperty(default=0, min=0, max=4)
     longitudinal_initial_state: bpy.props.StringProperty(default="{}")
     mouse_x: FloatProperty(default=0.0)
     mouse_y: FloatProperty(default=0.0)
@@ -307,6 +308,60 @@ def get_longitudinal_weights(context, settings, active_idx, radius):
     return weights
 
 
+LONGITUDINAL_MOVE_MODE_LABELS = (
+    "0 当前方式（局部坐标）",
+    "1 横截面旋转补偿",
+    "2 空间方向投影",
+    "3 仅径向移动",
+    "4 仅切向旋转移动",
+)
+
+
+def get_point_frame_2d_rotation(context, point_idx):
+    obj = context.active_object
+    settings = obj.hair_pipe_settings
+    active_idx = settings.active_point_index
+    saved_idx = active_idx
+    try:
+        settings.active_point_index = point_idx
+        frame = get_active_curve_stable_frame(context)
+        if frame is None:
+            return 0.0
+        normal, binormal = frame
+        reference_frame = None
+        settings.active_point_index = saved_idx
+        reference_frame = get_active_curve_stable_frame(context)
+        if reference_frame is None:
+            return 0.0
+        reference_normal, reference_binormal = reference_frame
+        return math.atan2(normal.dot(reference_binormal), normal.dot(reference_normal))
+    finally:
+        settings.active_point_index = saved_idx
+
+
+def get_longitudinal_delta(context, settings, point_idx, delta_x, delta_y, mode, initial_offset):
+    if mode == 0:
+        return delta_x, delta_y
+    angle = get_point_frame_2d_rotation(context, point_idx)
+    if mode == 1:
+        return rotate_2d(delta_x, delta_y, -angle)
+    if mode == 2:
+        active_angle = math.radians(settings.point_settings[settings.active_point_index].rotation)
+        target_angle = math.radians(settings.point_settings[point_idx].rotation)
+        return rotate_2d(delta_x, delta_y, active_angle - target_angle - angle)
+    radius = math.hypot(initial_offset[0], initial_offset[1])
+    if radius < 1e-8:
+        return delta_x, delta_y
+    radial_x = initial_offset[0] / radius
+    radial_y = initial_offset[1] / radius
+    radial_amount = delta_x * radial_x + delta_y * radial_y
+    if mode == 3:
+        return radial_x * radial_amount, radial_y * radial_amount
+    tangent_x, tangent_y = -radial_y, radial_x
+    tangent_amount = delta_x * tangent_x + delta_y * tangent_y
+    return tangent_x * tangent_amount, tangent_y * tangent_amount
+
+
 def apply_longitudinal_move(context, settings, wd, selected, delta_x, delta_y):
     state = get_longitudinal_initial_state(wd)
     restore_longitudinal_initial_state(settings, state)
@@ -319,8 +374,11 @@ def apply_longitudinal_move(context, settings, wd, selected, delta_x, delta_y):
         for vert_idx in selected:
             initial_offset = point_state.get(vert_idx)
             if initial_offset is not None and vert_idx < len(verts):
-                verts[vert_idx].offset_x = initial_offset[0] + delta_x * weight
-                verts[vert_idx].offset_y = initial_offset[1] + delta_y * weight
+                local_dx, local_dy = get_longitudinal_delta(
+                    context, settings, point_idx, delta_x, delta_y, wd.longitudinal_move_mode, initial_offset
+                )
+                verts[vert_idx].offset_x = initial_offset[0] + local_dx * weight
+                verts[vert_idx].offset_y = initial_offset[1] + local_dy * weight
     update_all_ghost_vertices(settings)
 
 
@@ -1233,7 +1291,11 @@ def draw_widget_callback():
         mode_label = "横截面衰减" if wd.proportional_mode == 'CROSS' else "纵向衰减"
         range_label = f"{wd.proportional_radius:.0f}px" if wd.proportional_mode == 'CROSS' else f"前后 {wd.longitudinal_radius:.1f} 个截面"
         font_id = 0
-        hint = f"F 切换模式 | {mode_label} | 滚轮范围 {range_label}"
+        if wd.proportional_mode == 'LONGITUDINAL':
+            move_label = LONGITUDINAL_MOVE_MODE_LABELS[wd.longitudinal_move_mode]
+            hint = f"F 衰减模式 | V 移动方式 | {mode_label} | {move_label} | 滚轮 {range_label}"
+        else:
+            hint = f"F 切换模式 | {mode_label} | 滚轮范围 {range_label}"
         blf.size(font_id, 14)
         blf.color(font_id, 0.2, 0.9, 1.0, 1.0)
         blf.position(font_id, wd.mouse_x + 18.0, wd.mouse_y + 20.0, 0)
@@ -2600,6 +2662,14 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 if vi < len(verts):
                     verts[vi].offset_x = initial_offset[0]
                     verts[vi].offset_y = initial_offset[1]
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if (proportional_edit_enabled(context) and wd.proportional_mode == 'LONGITUDINAL'
+                and event.type == 'V' and event.value == 'PRESS'):
+            wd.longitudinal_move_mode = (wd.longitudinal_move_mode + 1) % len(LONGITUDINAL_MOVE_MODE_LABELS)
+            dx, dy = widget_to_effective(mx, my, cx, cy, sf, alignment_angle, flip_h)
+            sx, sy = widget_to_effective(wd.move_start_x, wd.move_start_y, cx, cy, sf, alignment_angle, flip_h)
+            apply_longitudinal_move(context, settings, wd, set(sel), dx - sx, dy - sy)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if proportional_edit_enabled(context) and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.value == 'PRESS':
