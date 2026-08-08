@@ -157,6 +157,14 @@ class HairPipeWidgetSettings(PropertyGroup):
     auto_alignment_signature: bpy.props.StringProperty(default="")
     rotate_initial_offsets: bpy.props.StringProperty(default="")
     proportional_weights: bpy.props.StringProperty(default="{}")
+    proportional_mode: bpy.props.EnumProperty(
+        items=(('CROSS', "横截面衰减", "在当前横截面内衰减"), ('LONGITUDINAL', "纵向衰减", "沿多个横截面的同一列衰减")),
+        default='CROSS',
+    )
+    longitudinal_radius: FloatProperty(default=3.0, min=1.0, max=1000.0)
+    longitudinal_initial_state: bpy.props.StringProperty(default="{}")
+    mouse_x: FloatProperty(default=0.0)
+    mouse_y: FloatProperty(default=0.0)
     rotate_button_x0: FloatProperty(default=0.0)
     rotate_button_y0: FloatProperty(default=0.0)
     rotate_button_x1: FloatProperty(default=0.0)
@@ -198,19 +206,19 @@ def proportional_weight(context, distance, radius):
     return (1.0 - ratio) * (1.0 - ratio) * (3.0 - 2.0 * (1.0 - ratio))
 
 
-def get_proportional_vertex_weights(context, verts, selected, cx, cy, sf, alignment_angle, flip_h, radius):
+def get_proportional_vertex_weights(context, verts, selected, cx, cy, sf, alignment_angle, flip_h, radius, baseline=None):
     if not proportional_edit_enabled(context):
         return {idx: 1.0 for idx in selected}
     selected_points = []
     for idx in selected:
         if 0 <= idx < len(verts) and not getattr(verts[idx], 'is_ghost', False):
-            ox, oy = get_raw_offset(verts[idx])
+            ox, oy = baseline.get(idx, get_raw_offset(verts[idx])) if baseline is not None else get_raw_offset(verts[idx])
             selected_points.append(effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h))
     weights = {}
     for idx, vertex in enumerate(verts):
         if getattr(vertex, 'is_ghost', False):
             continue
-        ox, oy = get_raw_offset(vertex)
+        ox, oy = baseline.get(idx, get_raw_offset(vertex)) if baseline is not None else get_raw_offset(vertex)
         px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
         distance = min((math.hypot(px - sx, py - sy) for sx, sy in selected_points), default=float('inf'))
         weight = proportional_weight(context, distance, radius)
@@ -289,6 +297,33 @@ def get_proportional_weights(wd):
         return {}
 
 
+def get_longitudinal_weights(context, settings, active_idx, radius):
+    weights = {}
+    for point_idx in range(len(settings.point_settings)):
+        distance = abs(point_idx - active_idx)
+        weight = proportional_weight(context, distance, radius)
+        if weight > 0.0:
+            weights[point_idx] = weight
+    return weights
+
+
+def apply_longitudinal_move(context, settings, wd, selected, delta_x, delta_y):
+    state = get_longitudinal_initial_state(wd)
+    restore_longitudinal_initial_state(settings, state)
+    weights = get_longitudinal_weights(context, settings, settings.active_point_index, wd.longitudinal_radius)
+    for point_idx, weight in weights.items():
+        point_state = state.get(point_idx, {})
+        if point_idx >= len(settings.point_settings):
+            continue
+        verts = settings.point_settings[point_idx].cross_section_verts
+        for vert_idx in selected:
+            initial_offset = point_state.get(vert_idx)
+            if initial_offset is not None and vert_idx < len(verts):
+                verts[vert_idx].offset_x = initial_offset[0] + delta_x * weight
+                verts[vert_idx].offset_y = initial_offset[1] + delta_y * weight
+    update_all_ghost_vertices(settings)
+
+
 def prepare_proportional_transform(context, wd, verts, selected, cx, cy, sf, alignment_angle, flip_h):
     weights = get_proportional_vertex_weights(
         context, verts, selected, cx, cy, sf, alignment_angle, flip_h, wd.proportional_radius
@@ -306,7 +341,50 @@ def prepare_proportional_transform(context, wd, verts, selected, cx, cy, sf, ali
         wd.transform_pivot_x = sum(offset[0] for offset in selected_offsets) / len(selected_offsets)
         wd.transform_pivot_y = sum(offset[1] for offset in selected_offsets) / len(selected_offsets)
     set_proportional_weights(wd, weights)
-    store_rotate_offsets(wd, verts, sorted(weights))
+    if proportional_edit_enabled(context):
+        store_rotate_offsets(
+            wd,
+            verts,
+            [idx for idx, vertex in enumerate(verts) if not getattr(vertex, 'is_ghost', False)],
+        )
+    else:
+        store_rotate_offsets(wd, verts, sorted(weights))
+
+
+def store_longitudinal_initial_state(wd, settings, selected):
+    state = {}
+    for point_idx, point_setting in enumerate(settings.point_settings):
+        point_state = {}
+        for vert_idx in selected:
+            if 0 <= vert_idx < len(point_setting.cross_section_verts):
+                vertex = point_setting.cross_section_verts[vert_idx]
+                if not getattr(vertex, 'is_ghost', False):
+                    point_state[str(vert_idx)] = [vertex.offset_x, vertex.offset_y]
+        if point_state:
+            state[str(point_idx)] = point_state
+    wd.longitudinal_initial_state = json.dumps(state)
+
+
+def get_longitudinal_initial_state(wd):
+    try:
+        raw = json.loads(wd.longitudinal_initial_state)
+        return {
+            int(point_idx): {int(vert_idx): tuple(offset) for vert_idx, offset in point_state.items()}
+            for point_idx, point_state in raw.items()
+        }
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def restore_longitudinal_initial_state(settings, state):
+    for point_idx, point_state in state.items():
+        if point_idx >= len(settings.point_settings):
+            continue
+        verts = settings.point_settings[point_idx].cross_section_verts
+        for vert_idx, offset in point_state.items():
+            if vert_idx < len(verts):
+                verts[vert_idx].offset_x = offset[0]
+                verts[vert_idx].offset_y = offset[1]
 
 
 def get_rotate_offsets(wd):
@@ -1143,14 +1221,23 @@ def draw_widget_callback():
                                cx, cy, sf, alignment_angle, flip_h, half, True, wd)
 
     if proportional_edit_enabled(context) and wd.move_active:
-        draw_circle_outline(
-            shader,
-            [(wd.proportional_center_x, wd.proportional_center_y)],
-            (0.15, 0.85, 1.0, 0.9),
-            wd.proportional_radius,
-            segments=64,
-            line_width=1.5,
-        )
+        if wd.proportional_mode == 'CROSS':
+            draw_circle_outline(
+                shader,
+                [(wd.proportional_center_x, wd.proportional_center_y)],
+                (0.15, 0.85, 1.0, 0.9),
+                wd.proportional_radius,
+                segments=64,
+                line_width=1.5,
+            )
+        mode_label = "横截面衰减" if wd.proportional_mode == 'CROSS' else "纵向衰减"
+        range_label = f"{wd.proportional_radius:.0f}px" if wd.proportional_mode == 'CROSS' else f"前后 {wd.longitudinal_radius:.1f} 个截面"
+        font_id = 0
+        hint = f"F 切换模式 | {mode_label} | 滚轮范围 {range_label}"
+        blf.size(font_id, 14)
+        blf.color(font_id, 0.2, 0.9, 1.0, 1.0)
+        blf.position(font_id, wd.mouse_x + 18.0, wd.mouse_y + 20.0, 0)
+        blf.draw(font_id, hint)
 
     cross_size = 9.0
     cross_lines = [
@@ -2374,6 +2461,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     wd.region_offset_x = view_region.x
     wd.region_offset_y = view_region.y
     mx, my = operator._get_local_mouse(event, wd)
+    wd.mouse_x = mx
+    wd.mouse_y = my
     if mx < 0 or my < 0 or mx > view_region.width or my > view_region.height:
         return {'PASS_THROUGH'}
     half = wd.widget_size / 2.0
@@ -2457,8 +2546,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                     wd.move_active = True
                     wd.move_start_x = wd.left_drag_start_x
                     wd.move_start_y = wd.left_drag_start_y
-                    store_rotate_offsets(wd, verts, sorted(movable))
-                    set_proportional_weights(wd, get_proportional_vertex_weights(context, verts, movable, cx, cy, sf, alignment_angle, flip_h, wd.proportional_radius))
+                    prepare_proportional_transform(context, wd, verts, movable, cx, cy, sf, alignment_angle, flip_h)
+                    store_longitudinal_initial_state(wd, settings, movable)
                 wd.left_drag_pending = False
                 redraw_view3d(context)
                 return {'RUNNING_MODAL'}
@@ -2504,23 +2593,49 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     if wd.move_active:
         sel = sorted(get_selected_widget_verts(wd))
         initial = get_rotate_offsets(wd)
+        if proportional_edit_enabled(context) and event.type == 'F' and event.value == 'PRESS':
+            wd.proportional_mode = 'LONGITUDINAL' if wd.proportional_mode == 'CROSS' else 'CROSS'
+            restore_longitudinal_initial_state(settings, get_longitudinal_initial_state(wd))
+            for vi, initial_offset in initial.items():
+                if vi < len(verts):
+                    verts[vi].offset_x = initial_offset[0]
+                    verts[vi].offset_y = initial_offset[1]
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
         if proportional_edit_enabled(context) and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.value == 'PRESS':
             factor = 0.88 if event.type == 'WHEELUPMOUSE' else 1.0 / 0.88
+            if wd.proportional_mode == 'LONGITUDINAL':
+                wd.longitudinal_radius = max(1.0, min(1000.0, wd.longitudinal_radius * factor))
+                dx, dy = widget_to_effective(mx, my, cx, cy, sf, alignment_angle, flip_h)
+                sx, sy = widget_to_effective(wd.move_start_x, wd.move_start_y, cx, cy, sf, alignment_angle, flip_h)
+                apply_longitudinal_move(context, settings, wd, set(sel), dx - sx, dy - sy)
+                redraw_view3d(context)
+                return {'RUNNING_MODAL'}
             wd.proportional_radius = max(8.0, min(5000.0, wd.proportional_radius * factor))
             weights = get_proportional_vertex_weights(
-                context, verts, set(sel), cx, cy, sf, alignment_angle, flip_h, wd.proportional_radius
+                context,
+                verts,
+                set(sel),
+                cx,
+                cy,
+                sf,
+                alignment_angle,
+                flip_h,
+                wd.proportional_radius,
+                baseline=initial,
             )
-            previous_initial = dict(initial)
-            new_initial = {}
-            for vi in weights:
-                if vi in previous_initial:
-                    new_initial[vi] = previous_initial[vi]
-                elif vi < len(verts):
-                    new_initial[vi] = (verts[vi].offset_x, verts[vi].offset_y)
+            dx, dy = widget_to_effective(mx, my, cx, cy, sf, alignment_angle, flip_h)
+            sx, sy = widget_to_effective(wd.move_start_x, wd.move_start_y, cx, cy, sf, alignment_angle, flip_h)
+            delta_x = dx - sx
+            delta_y = dy - sy
+            for vi, initial_offset in initial.items():
+                if vi >= len(verts):
+                    continue
+                weight = weights.get(vi, 0.0)
+                verts[vi].offset_x = initial_offset[0] + delta_x * weight
+                verts[vi].offset_y = initial_offset[1] + delta_y * weight
             set_proportional_weights(wd, weights)
-            wd.rotate_initial_offsets = ";".join(
-                f"{vi}:{offset[0]}:{offset[1]}" for vi, offset in sorted(new_initial.items())
-            )
+            update_ghost_vertices(ps)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type == 'MOUSEMOVE':
@@ -2528,13 +2643,16 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             sx, sy = widget_to_effective(wd.move_start_x, wd.move_start_y, cx, cy, sf, alignment_angle, flip_h)
             delta_x = dx - sx
             delta_y = dy - sy
-            weights = get_proportional_weights(wd)
-            for vi, weight in weights.items():
-                initial_offset = initial.get(vi)
-                if initial_offset is not None and vi < len(verts) and not getattr(verts[vi], 'is_ghost', False):
-                    verts[vi].offset_x = initial_offset[0] + delta_x * weight
-                    verts[vi].offset_y = initial_offset[1] + delta_y * weight
-            update_ghost_vertices(ps)
+            if proportional_edit_enabled(context) and wd.proportional_mode == 'LONGITUDINAL':
+                apply_longitudinal_move(context, settings, wd, set(sel), delta_x, delta_y)
+            else:
+                weights = get_proportional_weights(wd)
+                for vi, weight in weights.items():
+                    initial_offset = initial.get(vi)
+                    if initial_offset is not None and vi < len(verts) and not getattr(verts[vi], 'is_ghost', False):
+                        verts[vi].offset_x = initial_offset[0] + delta_x * weight
+                        verts[vi].offset_y = initial_offset[1] + delta_y * weight
+                update_ghost_vertices(ps)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type == 'LEFTMOUSE' and ((wd.left_drag_active and event.value == 'RELEASE') or (not wd.left_drag_active and event.value == 'PRESS')):
@@ -2549,6 +2667,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 if vi < len(verts):
                     verts[vi].offset_x = initial_offset[0]
                     verts[vi].offset_y = initial_offset[1]
+            restore_longitudinal_initial_state(settings, get_longitudinal_initial_state(wd))
+            update_all_ghost_vertices(settings)
             wd.move_active = False
             wd.left_drag_active = False
             wd.left_drag_vert_index = -1
@@ -2882,7 +3002,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             wd.move_start_x = mx
             wd.move_start_y = my
             prepare_proportional_transform(context, wd, verts, sel, cx, cy, sf, alignment_angle, flip_h)
-            set_proportional_weights(wd, get_proportional_vertex_weights(context, verts, sel, cx, cy, sf, alignment_angle, flip_h, wd.proportional_radius))
+            store_longitudinal_initial_state(wd, settings, sel)
             redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
