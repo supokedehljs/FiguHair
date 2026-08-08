@@ -3660,9 +3660,11 @@ class HAIRPIPE_OT_copy_cs_to_all(bpy.types.Operator):
 
 
 def apply_global_mesh_selectability(enabled):
+    # Pipe meshes must remain hit-testable so a viewport click can be redirected
+    # to their source curve. hide_select=True makes clicks pass through them.
     for obj in bpy.data.objects:
         if _is_pipe_mesh_obj(obj):
-            obj.hide_select = enabled
+            obj.hide_select = False
 
 
 def sync_global_redirect_selection(source_curve):

@@ -2948,8 +2948,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             cos_a = math.cos(angle)
             sin_a = math.sin(angle)
             cnt = max(1, len(initial))
-            ctr_x = sum(o[0] for o in initial) / cnt
-            ctr_y = sum(o[1] for o in initial) / cnt
+            ctr_x = sum(offset[0] for offset in initial.values()) / cnt
+            ctr_y = sum(offset[1] for offset in initial.values()) / cnt
             weights = get_proportional_weights(wd)
             for vi, weight in weights.items():
                 initial_offset = initial.get(vi)
@@ -2974,10 +2974,10 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type in {'RIGHTMOUSE', 'ESC'}:
-            for ip, vi in enumerate(sel):
-                if vi < len(verts) and ip < len(initial):
-                    verts[vi].offset_x = initial[ip][0]
-                    verts[vi].offset_y = initial[ip][1]
+            for vi, initial_offset in initial.items():
+                if vi < len(verts):
+                    verts[vi].offset_x = initial_offset[0]
+                    verts[vi].offset_y = initial_offset[1]
             wd.rotate_active = False
             update_ghost_vertices(ps)
             redraw_view3d(context)
