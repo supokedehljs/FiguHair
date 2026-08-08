@@ -162,7 +162,7 @@ class HairPipeWidgetSettings(PropertyGroup):
         default='CROSS',
     )
     longitudinal_radius: FloatProperty(default=3.0, min=1.0, max=1000.0)
-    longitudinal_move_mode: IntProperty(default=0, min=0, max=4)
+    longitudinal_move_mode: IntProperty(default=0, min=0, max=5)
     longitudinal_initial_state: bpy.props.StringProperty(default="{}")
     mouse_x: FloatProperty(default=0.0)
     mouse_y: FloatProperty(default=0.0)
@@ -309,63 +309,141 @@ def get_longitudinal_weights(context, settings, active_idx, radius):
 
 
 LONGITUDINAL_MOVE_MODE_LABELS = (
-    "0 当前方式（局部坐标）",
-    "1 横截面旋转补偿",
-    "2 空间方向投影",
-    "3 仅径向移动",
-    "4 仅切向旋转移动",
+    "0 各横截面局部方向",
+    "1 完整世界空间投影",
+    "2 视图平面直接投影",
+    "3 视图平面切线约束",
+    "4 活动横截面世界轴",
+    "5 网格顶点屏幕方向",
 )
 
 
-def get_point_frame_2d_rotation(context, point_idx):
+def get_curve_point_by_global_index(obj, point_idx):
+    current_idx = 0
+    for spline in obj.data.splines:
+        points = spline.bezier_points if spline.type == 'BEZIER' else spline.points
+        for point in points:
+            if current_idx == point_idx:
+                return point
+            current_idx += 1
+    return None
+
+
+def get_all_control_point_frames(context):
     obj = context.active_object
-    settings = obj.hair_pipe_settings
-    active_idx = settings.active_point_index
-    saved_idx = active_idx
-    try:
-        settings.active_point_index = point_idx
-        frame = get_active_curve_stable_frame(context)
-        if frame is None:
-            return 0.0
-        normal, binormal = frame
-        reference_frame = None
-        settings.active_point_index = saved_idx
-        reference_frame = get_active_curve_stable_frame(context)
-        if reference_frame is None:
-            return 0.0
-        reference_normal, reference_binormal = reference_frame
-        return math.atan2(normal.dot(reference_binormal), normal.dot(reference_normal))
-    finally:
-        settings.active_point_index = saved_idx
+    frames = {}
+    global_idx = 0
+    world_3x3 = obj.matrix_world.to_3x3()
+    for spline in obj.data.splines:
+        points = spline.bezier_points if spline.type == 'BEZIER' else spline.points
+        count = len(points)
+        if count == 0:
+            continue
+        tangents = []
+        for idx, point in enumerate(points):
+            if spline.type == 'BEZIER':
+                previous = point.co - point.handle_left if spline.use_cyclic_u or idx > 0 else None
+                following = point.handle_right - point.co if spline.use_cyclic_u or idx < count - 1 else None
+            else:
+                co = Vector(point.co[:3])
+                previous = co - Vector(points[(idx - 1) % count].co[:3]) if spline.use_cyclic_u or idx > 0 else None
+                following = Vector(points[(idx + 1) % count].co[:3]) - co if spline.use_cyclic_u or idx < count - 1 else None
+            if previous is not None and following is not None:
+                tangent = safe_normalized(previous + following, following)
+            else:
+                tangent = safe_normalized(following if following is not None else previous, Vector((0, 0, 1)))
+            tangents.append(safe_normalized(world_3x3 @ tangent))
+
+        normal, binormal = get_cross_section_frame(tangents[0])
+        for local_idx, tangent in enumerate(tangents):
+            if local_idx > 0:
+                previous_tangent = tangents[local_idx - 1]
+                try:
+                    normal = previous_tangent.rotation_difference(tangent) @ normal
+                except ValueError:
+                    pass
+                normal = normal - tangent * normal.dot(tangent)
+                if normal.length < 1e-8:
+                    normal, binormal = get_cross_section_frame(tangent)
+                else:
+                    normal.normalize()
+                    binormal = tangent.cross(normal).normalized()
+            frames[global_idx + local_idx] = (normal.copy(), binormal.copy())
+        global_idx += count
+    return frames
 
 
-def get_longitudinal_delta(context, settings, point_idx, delta_x, delta_y, mode, initial_offset):
+def get_longitudinal_delta(context, settings, point_idx, delta_x, delta_y, mode, initial_offset, frames=None):
     if mode == 0:
         return delta_x, delta_y
-    angle = get_point_frame_2d_rotation(context, point_idx)
-    if mode == 1:
-        return rotate_2d(delta_x, delta_y, -angle)
-    if mode == 2:
-        active_angle = math.radians(settings.point_settings[settings.active_point_index].rotation)
-        target_angle = math.radians(settings.point_settings[point_idx].rotation)
-        return rotate_2d(delta_x, delta_y, active_angle - target_angle - angle)
-    radius = math.hypot(initial_offset[0], initial_offset[1])
-    if radius < 1e-8:
+
+    active_idx = settings.active_point_index
+    frames = frames or get_all_control_point_frames(context)
+    active_frame = frames.get(active_idx)
+    target_frame = frames.get(point_idx)
+    if active_frame is None or target_frame is None:
         return delta_x, delta_y
-    radial_x = initial_offset[0] / radius
-    radial_y = initial_offset[1] / radius
-    radial_amount = delta_x * radial_x + delta_y * radial_y
-    if mode == 3:
-        return radial_x * radial_amount, radial_y * radial_amount
-    tangent_x, tangent_y = -radial_y, radial_x
-    tangent_amount = delta_x * tangent_x + delta_y * tangent_y
-    return tangent_x * tangent_amount, tangent_y * tangent_amount
+
+    obj = context.active_object
+    active_point = get_curve_point_by_global_index(obj, active_idx)
+    target_point = get_curve_point_by_global_index(obj, point_idx)
+    active_tilt = getattr(active_point, 'tilt', 0.0) if active_point is not None else 0.0
+    target_tilt = getattr(target_point, 'tilt', 0.0) if target_point is not None else 0.0
+    active_scale = max(1e-8, settings.point_settings[active_idx].scale * getattr(active_point, 'radius', 1.0))
+    target_scale = max(1e-8, settings.point_settings[point_idx].scale * getattr(target_point, 'radius', 1.0))
+
+    active_normal, active_binormal = active_frame
+    target_normal, target_binormal = target_frame
+    active_rotation = math.radians(settings.point_settings[active_idx].rotation) + active_tilt
+    target_rotation = math.radians(settings.point_settings[point_idx].rotation) + target_tilt
+    active_cos = math.cos(active_rotation)
+    active_sin = math.sin(active_rotation)
+    target_cos = math.cos(target_rotation)
+    target_sin = math.sin(target_rotation)
+
+    active_x_axis = active_normal * active_cos + active_binormal * active_sin
+    active_y_axis = -active_normal * active_sin + active_binormal * active_cos
+    target_x_axis = target_normal * target_cos + target_binormal * target_sin
+    target_y_axis = -target_normal * target_sin + target_binormal * target_cos
+
+    region_data = context.region_data
+    view_right = region_data.view_rotation @ Vector((1.0, 0.0, 0.0)) if region_data else active_x_axis
+    view_up = region_data.view_rotation @ Vector((0.0, 1.0, 0.0)) if region_data else active_y_axis
+    view_forward = region_data.view_rotation @ Vector((0.0, 0.0, -1.0)) if region_data else active_x_axis.cross(active_y_axis)
+
+    if mode == 1:
+        world_delta = (active_x_axis * delta_x + active_y_axis * delta_y) * active_scale
+    elif mode == 2:
+        world_delta = (view_right * delta_x + view_up * delta_y) * active_scale
+    elif mode == 3:
+        screen_delta = view_right * delta_x + view_up * delta_y
+        target_tangent = target_x_axis.cross(target_y_axis).normalized()
+        world_delta = (screen_delta - target_tangent * screen_delta.dot(target_tangent)) * active_scale
+    elif mode == 4:
+        active_tangent = active_x_axis.cross(active_y_axis).normalized()
+        screen_delta = view_right * delta_x + view_up * delta_y
+        world_delta = (screen_delta - active_tangent * screen_delta.dot(active_tangent)) * active_scale
+    else:
+        screen_x = target_x_axis - view_forward * target_x_axis.dot(view_forward)
+        screen_y = target_y_axis - view_forward * target_y_axis.dot(view_forward)
+        matrix_det = screen_x.dot(view_right) * screen_y.dot(view_up) - screen_x.dot(view_up) * screen_y.dot(view_right)
+        if abs(matrix_det) < 1e-8:
+            world_delta = (view_right * delta_x + view_up * delta_y) * active_scale
+        else:
+            desired_x = delta_x * active_scale
+            desired_y = delta_y * active_scale
+            local_x = (desired_x * screen_y.dot(view_up) - desired_y * screen_y.dot(view_right)) / matrix_det
+            local_y = (screen_x.dot(view_right) * desired_y - screen_x.dot(view_up) * desired_x) / matrix_det
+            return local_x / target_scale, local_y / target_scale
+
+    return world_delta.dot(target_x_axis) / target_scale, world_delta.dot(target_y_axis) / target_scale
 
 
 def apply_longitudinal_move(context, settings, wd, selected, delta_x, delta_y):
     state = get_longitudinal_initial_state(wd)
     restore_longitudinal_initial_state(settings, state)
     weights = get_longitudinal_weights(context, settings, settings.active_point_index, wd.longitudinal_radius)
+    frames = get_all_control_point_frames(context) if wd.longitudinal_move_mode != 0 else None
     for point_idx, weight in weights.items():
         point_state = state.get(point_idx, {})
         if point_idx >= len(settings.point_settings):
@@ -375,7 +453,14 @@ def apply_longitudinal_move(context, settings, wd, selected, delta_x, delta_y):
             initial_offset = point_state.get(vert_idx)
             if initial_offset is not None and vert_idx < len(verts):
                 local_dx, local_dy = get_longitudinal_delta(
-                    context, settings, point_idx, delta_x, delta_y, wd.longitudinal_move_mode, initial_offset
+                    context,
+                    settings,
+                    point_idx,
+                    delta_x,
+                    delta_y,
+                    wd.longitudinal_move_mode,
+                    initial_offset,
+                    frames,
                 )
                 verts[vert_idx].offset_x = initial_offset[0] + local_dx * weight
                 verts[vert_idx].offset_y = initial_offset[1] + local_dy * weight
@@ -506,6 +591,37 @@ def draw_circle_points(shader, points, color, radius, segments=20):
     shader.bind()
     shader.uniform_float("color", color)
     batch.draw(shader)
+
+
+def get_longitudinal_circle_screen_data(context, obj, settings, radius):
+    region = context.region
+    region_data = context.region_data
+    active_idx = settings.active_point_index
+    if region is None or region_data is None or active_idx < 0:
+        return None, 0.0
+
+    world_positions = []
+    for spline_data in get_curve_points_data(obj):
+        for point_data in spline_data.get('points', []):
+            world_positions.append(obj.matrix_world @ point_data['co'])
+    if active_idx >= len(world_positions):
+        return None, 0.0
+
+    center = view3d_utils.location_3d_to_region_2d(region, region_data, world_positions[active_idx])
+    if center is None:
+        return None, 0.0
+
+    target_distance = max(1, int(math.ceil(radius)))
+    projected_distances = []
+    for target_idx in (active_idx - target_distance, active_idx + target_distance):
+        if 0 <= target_idx < len(world_positions):
+            projected = view3d_utils.location_3d_to_region_2d(region, region_data, world_positions[target_idx])
+            if projected is not None:
+                projected_distances.append(math.hypot(projected.x - center.x, projected.y - center.y))
+    if not projected_distances:
+        return (center.x, center.y), 24.0
+    fractional_scale = radius / target_distance
+    return (center.x, center.y), max(18.0, max(projected_distances) * fractional_scale)
 
 
 def draw_circle_outline(shader, points, color, radius, segments=24, line_width=1.4):
@@ -1280,26 +1396,42 @@ def draw_widget_callback():
 
     if proportional_edit_enabled(context) and wd.move_active:
         if wd.proportional_mode == 'CROSS':
+            circle_center = (wd.proportional_center_x, wd.proportional_center_y)
+            circle_radius = wd.proportional_radius
+            circle_color = (0.15, 0.85, 1.0, 0.9)
+        else:
+            circle_center, circle_radius = get_longitudinal_circle_screen_data(
+                context, obj, settings, wd.longitudinal_radius
+            )
+            circle_color = (0.55, 0.4, 1.0, 0.95)
+        if circle_center is not None:
             draw_circle_outline(
                 shader,
-                [(wd.proportional_center_x, wd.proportional_center_y)],
-                (0.15, 0.85, 1.0, 0.9),
-                wd.proportional_radius,
+                [circle_center],
+                circle_color,
+                circle_radius,
                 segments=64,
-                line_width=1.5,
+                line_width=1.7,
             )
+
         mode_label = "横截面衰减" if wd.proportional_mode == 'CROSS' else "纵向衰减"
-        range_label = f"{wd.proportional_radius:.0f}px" if wd.proportional_mode == 'CROSS' else f"前后 {wd.longitudinal_radius:.1f} 个截面"
+        move_label = (
+            LONGITUDINAL_MOVE_MODE_LABELS[wd.longitudinal_move_mode]
+            if wd.proportional_mode == 'LONGITUDINAL'
+            else "—"
+        )
+        hint_lines = (
+            f"当前模式：{mode_label}",
+            f"纵向移动：{move_label}",
+        )
         font_id = 0
-        if wd.proportional_mode == 'LONGITUDINAL':
-            move_label = LONGITUDINAL_MOVE_MODE_LABELS[wd.longitudinal_move_mode]
-            hint = f"F 衰减模式 | V 移动方式 | {mode_label} | {move_label} | 滚轮 {range_label}"
-        else:
-            hint = f"F 切换模式 | {mode_label} | 滚轮范围 {range_label}"
+        text_x = min(wd.mouse_x + 20.0, region.width - 190.0)
+        text_top = min(wd.mouse_y + 22.0, region.height - 18.0)
         blf.size(font_id, 14)
-        blf.color(font_id, 0.2, 0.9, 1.0, 1.0)
-        blf.position(font_id, wd.mouse_x + 18.0, wd.mouse_y + 20.0, 0)
-        blf.draw(font_id, hint)
+        for line_idx, line in enumerate(hint_lines):
+            blf.color(font_id, *(circle_color[:3] if line_idx == 0 else (0.88, 0.9, 0.94)), 1.0)
+            blf.position(font_id, text_x, text_top - line_idx * 19.0, 0)
+            blf.draw(font_id, line)
 
     cross_size = 9.0
     cross_lines = [
