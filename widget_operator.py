@@ -36,6 +36,16 @@ _PIPE_BASEMESH_STATE_KEY = "hair_pipe_widget_basemesh_state"
 _CURVE_OVERLAY_STATE_KEY = "hair_pipe_widget_curve_overlay_state"
 
 
+def draw_cross_section_delete_menu(self, context):
+    layout = self.layout
+    layout.separator()
+    layout.operator(
+        HAIRPIPE_OT_widget_delete_selected_vertices.bl_idname,
+        text="删除横截面顶点",
+        icon='REMOVE',
+    )
+
+
 class HairPipeWidgetSettings(PropertyGroup):
     """Runtime state for the cross-section widget"""
     widget_center_x: FloatProperty(default=0.0)
@@ -2052,6 +2062,22 @@ def remove_cross_section_vertex(ps):
     return True
 
 
+def remove_selected_cross_section_vertices(settings, ps, selected_indices):
+    indices = sorted({idx for idx in selected_indices if 0 <= idx < len(ps.cross_section_verts)}, reverse=True)
+    if not indices or len(ps.cross_section_verts) - len(indices) < 3:
+        return False
+
+    for point_setting in settings.point_settings:
+        verts = point_setting.cross_section_verts
+        for idx in indices:
+            if 0 <= idx < len(verts):
+                verts.remove(idx)
+        point_setting.active_vert_index = min(indices[-1], len(verts) - 1)
+
+    update_all_ghost_vertices(settings)
+    return True
+
+
 class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
     """Open interactive cross-section editor overlay in the 3D viewport"""
     bl_idname = "hair_pipe.widget_interact"
@@ -2739,6 +2765,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
+    if event.type == 'X' and event.value == 'PRESS':
+        return {'PASS_THROUGH'}
+
     if event.type == 'RIGHTMOUSE' and event.value == 'PRESS':
         return {'PASS_THROUGH'}
 
@@ -2802,6 +2831,36 @@ class HAIRPIPE_OT_widget_remove_vertex(bpy.types.Operator):
         sync_active_cross_section_to_selected_points(context)
         if wd is not None:
             wd.drag_vert_index = -1
+        redraw_view3d(context)
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_widget_delete_selected_vertices(bpy.types.Operator):
+    bl_idname = "hair_pipe.widget_delete_selected_vertices"
+    bl_label = "删除横截面顶点"
+
+    @classmethod
+    def poll(cls, context):
+        obj, settings, ps, wd = get_widget_edit_context(context)
+        return (
+            obj is not None
+            and ps is not None
+            and wd is not None
+            and wd.is_active
+            and bool(get_selected_widget_verts(wd))
+        )
+
+    def execute(self, context):
+        obj, settings, ps, wd = get_widget_edit_context(context)
+        selected = get_selected_widget_verts(wd)
+        if ps is None or len(ps.cross_section_verts) - len(selected) < 3:
+            self.report({'WARNING'}, "横截面至少需要保留三个顶点")
+            return {'CANCELLED'}
+        push_widget_undo(context, "删除横截面顶点")
+        if not remove_selected_cross_section_vertices(settings, ps, selected):
+            return {'CANCELLED'}
+        set_selected_widget_verts(wd, set())
+        wd.drag_vert_index = -1
         redraw_view3d(context)
         return {'FINISHED'}
 
@@ -2932,6 +2991,7 @@ classes = (
     HAIRPIPE_OT_widget_hold,
     HAIRPIPE_OT_widget_add_vertex,
     HAIRPIPE_OT_widget_remove_vertex,
+    HAIRPIPE_OT_widget_delete_selected_vertices,
     HAIRPIPE_OT_widget_toggle_ghost,
     HAIRPIPE_OT_widget_make_normal,
     HAIRPIPE_OT_widget_toggle_smooth_preview,
@@ -2942,11 +3002,14 @@ classes = (
 
 
 def register_keymaps():
-    pass
+    bpy.types.VIEW3D_MT_edit_curve_delete.append(draw_cross_section_delete_menu)
 
 
 def unregister_keymaps():
-    pass
+    try:
+        bpy.types.VIEW3D_MT_edit_curve_delete.remove(draw_cross_section_delete_menu)
+    except (AttributeError, ValueError):
+        pass
 
 
 def register():
