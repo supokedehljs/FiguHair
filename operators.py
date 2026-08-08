@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from mathutils import Matrix, Vector
 from bpy.props import IntProperty, FloatProperty, EnumProperty, BoolProperty, StringProperty
+from bpy_extras import view3d_utils
 
 
 def ensure_curve_defaults(curve_obj):
@@ -3794,7 +3795,13 @@ class HAIRPIPE_OT_reverse_curve_direction(bpy.types.Operator):
         curve_obj["hair_pipe_start_point_changed"] = False
         _store_curve_point_signatures(curve_obj, _curve_point_position_signatures(curve_obj))
         update_all_ghost_vertices(settings)
-        curve_obj.data.update()
+        try:
+            curve_obj.update_from_editmode()
+        except (AttributeError, RuntimeError):
+            pass
+        curve_obj.data.update_tag()
+        curve_obj.update_tag()
+        context.view_layer.update()
         self.report({'INFO'}, "曲线方向已翻转；横截面与滚转已保留")
         return {'FINISHED'}
 
@@ -4630,7 +4637,166 @@ def _is_figuhair_family_obj(obj):
     return False
 
 
+class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
+    """Drag from a surface point to create a FiguHair curve"""
+    bl_idname = "hair_pipe.draw_hair_curve"
+    bl_label = "新建头发曲线"
+    bl_options = {'REGISTER', 'UNDO', 'BLOCKING'}
+
+    _start_world = None
+    _start_normal = None
+    _preview_curve = None
+    _preview_mesh = None
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and context.area is not None and context.area.type == 'VIEW_3D'
+
+    def raycast_surface(self, context, event):
+        region = context.region
+        region_data = context.region_data
+        coord = (event.mouse_region_x, event.mouse_region_y)
+        origin = view3d_utils.region_2d_to_origin_3d(region, region_data, coord)
+        direction = view3d_utils.region_2d_to_vector_3d(region, region_data, coord)
+        hit, location, normal, _face_index, hit_obj, _matrix = context.scene.ray_cast(
+            context.view_layer.depsgraph, origin, direction
+        )
+        if hit and hit_obj is not None and hit_obj.type == 'MESH':
+            return location.copy(), normal.normalized()
+        return None, None
+
+    def get_drag_end(self, context, event):
+        end_world, _normal = self.raycast_surface(context, event)
+        if end_world is not None:
+            return end_world
+        region = context.region
+        region_data = context.region_data
+        coord = (event.mouse_region_x, event.mouse_region_y)
+        origin = view3d_utils.region_2d_to_origin_3d(region, region_data, coord)
+        direction = view3d_utils.region_2d_to_vector_3d(region, region_data, coord)
+        plane_normal = region_data.view_rotation @ Vector((0.0, 0.0, 1.0))
+        denominator = direction.dot(plane_normal)
+        if abs(denominator) <= 1e-8:
+            return None
+        return origin + direction * ((self._start_world - origin).dot(plane_normal) / denominator)
+
+    def update_curve_points(self, curve_obj, end_world):
+        spline = curve_obj.data.splines[0]
+        for index, point in enumerate(spline.points):
+            point.co = (*self._start_world.lerp(end_world, index / 4.0), 1.0)
+        curve_obj.data.update_tag()
+
+    def create_curve(self, context, end_world, preview=False):
+        direction = end_world - self._start_world
+        if direction.length < 1e-5:
+            return None
+        base_name = get_next_figuhair_base_name()
+        suffix = " Preview" if preview else " Curve"
+        curve_data = bpy.data.curves.new(base_name + suffix, 'CURVE')
+        curve_data.dimensions = '3D'
+        curve_data.resolution_u = 16
+        curve_data.render_resolution_u = 16
+        spline = curve_data.splines.new('NURBS')
+        spline.points.add(4)
+        for index, point in enumerate(spline.points):
+            factor = index / 4.0
+            world_co = self._start_world.lerp(end_world, factor)
+            point.co = (*world_co, 1.0)
+        spline.order_u = 5
+        spline.use_endpoint_u = True
+        curve_obj = bpy.data.objects.new(base_name + suffix, curve_data)
+        curve_obj["hair_pipe_base_name"] = base_name
+        if preview:
+            curve_obj["hair_pipe_draw_preview"] = True
+        context.collection.objects.link(curve_obj)
+        sync_point_settings(curve_obj)
+        curve_obj.hair_pipe_settings.pipe_resolution = 0
+        if preview:
+            curve_data.bevel_depth = max(0.002, curve_obj.hair_pipe_settings.default_radius)
+            curve_data.bevel_resolution = 0
+            curve_data.resolution_u = 2
+            curve_data.render_resolution_u = 2
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        curve_obj.select_set(not preview)
+        if not preview:
+            context.view_layer.objects.active = curve_obj
+        if not preview:
+            bpy.ops.hair_pipe.generate_pipe()
+        return curve_obj
+
+    def cleanup_preview(self):
+        preview_curve = self._preview_curve
+        preview_mesh = self._preview_mesh
+        self._preview_curve = None
+        self._preview_mesh = None
+        if preview_mesh is not None and preview_mesh.name in bpy.data.objects:
+            mesh_data = preview_mesh.data
+            bpy.data.objects.remove(preview_mesh, do_unlink=True)
+            if mesh_data is not None and mesh_data.users == 0:
+                bpy.data.meshes.remove(mesh_data)
+        if preview_curve is not None and preview_curve.name in bpy.data.objects:
+            curve_data = preview_curve.data
+            bpy.data.objects.remove(preview_curve, do_unlink=True)
+            if curve_data is not None and curve_data.users == 0:
+                bpy.data.curves.remove(curve_data)
+
+    def invoke(self, context, event):
+        self._start_world = None
+        self._start_normal = None
+        self._preview_curve = None
+        self._preview_mesh = None
+        self._start_world, self._start_normal = self.raycast_surface(context, event)
+        if self._start_world is None:
+            self.report({'WARNING'}, "请在网格物体表面开始拖动")
+            return {'CANCELLED'}
+        context.window_manager.modal_handler_add(self)
+        context.window.cursor_modal_set('CROSSHAIR')
+        context.area.header_text_set("拖动并松开创建头发曲线；Esc 取消")
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type in {'ESC', 'RIGHTMOUSE'}:
+            self.cleanup_preview()
+            context.window.cursor_modal_restore()
+            context.area.header_text_set(None)
+            return {'CANCELLED'}
+        if self._start_world is not None and event.type == 'MOUSEMOVE':
+            end_world = self.get_drag_end(context, event)
+            if end_world is not None and (end_world - self._start_world).length >= 1e-5:
+                if self._preview_curve is None:
+                    self._preview_curve = self.create_curve(context, end_world, preview=True)
+                else:
+                    self.update_curve_points(self._preview_curve, end_world)
+                context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+        if self._start_world is not None and event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
+            end_world = self.get_drag_end(context, event)
+            self.cleanup_preview()
+            if end_world is None or self.create_curve(context, end_world) is None:
+                self.report({'WARNING'}, "拖动距离太短，未创建头发")
+                return {'RUNNING_MODAL'}
+            context.window.cursor_modal_restore()
+            context.area.header_text_set(None)
+            return {'FINISHED'}
+        return {'RUNNING_MODAL'}
+
+
+class HAIRPIPE_WST_draw_hair_curve(bpy.types.WorkSpaceTool):
+    bl_space_type = 'VIEW_3D'
+    bl_context_mode = 'OBJECT'
+    bl_idname = "hair_pipe.draw_hair_curve_tool"
+    bl_label = "新建头发曲线"
+    bl_description = "从物体表面拖动创建一条新的 FiguHair 曲线"
+    bl_icon = "ops.curve.draw"
+    bl_widget = None
+    bl_keymap = (
+        ("hair_pipe.draw_hair_curve", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
+    )
+
+
 classes = (
+    HAIRPIPE_OT_draw_hair_curve,
     HAIRPIPE_OT_mesh_to_hair_curve,
     HAIRPIPE_OT_generate_pipe,
     HAIRPIPE_OT_sync_points,
@@ -4698,10 +4864,18 @@ def unregister_keymaps():
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+    try:
+        bpy.utils.register_tool(HAIRPIPE_WST_draw_hair_curve, after={"builtin.cursor"}, separator=True, group=True)
+    except RuntimeError:
+        pass
     register_keymaps()
 
 
 def unregister():
     unregister_keymaps()
+    try:
+        bpy.utils.unregister_tool(HAIRPIPE_WST_draw_hair_curve)
+    except RuntimeError:
+        pass
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
