@@ -34,6 +34,42 @@ _draw_handle = None
 _addon_keymaps = []
 _PIPE_BASEMESH_STATE_KEY = "hair_pipe_widget_basemesh_state"
 _CURVE_OVERLAY_STATE_KEY = "hair_pipe_widget_curve_overlay_state"
+_pipe_mesh_cache = {}
+
+
+def get_cached_pipe_mesh(obj):
+    """Reuse generated geometry while the curve and cross-section data are unchanged."""
+    if obj is None:
+        return None, None
+    settings = obj.hair_pipe_settings
+    signature = [len(settings.point_settings), tuple(value for row in obj.matrix_world for value in row)]
+    for spline in obj.data.splines:
+        points = spline.bezier_points if spline.type == 'BEZIER' else spline.points
+        signature.extend(
+            (tuple(point.co), getattr(point, 'radius', 1.0), getattr(point, 'tilt', 0.0))
+            for point in points
+        )
+    for point_setting in settings.point_settings:
+        signature.extend((len(point_setting.cross_section_verts), point_setting.scale, point_setting.rotation))
+        signature.extend(
+            (vertex.offset_x, vertex.offset_y, bool(getattr(vertex, 'is_ghost', False)))
+            for vertex in point_setting.cross_section_verts
+        )
+    signature = hash(repr(signature))
+    cache_key = obj.as_pointer()
+    cached = _pipe_mesh_cache.get(cache_key)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    try:
+        mesh = generate_pipe_mesh(obj, settings)
+    except Exception:
+        mesh = (None, None)
+    _pipe_mesh_cache[cache_key] = (signature, mesh)
+    return mesh
+
+
+def clear_pipe_mesh_cache():
+    _pipe_mesh_cache.clear()
 
 
 def draw_cross_section_delete_menu(self, context):
@@ -110,10 +146,13 @@ class HairPipeWidgetSettings(PropertyGroup):
     scale_start_x: FloatProperty(default=0.0)
     scale_start_y: FloatProperty(default=0.0)
     scale_start_factor: FloatProperty(default=1.0)
+    proportional_radius: FloatProperty(default=120.0, min=8.0, max=5000.0)
     auto_alignment_angle: FloatProperty(default=0.0)
     auto_alignment_flip_h: BoolProperty(default=False)
     auto_alignment_initialized: BoolProperty(default=False)
+    auto_alignment_signature: bpy.props.StringProperty(default="")
     rotate_initial_offsets: bpy.props.StringProperty(default="")
+    proportional_weights: bpy.props.StringProperty(default="{}")
     rotate_button_x0: FloatProperty(default=0.0)
     rotate_button_y0: FloatProperty(default=0.0)
     rotate_button_x1: FloatProperty(default=0.0)
@@ -128,6 +167,52 @@ class HairPipeWidgetSettings(PropertyGroup):
     corr_rot_drag_start_val: FloatProperty(default=0.0)
     undo_stack: bpy.props.StringProperty(default="[]")
 
+
+
+def proportional_edit_enabled(context):
+    tool_settings = getattr(getattr(context, 'scene', None), 'tool_settings', None)
+    return bool(getattr(tool_settings, 'use_proportional_edit', False))
+
+
+def proportional_weight(context, distance, radius):
+    if not proportional_edit_enabled(context):
+        return 1.0 if distance <= 1e-8 else 0.0
+    if distance >= radius:
+        return 0.0
+    ratio = max(0.0, min(1.0, distance / max(radius, 1e-8)))
+    falloff = getattr(getattr(context.scene, 'tool_settings', None), 'proportional_edit_falloff', 'SMOOTH')
+    if falloff == 'CONSTANT':
+        return 1.0
+    if falloff == 'LINEAR':
+        return 1.0 - ratio
+    if falloff == 'SHARP':
+        return (1.0 - ratio) ** 2
+    if falloff == 'ROOT':
+        return math.sqrt(1.0 - ratio)
+    if falloff == 'SPHERE':
+        return math.sqrt(max(0.0, 1.0 - ratio * ratio))
+    return (1.0 - ratio) * (1.0 - ratio) * (3.0 - 2.0 * (1.0 - ratio))
+
+
+def get_proportional_vertex_weights(context, verts, selected, cx, cy, sf, alignment_angle, flip_h, radius):
+    if not proportional_edit_enabled(context):
+        return {idx: 1.0 for idx in selected}
+    selected_points = []
+    for idx in selected:
+        if 0 <= idx < len(verts) and not getattr(verts[idx], 'is_ghost', False):
+            ox, oy = get_raw_offset(verts[idx])
+            selected_points.append(effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h))
+    weights = {}
+    for idx, vertex in enumerate(verts):
+        if getattr(vertex, 'is_ghost', False):
+            continue
+        ox, oy = get_raw_offset(vertex)
+        px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
+        distance = min((math.hypot(px - sx, py - sy) for sx, sy in selected_points), default=float('inf'))
+        weight = proportional_weight(context, distance, radius)
+        if weight > 0.0:
+            weights[idx] = weight
+    return weights
 
 
 def get_selected_widget_verts(wd):
@@ -185,21 +270,41 @@ def store_rotate_offsets(wd, verts, indices):
     parts = []
     for i in indices:
         if i < len(verts):
-            parts.append(str(verts[i].offset_x) + ":" + str(verts[i].offset_y))
-        else:
-            parts.append("0:0")
+            parts.append(f"{i}:{verts[i].offset_x}:{verts[i].offset_y}")
     wd.rotate_initial_offsets = ";".join(parts)
+
+
+def set_proportional_weights(wd, weights):
+    wd.proportional_weights = json.dumps(weights)
+
+
+def get_proportional_weights(wd):
+    try:
+        return {int(idx): float(weight) for idx, weight in json.loads(wd.proportional_weights).items()}
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def prepare_proportional_transform(context, wd, verts, selected, cx, cy, sf, alignment_angle, flip_h):
+    weights = get_proportional_vertex_weights(
+        context, verts, selected, cx, cy, sf, alignment_angle, flip_h, wd.proportional_radius
+    )
+    set_proportional_weights(wd, weights)
+    store_rotate_offsets(wd, verts, sorted(weights))
 
 
 def get_rotate_offsets(wd):
     raw = wd.rotate_initial_offsets.strip()
     if not raw:
-        return []
-    result = []
+        return {}
+    result = {}
     for part in raw.split(";"):
-        xy = part.split(":")
-        if len(xy) == 2:
-            result.append((float(xy[0]), float(xy[1])))
+        values = part.split(":")
+        if len(values) == 3:
+            try:
+                result[int(values[0])] = (float(values[1]), float(values[2]))
+            except ValueError:
+                continue
     return result
 
 
@@ -541,7 +646,7 @@ def draw_active_pipe_cross_section_ring(context, ps):
         return
 
     try:
-        mesh_verts, _faces = generate_pipe_mesh(obj, obj.hair_pipe_settings)
+        mesh_verts, _faces = get_cached_pipe_mesh(obj)
     except Exception:
         mesh_verts = None
     if not mesh_verts:
@@ -724,7 +829,7 @@ def get_pipe_control_vertices_in_screen_rect(context, x0, y0, x1, y1):
         return []
 
     try:
-        mesh_verts, _faces = generate_pipe_mesh(obj, settings)
+        mesh_verts, _faces = get_cached_pipe_mesh(obj)
     except Exception:
         return []
     if not mesh_verts:
@@ -1840,17 +1945,16 @@ def get_auto_widget_alignment_from_view(context, ps):
 
 
 def get_stable_widget_alignment(context, ps, wd):
-    is_editing = any((
-        getattr(wd, 'move_active', False),
-        getattr(wd, 'rotate_active', False),
-        getattr(wd, 'scale_active', False),
-    ))
-    if is_editing and getattr(wd, 'auto_alignment_initialized', False):
+    region_data = context.region_data
+    view_signature = repr(tuple(round(value, 5) for row in region_data.view_matrix for value in row)) if region_data else ""
+    signature = f"{context.active_object.hair_pipe_settings.active_point_index}:{view_signature}"
+    if getattr(wd, 'auto_alignment_initialized', False) and wd.auto_alignment_signature == signature:
         return wd.auto_alignment_angle, wd.auto_alignment_flip_h
 
     angle, flip_h = get_auto_widget_alignment_from_view(context, ps)
     wd.auto_alignment_angle = angle
     wd.auto_alignment_flip_h = flip_h
+    wd.auto_alignment_signature = signature
     wd.auto_alignment_initialized = True
     return angle, flip_h
 
@@ -2191,7 +2295,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         return {'FINISHED'}
 
     if event.type == 'Z' and event.value == 'PRESS' and event.ctrl:
-        pop_widget_undo(context)
+        if pop_widget_undo(context):
+            clear_pipe_mesh_cache()
         redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
@@ -2327,6 +2432,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                     wd.move_start_x = wd.left_drag_start_x
                     wd.move_start_y = wd.left_drag_start_y
                     store_rotate_offsets(wd, verts, sorted(movable))
+                    set_proportional_weights(wd, get_proportional_vertex_weights(context, verts, movable, cx, cy, sf, alignment_angle, flip_h, wd.proportional_radius))
                 wd.left_drag_pending = False
                 redraw_view3d(context)
                 return {'RUNNING_MODAL'}
@@ -2377,10 +2483,12 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             sx, sy = widget_to_effective(wd.move_start_x, wd.move_start_y, cx, cy, sf, alignment_angle, flip_h)
             delta_x = dx - sx
             delta_y = dy - sy
-            for ip, vi in enumerate(sel):
-                if vi < len(verts) and ip < len(initial) and not getattr(verts[vi], 'is_ghost', False):
-                    verts[vi].offset_x = initial[ip][0] + delta_x
-                    verts[vi].offset_y = initial[ip][1] + delta_y
+            weights = get_proportional_weights(wd)
+            for vi, weight in weights.items():
+                initial_offset = initial.get(vi)
+                if initial_offset is not None and vi < len(verts) and not getattr(verts[vi], 'is_ghost', False):
+                    verts[vi].offset_x = initial_offset[0] + delta_x * weight
+                    verts[vi].offset_y = initial_offset[1] + delta_y * weight
             update_ghost_vertices(ps)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
@@ -2392,10 +2500,10 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type in {'RIGHTMOUSE', 'ESC'}:
-            for ip, vi in enumerate(sel):
-                if vi < len(verts) and ip < len(initial):
-                    verts[vi].offset_x = initial[ip][0]
-                    verts[vi].offset_y = initial[ip][1]
+            for vi, initial_offset in initial.items():
+                if vi < len(verts):
+                    verts[vi].offset_x = initial_offset[0]
+                    verts[vi].offset_y = initial_offset[1]
             wd.move_active = False
             wd.left_drag_active = False
             wd.left_drag_vert_index = -1
@@ -2428,15 +2536,20 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         initial = get_rotate_offsets(wd)
         if event.type == 'MOUSEMOVE':
             cnt = max(1, len(initial))
-            ctr_x = sum(o[0] for o in initial) / cnt
-            ctr_y = sum(o[1] for o in initial) / cnt
+            ctr_x = sum(o[0] for o in initial.values()) / cnt
+            ctr_y = sum(o[1] for o in initial.values()) / cnt
             start_dist = math.sqrt((wd.scale_start_x - cx) ** 2 + (wd.scale_start_y - cy) ** 2)
             now_dist = math.sqrt((mx - cx) ** 2 + (my - cy) ** 2)
             factor = now_dist / max(start_dist, 1.0)
-            for ip, vi in enumerate(sel):
-                if vi < len(verts) and ip < len(initial) and not getattr(verts[vi], 'is_ghost', False):
-                    verts[vi].offset_x = ctr_x + (initial[ip][0] - ctr_x) * factor
-                    verts[vi].offset_y = ctr_y + (initial[ip][1] - ctr_y) * factor
+            weights = get_proportional_weights(wd)
+            for vi, weight in weights.items():
+                initial_offset = initial.get(vi)
+                if initial_offset is not None and vi < len(verts) and not getattr(verts[vi], 'is_ghost', False):
+                    initial_x, initial_y = initial_offset
+                    target_x = ctr_x + (initial_x - ctr_x) * factor
+                    target_y = ctr_y + (initial_y - ctr_y) * factor
+                    verts[vi].offset_x = initial_x + (target_x - initial_x) * weight
+                    verts[vi].offset_y = initial_y + (target_y - initial_y) * weight
             update_ghost_vertices(ps)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
@@ -2471,12 +2584,19 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             cnt = max(1, len(initial))
             ctr_x = sum(o[0] for o in initial) / cnt
             ctr_y = sum(o[1] for o in initial) / cnt
-            for ip, vi in enumerate(sel):
-                if vi < len(verts) and ip < len(initial) and not getattr(verts[vi], 'is_ghost', False):
-                    rx = initial[ip][0] - ctr_x
-                    ry = initial[ip][1] - ctr_y
-                    verts[vi].offset_x = ctr_x + rx * cos_a - ry * sin_a
-                    verts[vi].offset_y = ctr_y + rx * sin_a + ry * cos_a
+            weights = get_proportional_weights(wd)
+            for vi, weight in weights.items():
+                initial_offset = initial.get(vi)
+                if initial_offset is not None and vi < len(verts) and not getattr(verts[vi], 'is_ghost', False):
+                    weighted_angle = angle * weight
+                    weighted_cos = math.cos(weighted_angle)
+                    weighted_sin = math.sin(weighted_angle)
+                    rx = initial_offset[0] - ctr_x
+                    ry = initial_offset[1] - ctr_y
+                    target_x = ctr_x + rx * weighted_cos - ry * weighted_sin
+                    target_y = ctr_y + rx * weighted_sin + ry * weighted_cos
+                    verts[vi].offset_x = initial_offset[0] + (target_x - initial_offset[0]) * weight
+                    verts[vi].offset_y = initial_offset[1] + (target_y - initial_offset[1]) * weight
             update_ghost_vertices(ps)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
@@ -2717,7 +2837,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             wd.move_active = True
             wd.move_start_x = mx
             wd.move_start_y = my
-            store_rotate_offsets(wd, verts, sorted(sel))
+            prepare_proportional_transform(context, wd, verts, sel, cx, cy, sf, alignment_angle, flip_h)
+            set_proportional_weights(wd, get_proportional_vertex_weights(context, verts, sel, cx, cy, sf, alignment_angle, flip_h, wd.proportional_radius))
             redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
@@ -2730,7 +2851,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             wd.rotate_active = True
             wd.rotate_start_x = mx
             wd.rotate_start_y = my
-            store_rotate_offsets(wd, verts, sorted(sel))
+            prepare_proportional_transform(context, wd, verts, sel, cx, cy, sf, alignment_angle, flip_h)
             redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
@@ -2751,7 +2872,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             wd.scale_active = True
             wd.scale_start_x = mx
             wd.scale_start_y = my
-            store_rotate_offsets(wd, verts, sorted(sel))
+            prepare_proportional_transform(context, wd, verts, sel, cx, cy, sf, alignment_angle, flip_h)
             redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
