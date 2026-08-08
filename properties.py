@@ -97,9 +97,9 @@ class HairPipeSettings(PropertyGroup):
     pipe_resolution: IntProperty(
         name="Pipe Resolution",
         description="Intermediate rings between neighboring cross-sections. 0 = sections connect directly, 1 = one ring in between, etc.",
-        default=1,
+        default=0,
         min=0,
-        max=64,
+        max=0,
     )
     transition_mode: EnumProperty(
         name="Transition Mode",
