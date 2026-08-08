@@ -137,6 +137,9 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
             elif widget_data.is_active:
                 row.operator("hair_pipe.widget_stop", text="关闭编辑器", icon='PANEL_CLOSE')
                 row = box.row(align=True)
+                row.scale_y = 1.2
+                row.operator("hair_pipe.cross_section_spread", text="横截面传递", icon='DUPLICATE')
+                row = box.row(align=True)
                 row.operator("hair_pipe.widget_toggle_ghost", text="设置为幽灵点")
                 row.operator("hair_pipe.widget_make_normal", text="设置为正常点")
             else:

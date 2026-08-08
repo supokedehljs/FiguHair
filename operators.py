@@ -4637,6 +4637,97 @@ def _is_figuhair_family_obj(obj):
     return False
 
 
+class HAIRPIPE_OT_cross_section_spread(bpy.types.Operator):
+    """Spread the active cross-section along neighboring curve points with the wheel"""
+    bl_idname = "hair_pipe.cross_section_spread"
+    bl_label = "横截面传递"
+    bl_options = {'REGISTER', 'UNDO', 'BLOCKING'}
+
+    _curve_obj = None
+    _source_idx = -1
+    _lower = -1
+    _upper = -1
+    _original_data = None
+    _source_data = None
+
+    @classmethod
+    def poll(cls, context):
+        curve_obj = get_context_curve_object(context)
+        widget = getattr(context.window_manager, "hair_pipe_widget", None)
+        return (
+            curve_obj is not None
+            and is_curve_edit_mode(curve_obj)
+            and widget is not None
+            and widget.is_active
+            and len(curve_obj.hair_pipe_settings.point_settings) > 0
+        )
+
+    def apply_range(self):
+        settings = self._curve_obj.hair_pipe_settings
+        for idx, original in enumerate(self._original_data):
+            data = self._source_data if self._lower <= idx <= self._upper else original
+            _apply_point_setting_data(settings.point_settings[idx], data, settings)
+        update_all_ghost_vertices(settings)
+        self._curve_obj.data.update_tag()
+        self._curve_obj.update_tag()
+
+    def finish(self, context, cancelled=False):
+        if cancelled:
+            settings = self._curve_obj.hair_pipe_settings
+            for idx, data in enumerate(self._original_data):
+                _apply_point_setting_data(settings.point_settings[idx], data, settings)
+            update_all_ghost_vertices(settings)
+        self._curve_obj.data.update_tag()
+        self._curve_obj.update_tag()
+        context.view_layer.update()
+        context.area.header_text_set(None)
+        context.window.cursor_modal_restore()
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        return {'CANCELLED'} if cancelled else {'FINISHED'}
+
+    def invoke(self, context, event):
+        self._curve_obj = get_context_curve_object(context)
+        settings = self._curve_obj.hair_pipe_settings
+        self._source_idx = max(0, min(settings.active_point_index, len(settings.point_settings) - 1))
+        self._lower = self._source_idx
+        self._upper = self._source_idx
+        self._original_data = [_point_setting_to_data(point_setting) for point_setting in settings.point_settings]
+        self._source_data = _point_setting_to_data(settings.point_settings[self._source_idx])
+        context.window_manager.modal_handler_add(self)
+        context.window.cursor_modal_set('SCROLL_XY')
+        context.area.header_text_set("横截面传递：滚轮向两侧复制 | 左键/Enter 确认 | 右键/Esc 取消")
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type in {'ESC', 'RIGHTMOUSE'} and event.value == 'PRESS':
+            return self.finish(context, cancelled=True)
+        if event.type in {'LEFTMOUSE', 'RET', 'NUMPAD_ENTER'} and event.value == 'PRESS':
+            return self.finish(context)
+        if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.value == 'PRESS':
+            last_idx = len(self._original_data) - 1
+            if event.type == 'WHEELUPMOUSE':
+                if self._upper > self._source_idx:
+                    self._upper -= 1
+                elif self._lower > 0:
+                    self._lower -= 1
+            else:
+                if self._lower < self._source_idx:
+                    self._lower += 1
+                elif self._upper < last_idx:
+                    self._upper += 1
+            self.apply_range()
+            context.area.header_text_set(
+                f"横截面传递：{self._lower + 1}—{self._upper + 1}（来源 {self._source_idx + 1}） | 左键确认 | Esc 取消"
+            )
+            for area in context.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+            return {'RUNNING_MODAL'}
+        return {'RUNNING_MODAL'}
+
+
 class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
     """Drag from a surface point to create a FiguHair curve"""
     bl_idname = "hair_pipe.draw_hair_curve"
@@ -4796,6 +4887,7 @@ class HAIRPIPE_WST_draw_hair_curve(bpy.types.WorkSpaceTool):
 
 
 classes = (
+    HAIRPIPE_OT_cross_section_spread,
     HAIRPIPE_OT_draw_hair_curve,
     HAIRPIPE_OT_mesh_to_hair_curve,
     HAIRPIPE_OT_generate_pipe,
