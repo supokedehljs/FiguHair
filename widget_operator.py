@@ -147,6 +147,10 @@ class HairPipeWidgetSettings(PropertyGroup):
     scale_start_y: FloatProperty(default=0.0)
     scale_start_factor: FloatProperty(default=1.0)
     proportional_radius: FloatProperty(default=120.0, min=8.0, max=5000.0)
+    proportional_center_x: FloatProperty(default=0.0)
+    proportional_center_y: FloatProperty(default=0.0)
+    transform_pivot_x: FloatProperty(default=0.0)
+    transform_pivot_y: FloatProperty(default=0.0)
     auto_alignment_angle: FloatProperty(default=0.0)
     auto_alignment_flip_h: BoolProperty(default=False)
     auto_alignment_initialized: BoolProperty(default=False)
@@ -289,6 +293,18 @@ def prepare_proportional_transform(context, wd, verts, selected, cx, cy, sf, ali
     weights = get_proportional_vertex_weights(
         context, verts, selected, cx, cy, sf, alignment_angle, flip_h, wd.proportional_radius
     )
+    selected_points = []
+    for idx in selected:
+        if 0 <= idx < len(verts):
+            ox, oy = get_raw_offset(verts[idx])
+            selected_points.append(effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h))
+    if selected_points:
+        wd.proportional_center_x = sum(point[0] for point in selected_points) / len(selected_points)
+        wd.proportional_center_y = sum(point[1] for point in selected_points) / len(selected_points)
+    selected_offsets = [get_raw_offset(verts[idx]) for idx in selected if 0 <= idx < len(verts)]
+    if selected_offsets:
+        wd.transform_pivot_x = sum(offset[0] for offset in selected_offsets) / len(selected_offsets)
+        wd.transform_pivot_y = sum(offset[1] for offset in selected_offsets) / len(selected_offsets)
     set_proportional_weights(wd, weights)
     store_rotate_offsets(wd, verts, sorted(weights))
 
@@ -1125,6 +1141,16 @@ def draw_widget_callback():
     )
     draw_single_cross_section(shader, verts, ps, settings,
                                cx, cy, sf, alignment_angle, flip_h, half, True, wd)
+
+    if proportional_edit_enabled(context) and wd.move_active:
+        draw_circle_outline(
+            shader,
+            [(wd.proportional_center_x, wd.proportional_center_y)],
+            (0.15, 0.85, 1.0, 0.9),
+            wd.proportional_radius,
+            segments=64,
+            line_width=1.5,
+        )
 
     cross_size = 9.0
     cross_lines = [
@@ -2391,7 +2417,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             return {'RUNNING_MODAL'}
         return {'RUNNING_MODAL'}
 
-    if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.value == 'PRESS':
+    if not wd.move_active and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.value == 'PRESS':
         if not event.ctrl:
             return {'PASS_THROUGH'}
         total_points = len(settings.point_settings)
@@ -2478,6 +2504,25 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     if wd.move_active:
         sel = sorted(get_selected_widget_verts(wd))
         initial = get_rotate_offsets(wd)
+        if proportional_edit_enabled(context) and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.value == 'PRESS':
+            factor = 0.88 if event.type == 'WHEELUPMOUSE' else 1.0 / 0.88
+            wd.proportional_radius = max(8.0, min(5000.0, wd.proportional_radius * factor))
+            weights = get_proportional_vertex_weights(
+                context, verts, set(sel), cx, cy, sf, alignment_angle, flip_h, wd.proportional_radius
+            )
+            previous_initial = dict(initial)
+            new_initial = {}
+            for vi in weights:
+                if vi in previous_initial:
+                    new_initial[vi] = previous_initial[vi]
+                elif vi < len(verts):
+                    new_initial[vi] = (verts[vi].offset_x, verts[vi].offset_y)
+            set_proportional_weights(wd, weights)
+            wd.rotate_initial_offsets = ";".join(
+                f"{vi}:{offset[0]}:{offset[1]}" for vi, offset in sorted(new_initial.items())
+            )
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
         if event.type == 'MOUSEMOVE':
             dx, dy = widget_to_effective(mx, my, cx, cy, sf, alignment_angle, flip_h)
             sx, sy = widget_to_effective(wd.move_start_x, wd.move_start_y, cx, cy, sf, alignment_angle, flip_h)
@@ -2535,9 +2580,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         sel = sorted(get_selected_widget_verts(wd))
         initial = get_rotate_offsets(wd)
         if event.type == 'MOUSEMOVE':
-            cnt = max(1, len(initial))
-            ctr_x = sum(o[0] for o in initial.values()) / cnt
-            ctr_y = sum(o[1] for o in initial.values()) / cnt
+            ctr_x = wd.transform_pivot_x
+            ctr_y = wd.transform_pivot_y
             start_dist = math.sqrt((wd.scale_start_x - cx) ** 2 + (wd.scale_start_y - cy) ** 2)
             now_dist = math.sqrt((mx - cx) ** 2 + (my - cy) ** 2)
             factor = now_dist / max(start_dist, 1.0)
