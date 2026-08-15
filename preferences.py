@@ -78,6 +78,7 @@ class HairPipePreferences(AddonPreferences):
         ops_to_show = [
             ("hair_pipe.generate_pipe", "\u751f\u6210/\u66f4\u65b0\u7ba1\u7ebf"),
             ("hair_pipe.toggle_redirect_selection", "\u53ea\u9009\u66f2\u7ebf\u6a21\u5f0f"),
+            ("hair_pipe.toggle_solo_display", "单独显示"),
             ("hair_pipe.apply_edge_flow", "\u5e94\u7528\u8fb9\u6d41"),
             ("hair_pipe.equalize_point_distance", "\u8ddd\u79bb\u5e73\u5747\u5316"),
             ("hair_pipe.edit_tail_mesh", "\u672b\u7aef\u7f51\u683c\u7f16\u8f91\u6a21\u5f0f"),
@@ -164,7 +165,7 @@ def register_keymaps():
         kmi = km.keymap_items.new('hair_pipe.widget_interact', 'X', 'PRESS', ctrl=True, shift=True)
     _addon_keymaps.append((km, kmi))
 
-    kmi = km.keymap_items.new('hair_pipe.library_overlay_toggle', 'V', 'PRESS')
+    kmi = km.keymap_items.new('hair_pipe.toggle_solo_display', 'NONE', 'PRESS')
     _addon_keymaps.append((km, kmi))
     _register_keymaps_retries = 0
 

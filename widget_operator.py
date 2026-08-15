@@ -1734,8 +1734,8 @@ def refresh_pipe_during_widget_edit(context, min_interval=1.0 / 30.0):
         pass
 
 
-def redraw_view3d(context):
-    if getattr(getattr(context.window_manager, 'hair_pipe_widget', None), 'is_active', False):
+def redraw_view3d(context, refresh_pipe=True):
+    if refresh_pipe and getattr(getattr(context.window_manager, 'hair_pipe_widget', None), 'is_active', False):
         refresh_pipe_during_widget_edit(context)
     for area in context.screen.areas:
         if area.type == 'VIEW_3D':
