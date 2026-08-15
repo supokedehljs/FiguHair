@@ -150,6 +150,9 @@ class HairPipeWidgetSettings(PropertyGroup):
         default='SUBDIV',
     )
     preview_in_front: BoolProperty(name="显示在最前", default=False)
+    distraction_free: BoolProperty(default=False)
+    solo_hold_active: BoolProperty(default=False)
+    solo_hold_states: bpy.props.StringProperty(default="{}")
     preview_hold_active: BoolProperty(default=False)
     preview_hold_key: bpy.props.StringProperty(default="")
     preview_hold_previous_mode: bpy.props.StringProperty(default="SUBDIV")
@@ -1369,6 +1372,9 @@ def draw_widget_callback():
     if n < 3:
         return
 
+    if wd.distraction_free:
+        return
+
     draw_curve_start_marker(context, obj)
     draw_active_pipe_cross_section_ring(context, ps)
 
@@ -1696,6 +1702,20 @@ def setup_widget(context):
     ensure_draw_handler()
     redraw_view3d(context)
     return True
+
+
+def restore_widget_solo_hold(context, wd):
+    if not wd.solo_hold_active:
+        return
+    try:
+        states = json.loads(wd.solo_hold_states)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        states = {}
+    for scene_obj in context.view_layer.objects:
+        if scene_obj.name in states:
+            scene_obj.hide_set(bool(states[scene_obj.name]))
+    wd.solo_hold_states = "{}"
+    wd.solo_hold_active = False
 
 
 def refresh_pipe_during_widget_edit(context, min_interval=1.0 / 30.0):
@@ -2585,6 +2605,8 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
             wd.preview_mode = wd.preview_hold_previous_mode
             wd.preview_hold_active = False
             wd.preview_hold_key = ""
+        restore_widget_solo_hold(context, wd)
+        wd.distraction_free = False
         wd.is_active = False
         wd.drag_vert_index = -1
         redraw_view3d(context)
@@ -2720,6 +2742,60 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
 
     view_cx = view_region.width * 0.5
     view_cy = view_region.height * 0.5
+
+    if wd.solo_hold_active and event.value == 'RELEASE' and event.type == 'E':
+        restore_widget_solo_hold(context, wd)
+        redraw_view3d(context)
+        return {'RUNNING_MODAL'}
+
+    if event.type == 'W' and not event.ctrl and not event.shift and not event.alt:
+        if event.value == 'PRESS':
+            wd.distraction_free = True
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.value == 'RELEASE':
+            wd.distraction_free = False
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+
+    if event.type == 'E' and not event.ctrl and not event.shift and not event.alt:
+        if event.value == 'PRESS' and not wd.solo_hold_active:
+            source_curve = get_widget_source_curve(context)
+            family_names = set()
+            selected_curves = []
+            for selected_obj in context.selected_objects:
+                curve = None
+                if selected_obj.type == 'CURVE' and hasattr(selected_obj, 'hair_pipe_settings'):
+                    curve = selected_obj
+                elif selected_obj.type == 'MESH':
+                    curve = get_pipe_source_curve(selected_obj)
+                elif selected_obj.type == 'EMPTY':
+                    curve = next((child for child in selected_obj.children if child.type == 'CURVE' and hasattr(child, 'hair_pipe_settings')), None)
+                if curve is not None and curve not in selected_curves:
+                    selected_curves.append(curve)
+            if source_curve is not None and source_curve not in selected_curves:
+                selected_curves.append(source_curve)
+            for curve in selected_curves:
+                family_names.add(curve.name)
+                pipe_obj = get_pipe_object_for_curve(curve)
+                if pipe_obj is not None:
+                    family_names.add(pipe_obj.name)
+                root_obj = curve.parent
+                if root_obj is not None:
+                    family_names.add(root_obj.name)
+                    family_names.update(child.name for child in root_obj.children)
+            states = {}
+            for scene_obj in context.view_layer.objects:
+                states[scene_obj.name] = bool(scene_obj.hide_get())
+                scene_obj.hide_set(scene_obj.name not in family_names)
+            wd.solo_hold_states = json.dumps(states)
+            wd.solo_hold_active = True
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.value == 'RELEASE' and wd.solo_hold_active:
+            restore_widget_solo_hold(context, wd)
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
 
     if event.type == 'Q' and not event.ctrl and not event.shift and not event.alt:
         if event.value == 'PRESS':
