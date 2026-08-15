@@ -1,6 +1,7 @@
 import bpy
 import gpu
 import math
+import time
 import json
 import blf
 from gpu_extras.batch import batch_for_shader
@@ -35,6 +36,7 @@ _addon_keymaps = []
 _PIPE_BASEMESH_STATE_KEY = "hair_pipe_widget_basemesh_state"
 _CURVE_OVERLAY_STATE_KEY = "hair_pipe_widget_curve_overlay_state"
 _pipe_mesh_cache = {}
+_last_widget_pipe_refresh = 0.0
 
 
 def get_cached_pipe_mesh(obj):
@@ -1690,7 +1692,25 @@ def setup_widget(context):
     return True
 
 
+def refresh_pipe_during_widget_edit(context, min_interval=1.0 / 30.0):
+    global _last_widget_pipe_refresh
+    now = time.perf_counter()
+    if now - _last_widget_pipe_refresh < min_interval:
+        return
+    obj = context.active_object
+    if obj is None or obj.type != 'CURVE':
+        return
+    try:
+        from .handler import rebuild_existing_pipe
+        rebuild_existing_pipe(obj, fast=True)
+        _last_widget_pipe_refresh = now
+    except (AttributeError, RuntimeError, ValueError):
+        pass
+
+
 def redraw_view3d(context):
+    if getattr(getattr(context.window_manager, 'hair_pipe_widget', None), 'is_active', False):
+        refresh_pipe_during_widget_edit(context)
     for area in context.screen.areas:
         if area.type == 'VIEW_3D':
             area.tag_redraw()

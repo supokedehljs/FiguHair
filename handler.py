@@ -119,7 +119,7 @@ def sync_figuhair_visibility():
         _visibility_guard = False
 
 
-def rebuild_existing_pipe(curve_obj):
+def rebuild_existing_pipe(curve_obj, fast=False):
     global _last_rebuild_time, _rebuild_guard
     if _rebuild_guard:
         return
@@ -134,8 +134,9 @@ def rebuild_existing_pipe(curve_obj):
 
     _rebuild_guard = True
     try:
-        ensure_curve_defaults(curve_obj)
-        sync_point_settings(curve_obj)
+        if not fast:
+            ensure_curve_defaults(curve_obj)
+            sync_point_settings(curve_obj)
         verts, faces = generate_pipe_mesh(curve_obj, settings)
         if verts is None:
             return
@@ -143,7 +144,7 @@ def rebuild_existing_pipe(curve_obj):
 
         update_mesh_data_in_place(pipe_obj.data, verts, faces, settings.smooth_shading)
         tail_obj = get_tail_object_for_curve(curve_obj)
-        if tail_obj is not None:
+        if tail_obj is not None and not fast:
             update_tail_mesh_for_curve(curve_obj, settings, verts)
             ensure_tail_modifier_stack(pipe_obj, tail_obj)
         _last_rebuild_time = time.perf_counter()
