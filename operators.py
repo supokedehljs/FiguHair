@@ -1,6 +1,7 @@
 import bpy
 import math
 import json
+import time
 from pathlib import Path
 from mathutils import Matrix, Vector
 from bpy.props import IntProperty, FloatProperty, EnumProperty, BoolProperty, StringProperty
@@ -1085,6 +1086,209 @@ def update_ghost_vertices(point_setting):
 def update_all_ghost_vertices(settings):
     for point_setting in settings.point_settings:
         update_ghost_vertices(point_setting)
+
+
+def _ghost_vertex_error(point_setting, vertex_idx):
+    verts = point_setting.cross_section_verts
+    real_count = sum(1 for vertex in verts if not getattr(vertex, 'is_ghost', False))
+    # A candidate can be tested as long as two editable vertices remain;
+    # update_ghost_vertices() can interpolate a gap with two endpoints.
+    if real_count <= 2 or vertex_idx < 0 or vertex_idx >= len(verts):
+        return float('inf')
+    target = verts[vertex_idx]
+    if getattr(target, 'is_ghost', False):
+        return float('inf')
+
+    original = [
+        (vertex.offset_x, vertex.offset_y, bool(getattr(vertex, 'is_ghost', False)))
+        for vertex in verts
+    ]
+    old_x, old_y, _is_ghost = original[vertex_idx]
+    target.is_ghost = True
+    update_ghost_vertices(point_setting)
+    error = math.hypot(target.offset_x - old_x, target.offset_y - old_y)
+    radius = max(
+        1e-6,
+        max(math.hypot(vertex.offset_x, vertex.offset_y) for vertex in verts),
+    )
+
+    for vertex, (x, y, is_ghost) in zip(verts, original):
+        vertex.offset_x = x
+        vertex.offset_y = y
+        vertex.is_ghost = is_ghost
+    return error / radius
+
+
+_AUTO_GHOST_SLIDER_STATE = {}
+_AUTO_GHOST_SLIDER_RESETTING = set()
+
+
+def _restore_auto_ghost_snapshot(settings, snapshot):
+    for point_idx, vertex_data in snapshot.items():
+        if point_idx >= len(settings.point_settings):
+            continue
+        verts = settings.point_settings[point_idx].cross_section_verts
+        for vertex, (x, y, is_ghost) in zip(verts, vertex_data):
+            vertex.offset_x = x
+            vertex.offset_y = y
+            vertex.is_ghost = is_ghost
+
+
+def _capture_auto_ghost_snapshot(settings, selected_indices):
+    return {
+        point_idx: [
+            (vertex.offset_x, vertex.offset_y, bool(getattr(vertex, 'is_ghost', False)))
+            for vertex in settings.point_settings[point_idx].cross_section_verts
+        ]
+        for point_idx in selected_indices
+        if 0 <= point_idx < len(settings.point_settings)
+    }
+
+
+def apply_auto_ghost_vertices(settings, tolerance, selected_indices, snapshot):
+    tolerance = max(0.0, min(1.0, float(tolerance)))
+    _restore_auto_ghost_snapshot(settings, snapshot)
+    changed = 0
+
+    for point_idx in selected_indices:
+        if point_idx < 0 or point_idx >= len(settings.point_settings):
+            continue
+        point_setting = settings.point_settings[point_idx]
+        verts = point_setting.cross_section_verts
+        if len(verts) <= 2:
+            continue
+
+        candidates = []
+        for vertex_idx, vertex in enumerate(verts):
+            if getattr(vertex, 'is_ghost', False):
+                continue
+            error = _ghost_vertex_error(point_setting, vertex_idx)
+            if math.isfinite(error):
+                candidates.append((error, vertex_idx))
+
+        normal_count = sum(1 for vertex in verts if not getattr(vertex, 'is_ghost', False))
+        removable_count = max(0, normal_count - 2)
+        target_count = min(removable_count, int(round(tolerance * removable_count)))
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        for _error, vertex_idx in candidates[:target_count]:
+            verts[vertex_idx].is_ghost = True
+            changed += 1
+        update_ghost_vertices(point_setting)
+
+    return changed
+
+
+def update_auto_ghost_slider(curve_obj, settings):
+    value = max(0.0, min(1.0, float(settings.auto_ghost_tolerance)))
+    state_key = curve_obj.as_pointer()
+    if state_key in _AUTO_GHOST_SLIDER_RESETTING:
+        return 0
+    state = _AUTO_GHOST_SLIDER_STATE.get(state_key)
+
+    if state is None:
+        selected_indices = get_selected_curve_point_indices(curve_obj) if is_curve_edit_mode(curve_obj) else []
+        if not selected_indices:
+            return 0
+        state = {
+            'selected_indices': selected_indices,
+            'snapshot': _capture_auto_ghost_snapshot(settings, selected_indices),
+        }
+        _AUTO_GHOST_SLIDER_STATE[state_key] = state
+
+    changed = apply_auto_ghost_vertices(
+        settings,
+        value,
+        state['selected_indices'],
+        state['snapshot'],
+    )
+    curve_obj.data.update_tag()
+    curve_obj.update_tag()
+    return changed
+
+
+def finish_auto_ghost_slider(curve_obj):
+    if curve_obj is None or getattr(curve_obj, 'type', None) != 'CURVE':
+        return
+    settings = curve_obj.hair_pipe_settings
+    state_key = curve_obj.as_pointer()
+    _AUTO_GHOST_SLIDER_STATE.pop(state_key, None)
+    _AUTO_GHOST_SLIDER_RESETTING.add(state_key)
+    try:
+        settings.auto_ghost_tolerance = 0.0
+    finally:
+        _AUTO_GHOST_SLIDER_RESETTING.discard(state_key)
+
+
+def ensure_auto_ghost_slider_gesture(context, curve_obj):
+    window_manager = getattr(context, 'window_manager', None)
+    if window_manager is None or curve_obj is None:
+        return
+    state_key = curve_obj.as_pointer()
+    state = _AUTO_GHOST_SLIDER_STATE.get(state_key)
+    if state is None or state.get('watching', False):
+        return
+    state['watching'] = True
+    try:
+        bpy.ops.hair_pipe.auto_ghost_slider_gesture('INVOKE_DEFAULT')
+    except RuntimeError:
+        state['watching'] = False
+
+
+class HAIRPIPE_OT_auto_ghost_slider_gesture(bpy.types.Operator):
+    bl_idname = "hair_pipe.auto_ghost_slider_gesture"
+    bl_label = "自动幽灵点滑块手势"
+    bl_options = {'INTERNAL'}
+
+    _curve_name = ""
+    _timer = None
+    _last_value = 0.0
+    _last_change_time = 0.0
+
+    def invoke(self, context, event):
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            return {'CANCELLED'}
+        self._curve_name = curve_obj.name
+        self._last_value = curve_obj.hair_pipe_settings.auto_ghost_tolerance
+        self._last_change_time = time.monotonic()
+        self._timer = context.window_manager.event_timer_add(0.08, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        curve_obj = bpy.data.objects.get(self._curve_name)
+        if curve_obj is None:
+            return {'CANCELLED'}
+        if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
+            if self._timer is not None:
+                context.window_manager.event_timer_remove(self._timer)
+                self._timer = None
+            finish_auto_ghost_slider(curve_obj)
+            return {'FINISHED'}
+        if event.type == 'TIMER':
+            value = curve_obj.hair_pipe_settings.auto_ghost_tolerance
+            now = time.monotonic()
+            if abs(value - self._last_value) > 1e-6:
+                self._last_value = value
+                self._last_change_time = now
+            elif now - self._last_change_time >= 0.16:
+                if self._timer is not None:
+                    context.window_manager.event_timer_remove(self._timer)
+                    self._timer = None
+                finish_auto_ghost_slider(curve_obj)
+                return {'FINISHED'}
+        if event.type in {'ESC', 'RIGHTMOUSE'} and event.value == 'PRESS':
+            if self._timer is not None:
+                context.window_manager.event_timer_remove(self._timer)
+                self._timer = None
+            state = _AUTO_GHOST_SLIDER_STATE.get(curve_obj.as_pointer())
+            if state is not None:
+                _restore_auto_ghost_snapshot(curve_obj.hair_pipe_settings, state['snapshot'])
+            finish_auto_ghost_slider(curve_obj)
+            curve_obj.data.update_tag()
+            curve_obj.update_tag()
+            return {'CANCELLED'}
+        return {'PASS_THROUGH'}
 
 
 def add_cross_section_vertex_after(point_setting, idx, is_ghost=False):
@@ -4971,6 +5175,7 @@ class HAIRPIPE_WST_draw_hair_curve(bpy.types.WorkSpaceTool):
 
 classes = (
     HAIRPIPE_OT_cross_section_spread,
+    HAIRPIPE_OT_auto_ghost_slider_gesture,
     HAIRPIPE_OT_draw_hair_curve,
     HAIRPIPE_OT_mesh_to_hair_curve,
     HAIRPIPE_OT_generate_pipe,

@@ -717,12 +717,19 @@ def draw_single_cross_section(shader, verts, ps, settings,
             sel_indices = get_selected_widget_verts(wd)
             if sel_indices:
                 sel_pts = []
+                selected_ghost_pts = []
                 for si in sel_indices:
-                    if 0 <= si < n and not getattr(verts[si], 'is_ghost', False):
+                    if 0 <= si < n:
                         sx, sy = get_raw_offset(verts[si])
-                        sel_pts.append(effective_to_widget(sx, sy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h))
+                        point = effective_to_widget(sx, sy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h)
+                        if getattr(verts[si], 'is_ghost', False):
+                            selected_ghost_pts.append(point)
+                        else:
+                            sel_pts.append(point)
                 if sel_pts:
                     draw_circle_points(shader, sel_pts, (1.0, 0.5, 0.0, 1.0), 5.0)
+                if selected_ghost_pts:
+                    draw_circle_points(shader, selected_ghost_pts, (1.0, 0.38, 0.02, 0.9), 2.35, segments=12)
 
 
 
@@ -3149,7 +3156,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 for i, v in enumerate(verts):
                     ox, oy = get_raw_offset(v)
                     px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
-                    if bx0 <= px <= bx1 and by0 <= py <= by1 and not getattr(v, 'is_ghost', False):
+                    if bx0 <= px <= bx1 and by0 <= py <= by1:
                         selected.add(i)
             if event.shift:
                 selected = selected | get_selected_widget_verts(wd)
@@ -3398,6 +3405,12 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     if event.type == 'RIGHTMOUSE' and event.value == 'PRESS':
         if event.alt or event.ctrl or event.shift or event.oskey:
             return {'PASS_THROUGH'}
+        if inside_widget:
+            closest_idx = find_nearest_raw_vertex(verts, mx, my, cx, cy, sf, alignment_angle, flip_h)
+            if closest_idx >= 0:
+                ps.active_vert_index = closest_idx
+                set_selected_widget_verts(wd, {closest_idx})
+                redraw_view3d(context)
         bpy.ops.wm.call_menu(name="HAIRPIPE_MT_widget_context_menu")
         return {'RUNNING_MODAL'}
 
@@ -3478,7 +3491,7 @@ class HAIRPIPE_MT_widget_context_menu(bpy.types.Menu):
         layout.separator()
         layout.operator_context = 'INVOKE_DEFAULT'
         layout.operator("hair_pipe.widget_toggle_ghost", text="设置为幽灵点")
-        layout.operator("hair_pipe.widget_make_normal", text="设置为正常点")
+        layout.operator("hair_pipe.widget_make_normal", text="转换为正常点", icon='CHECKMARK')
         layout.separator()
         layout.operator("hair_pipe.cross_section_spread", text="横截面传递", icon='DUPLICATE')
 
@@ -3617,7 +3630,7 @@ class HAIRPIPE_OT_widget_toggle_ghost(bpy.types.Operator):
             update_ghost_vertices(ps)
             sync_active_cross_section_to_selected_points(context)
         if wd is not None:
-            set_selected_widget_verts(wd, {idx for idx in selected if 0 <= idx < len(verts) and not getattr(verts[idx], 'is_ghost', False)})
+            set_selected_widget_verts(wd, selected)
             wd.drag_vert_index = -1
         redraw_view3d(context)
         return {'FINISHED'}
@@ -3652,7 +3665,7 @@ class HAIRPIPE_OT_widget_make_normal(bpy.types.Operator):
         if changed:
             update_all_ghost_vertices(settings)
         if wd is not None:
-            set_selected_widget_verts(wd, {idx for idx in selected if 0 <= idx < len(verts) and not getattr(verts[idx], 'is_ghost', False)})
+            set_selected_widget_verts(wd, {idx for idx in selected if 0 <= idx < len(verts)})
             wd.drag_vert_index = -1
         redraw_view3d(context)
         return {'FINISHED'}

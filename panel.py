@@ -101,6 +101,9 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         box.label(text="默认设置", icon='MESH_CIRCLE')
         box.prop(settings, "roll_mode", text="滚转算法")
         box.prop(settings, "smooth_shading", text="平滑着色")
+        ghost_box = box.box()
+        ghost_box.label(text="自动幽灵点", icon='GHOST_ENABLED')
+        ghost_box.prop(settings, "auto_ghost_tolerance", text="保留容差")
         row = box.row(align=True)
         row.prop(settings, "subdivision_levels", text="细分层级")
         icon = 'HIDE_OFF' if settings.default_subdiv else 'HIDE_ON'

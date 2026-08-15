@@ -76,6 +76,18 @@ class HairPipePointSettings(PropertyGroup):
     )
 
 
+def update_auto_ghost_tolerance(self, context):
+    owner = getattr(self, "id_data", None)
+    if owner is None or getattr(owner, "type", None) != 'CURVE':
+        return
+    try:
+        from .operators import ensure_auto_ghost_slider_gesture, update_auto_ghost_slider
+        update_auto_ghost_slider(owner, self)
+        ensure_auto_ghost_slider_gesture(context, owner)
+    except (ImportError, AttributeError, RuntimeError):
+        pass
+
+
 class HairPipeSettings(PropertyGroup):
     """Global settings for the hair pipe"""
     default_radius: FloatProperty(
@@ -206,6 +218,16 @@ class HairPipeSettings(PropertyGroup):
         name="网格不可选模式",
         description="让所有 FiguHair 头发网格不可选，点击预览网格时自动选择源曲线",
         default=True,
+    )
+    auto_ghost_tolerance: FloatProperty(
+        name="自动幽灵点容差",
+        description="允许横截面产生的相对误差；数值越大，越多点会变成幽灵点",
+        default=0.0,
+        min=0.0,
+        max=1.0,
+        subtype='FACTOR',
+        precision=3,
+        update=update_auto_ghost_tolerance,
     )
     point_settings: CollectionProperty(type=HairPipePointSettings)
     active_point_index: IntProperty(
