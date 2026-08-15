@@ -220,8 +220,8 @@ class HairPipeSettings(PropertyGroup):
         default=True,
     )
     auto_ghost_tolerance: FloatProperty(
-        name="自动幽灵点容差",
-        description="允许横截面产生的相对误差；数值越大，越多点会变成幽灵点",
+        name="自动简化",
+        description="根据横截面变化程度，将选中横截面中影响较小的顶点转换为幽灵点",
         default=0.0,
         min=0.0,
         max=1.0,

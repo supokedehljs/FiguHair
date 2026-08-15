@@ -1091,9 +1091,9 @@ def update_all_ghost_vertices(settings):
 def _ghost_vertex_error(point_setting, vertex_idx):
     verts = point_setting.cross_section_verts
     real_count = sum(1 for vertex in verts if not getattr(vertex, 'is_ghost', False))
-    # A candidate can be tested as long as two editable vertices remain;
-    # update_ghost_vertices() can interpolate a gap with two endpoints.
-    if real_count <= 2 or vertex_idx < 0 or vertex_idx >= len(verts):
+    # A valid closed cross-section must always retain at least three editable
+    # vertices; two vertices collapse the profile into a line.
+    if real_count <= 3 or vertex_idx < 0 or vertex_idx >= len(verts):
         return float('inf')
     target = verts[vertex_idx]
     if getattr(target, 'is_ghost', False):
@@ -1167,7 +1167,7 @@ def apply_auto_ghost_vertices(settings, tolerance, selected_indices, snapshot):
                 candidates.append((error, vertex_idx))
 
         normal_count = sum(1 for vertex in verts if not getattr(vertex, 'is_ghost', False))
-        removable_count = max(0, normal_count - 2)
+        removable_count = max(0, normal_count - 3)
         target_count = min(removable_count, int(round(tolerance * removable_count)))
         candidates.sort(key=lambda item: (item[0], item[1]))
         for _error, vertex_idx in candidates[:target_count]:
@@ -1192,8 +1192,18 @@ def update_auto_ghost_slider(curve_obj, settings):
         state = {
             'selected_indices': selected_indices,
             'snapshot': _capture_auto_ghost_snapshot(settings, selected_indices),
+            'last_change_time': time.monotonic(),
+            'undo_pushed': False,
         }
+        try:
+            from .widget_operator import push_widget_undo
+            push_widget_undo(bpy.context, "自动简化横截面")
+            state['undo_pushed'] = True
+        except (ImportError, AttributeError, RuntimeError):
+            pass
         _AUTO_GHOST_SLIDER_STATE[state_key] = state
+    else:
+        state['last_change_time'] = time.monotonic()
 
     changed = apply_auto_ghost_vertices(
         settings,
@@ -1220,75 +1230,31 @@ def finish_auto_ghost_slider(curve_obj):
 
 
 def ensure_auto_ghost_slider_gesture(context, curve_obj):
-    window_manager = getattr(context, 'window_manager', None)
-    if window_manager is None or curve_obj is None:
+    if curve_obj is None:
         return
-    state_key = curve_obj.as_pointer()
-    state = _AUTO_GHOST_SLIDER_STATE.get(state_key)
-    if state is None or state.get('watching', False):
+    state = _AUTO_GHOST_SLIDER_STATE.get(curve_obj.as_pointer())
+    if state is None or state.get('timer_registered', False):
         return
-    state['watching'] = True
-    try:
-        bpy.ops.hair_pipe.auto_ghost_slider_gesture('INVOKE_DEFAULT')
-    except RuntimeError:
-        state['watching'] = False
+    state['timer_registered'] = True
+    curve_name = curve_obj.name
 
+    def finish_when_idle():
+        live_curve = bpy.data.objects.get(curve_name)
+        if live_curve is None:
+            return None
+        live_state = _AUTO_GHOST_SLIDER_STATE.get(live_curve.as_pointer())
+        if live_state is None:
+            return None
+        # Keep one immutable snapshot throughout a deliberate drag, including
+        # pauses at 0 or 1 before the user reverses direction.  This timer does
+        # not own mouse events, so use a generous idle window rather than
+        # prematurely committing and losing reversibility.
+        if time.monotonic() - live_state.get('last_change_time', 0.0) < 1.5:
+            return 0.08
+        finish_auto_ghost_slider(live_curve)
+        return None
 
-class HAIRPIPE_OT_auto_ghost_slider_gesture(bpy.types.Operator):
-    bl_idname = "hair_pipe.auto_ghost_slider_gesture"
-    bl_label = "自动幽灵点滑块手势"
-    bl_options = {'INTERNAL'}
-
-    _curve_name = ""
-    _timer = None
-    _last_value = 0.0
-    _last_change_time = 0.0
-
-    def invoke(self, context, event):
-        curve_obj = get_context_curve_object(context)
-        if curve_obj is None:
-            return {'CANCELLED'}
-        self._curve_name = curve_obj.name
-        self._last_value = curve_obj.hair_pipe_settings.auto_ghost_tolerance
-        self._last_change_time = time.monotonic()
-        self._timer = context.window_manager.event_timer_add(0.08, window=context.window)
-        context.window_manager.modal_handler_add(self)
-        return {'RUNNING_MODAL'}
-
-    def modal(self, context, event):
-        curve_obj = bpy.data.objects.get(self._curve_name)
-        if curve_obj is None:
-            return {'CANCELLED'}
-        if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
-            if self._timer is not None:
-                context.window_manager.event_timer_remove(self._timer)
-                self._timer = None
-            finish_auto_ghost_slider(curve_obj)
-            return {'FINISHED'}
-        if event.type == 'TIMER':
-            value = curve_obj.hair_pipe_settings.auto_ghost_tolerance
-            now = time.monotonic()
-            if abs(value - self._last_value) > 1e-6:
-                self._last_value = value
-                self._last_change_time = now
-            elif now - self._last_change_time >= 0.16:
-                if self._timer is not None:
-                    context.window_manager.event_timer_remove(self._timer)
-                    self._timer = None
-                finish_auto_ghost_slider(curve_obj)
-                return {'FINISHED'}
-        if event.type in {'ESC', 'RIGHTMOUSE'} and event.value == 'PRESS':
-            if self._timer is not None:
-                context.window_manager.event_timer_remove(self._timer)
-                self._timer = None
-            state = _AUTO_GHOST_SLIDER_STATE.get(curve_obj.as_pointer())
-            if state is not None:
-                _restore_auto_ghost_snapshot(curve_obj.hair_pipe_settings, state['snapshot'])
-            finish_auto_ghost_slider(curve_obj)
-            curve_obj.data.update_tag()
-            curve_obj.update_tag()
-            return {'CANCELLED'}
-        return {'PASS_THROUGH'}
+    bpy.app.timers.register(finish_when_idle, first_interval=0.08)
 
 
 def add_cross_section_vertex_after(point_setting, idx, is_ghost=False):
@@ -5175,7 +5141,6 @@ class HAIRPIPE_WST_draw_hair_curve(bpy.types.WorkSpaceTool):
 
 classes = (
     HAIRPIPE_OT_cross_section_spread,
-    HAIRPIPE_OT_auto_ghost_slider_gesture,
     HAIRPIPE_OT_draw_hair_curve,
     HAIRPIPE_OT_mesh_to_hair_curve,
     HAIRPIPE_OT_generate_pipe,

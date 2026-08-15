@@ -3646,18 +3646,15 @@ class HAIRPIPE_OT_widget_make_normal(bpy.types.Operator):
             return {'CANCELLED'}
         verts = ps.cross_section_verts
         selected = {idx for idx in get_selected_widget_verts(wd) if 0 <= idx < len(verts)} if wd is not None else set()
-        if not selected and 0 <= ps.active_vert_index < len(verts):
-            selected = {ps.active_vert_index}
-        if not selected:
+        selected_ghosts = {idx for idx in selected if getattr(verts[idx], 'is_ghost', False)}
+        if not selected_ghosts:
             return {'CANCELLED'}
         push_widget_undo(context, "设置横截面正常点")
         target_indices = get_widget_target_point_indices(context, settings)
         changed = False
         for point_idx in target_indices:
             target_ps = settings.point_settings[point_idx]
-            if len(selected) == 2:
-                changed = toggle_ghost_between_selected_edge_points(target_ps, selected) or changed
-            for idx in selected:
+            for idx in selected_ghosts:
                 if 0 <= idx < len(target_ps.cross_section_verts) and getattr(target_ps.cross_section_verts[idx], 'is_ghost', False):
                     target_ps.cross_section_verts[idx].is_ghost = False
                     changed = True
@@ -3665,7 +3662,7 @@ class HAIRPIPE_OT_widget_make_normal(bpy.types.Operator):
         if changed:
             update_all_ghost_vertices(settings)
         if wd is not None:
-            set_selected_widget_verts(wd, {idx for idx in selected if 0 <= idx < len(verts)})
+            set_selected_widget_verts(wd, {idx for idx in selected_ghosts if 0 <= idx < len(verts)})
             wd.drag_vert_index = -1
         redraw_view3d(context)
         return {'FINISHED'}
