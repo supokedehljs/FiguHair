@@ -2717,17 +2717,20 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             if candidate_region.x <= event.mouse_x < candidate_region.x + candidate_region.width and candidate_region.y <= event.mouse_y < candidate_region.y + candidate_region.height:
                 event_region = candidate_region
                 break
-        if event_region is not None and event_region.type != 'WINDOW':
+        if event_region is not None and event_region.type != 'WINDOW' and not wd.box_select_active:
             return {'PASS_THROUGH'}
-        if event_region is None and not (view_region.x <= event.mouse_x < view_region.x + view_region.width and view_region.y <= event.mouse_y < view_region.y + view_region.height):
+        if event_region is None and not wd.box_select_active and not (view_region.x <= event.mouse_x < view_region.x + view_region.width and view_region.y <= event.mouse_y < view_region.y + view_region.height):
             return {'PASS_THROUGH'}
     wd.region_offset_x = view_region.x
     wd.region_offset_y = view_region.y
     mx, my = operator._get_local_mouse(event, wd)
     wd.mouse_x = mx
     wd.mouse_y = my
-    if mx < 0 or my < 0 or mx > view_region.width or my > view_region.height:
+    if (mx < 0 or my < 0 or mx > view_region.width or my > view_region.height) and not wd.box_select_active:
         return {'PASS_THROUGH'}
+    if wd.box_select_active:
+        mx = max(0.0, min(float(view_region.width), mx))
+        my = max(0.0, min(float(view_region.height), my))
     half = wd.widget_size / 2.0
     inside_widget = abs(mx - cx) <= half and abs(my - cy) <= half
     inside_add_button = is_inside_rect(mx, my, wd.add_button_x0, wd.add_button_y0, wd.add_button_x1, wd.add_button_y1)
@@ -3123,16 +3126,17 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             if wd.box_select_3d:
                 hits = get_pipe_control_vertices_in_screen_rect(context, bx0, by0, bx1, by1)
                 if hits:
+                    hits_by_point = {}
+                    for point_idx, vert_idx in hits:
+                        hits_by_point.setdefault(point_idx, set()).add(vert_idx)
                     target_point_idx = settings.active_point_index
-                    active_hits = [vert_idx for point_idx, vert_idx in hits if point_idx == target_point_idx]
-                    if not active_hits:
-                        target_point_idx = hits[0][0]
-                        active_hits = [vert_idx for point_idx, vert_idx in hits if point_idx == target_point_idx]
+                    if target_point_idx not in hits_by_point:
+                        target_point_idx = next(iter(hits_by_point))
                     settings.active_point_index = target_point_idx
                     select_curve_point_by_index(obj, target_point_idx)
                     target_ps = settings.point_settings[target_point_idx]
-                    if active_hits:
-                        target_ps.active_vert_index = active_hits[0]
+                    active_hits = hits_by_point[target_point_idx]
+                    target_ps.active_vert_index = min(active_hits)
                     selected = set(active_hits)
                 else:
                     selected = set()
@@ -3146,6 +3150,10 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             if event.shift:
                 selected = selected | get_selected_widget_verts(wd)
             set_selected_widget_verts(wd, selected)
+            if wd.box_select_3d and hits:
+                for point_idx, point_hits in hits_by_point.items():
+                    if point_idx < len(settings.point_settings) and point_hits:
+                        settings.point_settings[point_idx].active_vert_index = min(point_hits)
             wd.box_select_active = False
             wd.box_select_3d = False
             wd.left_drag_pending = False

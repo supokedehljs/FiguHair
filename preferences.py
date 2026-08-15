@@ -89,22 +89,82 @@ class HairPipePreferences(AddonPreferences):
         ]
 
         for idname, label in ops_to_show:
-            found = False
-            for kmi in km.keymap_items:
-                if kmi.idname == idname:
-                    box = col.box()
-                    row = box.row(align=True)
-                    row.label(text=label)
-                    row.prop(kmi, "type", text="", full_event=True)
-                    row.prop(kmi, "active", text="")
-                    found = True
-                    break
-            if not found:
-                box = col.box()
-                row = box.row(align=True)
-                row.label(text=label)
-                row.label(text="(\u672a\u8bbe\u7f6e)")
-                row.operator("hair_pipe.add_keymap_item", text="", icon='ADD').operator_idname = idname
+            kmi = next((item for item in km.keymap_items if item.idname == idname), None)
+            row = col.row(align=True)
+            row.scale_y = 1.15
+            if kmi is not None:
+                row.prop(kmi, "active", text="")
+            else:
+                disabled = row.row()
+                disabled.enabled = False
+                disabled.label(text="", icon='CHECKBOX_DEHLT')
+            name_row = row.row()
+            name_row.enabled = bool(kmi is not None and kmi.active)
+            name_row.label(text=label)
+            shortcut_text = "点击录入快捷键"
+            if kmi is not None and kmi.type != 'NONE':
+                parts = []
+                if kmi.ctrl:
+                    parts.append("Ctrl")
+                if kmi.shift:
+                    parts.append("Shift")
+                if kmi.alt:
+                    parts.append("Alt")
+                parts.append(kmi.type.replace('_', ' ').title())
+                shortcut_text = " + ".join(parts)
+            capture = row.operator("hair_pipe.capture_shortcut", text=shortcut_text, icon='EVENT_A')
+            capture.operator_idname = idname
+
+
+class HAIRPIPE_OT_capture_shortcut(bpy.types.Operator):
+    bl_idname = "hair_pipe.capture_shortcut"
+    bl_label = "录入快捷键"
+    bl_description = "点击后按下新的键盘快捷键，Esc 取消，Backspace 清除"
+
+    operator_idname: bpy.props.StringProperty()
+    _kmi = None
+
+    def invoke(self, context, event):
+        wm = context.window_manager
+        kc = wm.keyconfigs.user or wm.keyconfigs.addon
+        if kc is None:
+            return {'CANCELLED'}
+        km = kc.keymaps.get('3D View')
+        if km is None:
+            km = kc.keymaps.new(name='3D View', space_type='VIEW_3D')
+        self._kmi = next((item for item in km.keymap_items if item.idname == self.operator_idname), None)
+        if self._kmi is None:
+            self._kmi = km.keymap_items.new(self.operator_idname, 'NONE', 'PRESS')
+        context.window_manager.modal_handler_add(self)
+        context.window.cursor_modal_set('EYEDROPPER')
+        context.area.header_text_set("请按下新的快捷键（可组合 Ctrl / Shift / Alt）；Esc 取消，Backspace 清除")
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.value != 'PRESS':
+            return {'RUNNING_MODAL'}
+        if event.type == 'ESC':
+            context.window.cursor_modal_restore()
+            context.area.header_text_set(None)
+            return {'CANCELLED'}
+        if event.type in {'BACK_SPACE', 'DEL'}:
+            self._kmi.type = 'NONE'
+        elif event.type in {'LEFT_CTRL', 'RIGHT_CTRL', 'LEFT_SHIFT', 'RIGHT_SHIFT', 'LEFT_ALT', 'RIGHT_ALT', 'OSKEY'}:
+            return {'RUNNING_MODAL'}
+        elif event.type in {'LEFTMOUSE', 'RIGHTMOUSE', 'MIDDLEMOUSE', 'MOUSEMOVE', 'TIMER'}:
+            return {'RUNNING_MODAL'}
+        else:
+            self._kmi.type = event.type
+            self._kmi.value = 'PRESS'
+            self._kmi.ctrl = event.ctrl
+            self._kmi.shift = event.shift
+            self._kmi.alt = event.alt
+            self._kmi.oskey = event.oskey
+            self._kmi.active = True
+        context.window.cursor_modal_restore()
+        context.area.header_text_set(None)
+        context.area.tag_redraw()
+        return {'FINISHED'}
 
 
 class HAIRPIPE_OT_add_keymap_item(bpy.types.Operator):
@@ -178,6 +238,7 @@ def unregister_keymaps():
 
 classes = (
     HairPipePreferences,
+    HAIRPIPE_OT_capture_shortcut,
     HAIRPIPE_OT_add_keymap_item,
 )
 
