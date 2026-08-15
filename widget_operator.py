@@ -2699,8 +2699,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         operator._finish(context)
         return {'CANCELLED'}
     if (wd.preview_hold_active and
-            ((event.value == 'RELEASE' and event.type == wd.preview_hold_key) or
-             (event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS'))):
+            event.value == 'RELEASE' and event.type == wd.preview_hold_key):
         wd.preview_mode = wd.preview_hold_previous_mode
         wd.preview_hold_active = False
         wd.preview_hold_key = ""
@@ -2745,13 +2744,17 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
 
     view_cx = view_region.width * 0.5
     view_cy = view_region.height * 0.5
+    base_key = 'Q'
+    clean_key = 'W'
+    solo_key = 'E'
+    in_front_key = 'T'
 
-    if wd.solo_hold_active and event.value == 'RELEASE' and event.type == 'E':
+    if wd.solo_hold_active and event.value == 'RELEASE' and event.type == solo_key:
         restore_widget_solo_hold(context, wd)
         redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
-    if event.type == 'W' and not event.ctrl and not event.shift and not event.alt:
+    if event.type == clean_key and not event.ctrl and not event.shift and not event.alt:
         if event.value == 'PRESS':
             wd.distraction_free = True
             redraw_view3d(context)
@@ -2761,7 +2764,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
 
-    if event.type == 'E' and not event.ctrl and not event.shift and not event.alt:
+    if event.type == solo_key and not event.ctrl and not event.shift and not event.alt:
         if event.value == 'PRESS' and not wd.solo_hold_active:
             source_curve = get_widget_source_curve(context)
             family_names = set()
@@ -2800,7 +2803,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
 
-    if event.type == 'Q' and not event.ctrl and not event.shift and not event.alt:
+    if event.type == base_key and not event.ctrl and not event.shift and not event.alt:
         if event.value == 'PRESS':
             if not wd.preview_hold_active:
                 wd.preview_hold_previous_mode = wd.preview_mode
@@ -2825,7 +2828,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
 
-    if event.type == 'T' and event.value == 'PRESS' and not event.ctrl and not event.shift and not event.alt:
+    if event.type == in_front_key and event.value == 'PRESS' and not event.ctrl and not event.shift and not event.alt:
         wd.preview_in_front = not wd.preview_in_front
         source_curve = get_widget_source_curve(context)
         if source_curve is not None:
