@@ -4708,7 +4708,7 @@ class HAIRPIPE_OT_cross_section_spread(bpy.types.Operator):
             return self.finish(context, cancelled=True)
         if event.type in {'LEFTMOUSE', 'RET', 'NUMPAD_ENTER'} and event.value == 'PRESS':
             return self.finish(context)
-        if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.value == 'PRESS':
+        if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
             last_idx = len(self._original_data) - 1
             if event.type == 'WHEELUPMOUSE':
                 if self._upper > self._source_idx:

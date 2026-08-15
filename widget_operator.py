@@ -3475,6 +3475,7 @@ class HAIRPIPE_MT_widget_context_menu(bpy.types.Menu):
         op = layout.operator("hair_pipe.widget_smooth_selected_vertices", text="圆形平滑", icon='MESH_CIRCLE')
         op.mode = 'CIRCULAR'
         layout.separator()
+        layout.operator_context = 'INVOKE_DEFAULT'
         layout.operator("hair_pipe.widget_toggle_ghost", text="设置为幽灵点")
         layout.operator("hair_pipe.widget_make_normal", text="设置为正常点")
         layout.separator()
