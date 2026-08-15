@@ -4652,6 +4652,21 @@ class HAIRPIPE_OT_cross_section_spread(bpy.types.Operator):
     _upper = -1
     _original_data = None
     _source_data = None
+    _original_selected_indices = None
+
+    def update_range_highlight(self):
+        global_idx = 0
+        for spline in self._curve_obj.data.splines:
+            points = spline.bezier_points if spline.type == 'BEZIER' else spline.points
+            for point in points:
+                selected = self._lower <= global_idx <= self._upper
+                if spline.type == 'BEZIER':
+                    point.select_control_point = selected
+                    point.select_left_handle = selected
+                    point.select_right_handle = selected
+                else:
+                    point.select = selected
+                global_idx += 1
 
     @classmethod
     def poll(cls, context):
@@ -4665,12 +4680,14 @@ class HAIRPIPE_OT_cross_section_spread(bpy.types.Operator):
             and len(curve_obj.hair_pipe_settings.point_settings) > 0
         )
 
-    def apply_range(self):
+    def apply_range(self, old_lower, old_upper):
         settings = self._curve_obj.hair_pipe_settings
-        for idx, original in enumerate(self._original_data):
-            data = self._source_data if self._lower <= idx <= self._upper else original
+        changed_indices = set(range(min(old_lower, self._lower), max(old_upper, self._upper) + 1))
+        for idx in changed_indices:
+            data = self._source_data if self._lower <= idx <= self._upper else self._original_data[idx]
             _apply_point_setting_data(settings.point_settings[idx], data, settings)
-        update_all_ghost_vertices(settings)
+        for idx in changed_indices:
+            update_ghost_vertices(settings.point_settings[idx])
         self._curve_obj.data.update_tag()
         self._curve_obj.update_tag()
 
@@ -4680,9 +4697,24 @@ class HAIRPIPE_OT_cross_section_spread(bpy.types.Operator):
             for idx, data in enumerate(self._original_data):
                 _apply_point_setting_data(settings.point_settings[idx], data, settings)
             update_all_ghost_vertices(settings)
+        select_indices = self._original_selected_indices or [self._source_idx]
+        global_idx = 0
+        for spline in self._curve_obj.data.splines:
+            points = spline.bezier_points if spline.type == 'BEZIER' else spline.points
+            for point in points:
+                selected = global_idx in select_indices
+                if spline.type == 'BEZIER':
+                    point.select_control_point = selected
+                    point.select_left_handle = selected
+                    point.select_right_handle = selected
+                else:
+                    point.select = selected
+                global_idx += 1
         self._curve_obj.data.update_tag()
         self._curve_obj.update_tag()
         context.view_layer.update()
+        if not cancelled:
+            bpy.ops.ed.undo_push(message="横截面传递")
         context.area.header_text_set(None)
         context.window.cursor_modal_restore()
         for area in context.screen.areas:
@@ -4692,12 +4724,18 @@ class HAIRPIPE_OT_cross_section_spread(bpy.types.Operator):
 
     def invoke(self, context, event):
         self._curve_obj = get_context_curve_object(context)
+        try:
+            from .widget_operator import push_widget_undo
+            push_widget_undo(context, "横截面传递")
+        except (ImportError, AttributeError):
+            pass
         settings = self._curve_obj.hair_pipe_settings
         self._source_idx = max(0, min(settings.active_point_index, len(settings.point_settings) - 1))
         self._lower = self._source_idx
         self._upper = self._source_idx
         self._original_data = [_point_setting_to_data(point_setting) for point_setting in settings.point_settings]
         self._source_data = _point_setting_to_data(settings.point_settings[self._source_idx])
+        self._original_selected_indices = get_selected_curve_point_indices(self._curve_obj)
         context.window_manager.modal_handler_add(self)
         context.window.cursor_modal_set('SCROLL_XY')
         context.area.header_text_set("横截面传递：滚轮向两侧复制 | 左键/Enter 确认 | 右键/Esc 取消")
@@ -4709,6 +4747,7 @@ class HAIRPIPE_OT_cross_section_spread(bpy.types.Operator):
         if event.type in {'LEFTMOUSE', 'RET', 'NUMPAD_ENTER'} and event.value == 'PRESS':
             return self.finish(context)
         if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
+            old_lower, old_upper = self._lower, self._upper
             last_idx = len(self._original_data) - 1
             if event.type == 'WHEELUPMOUSE':
                 if self._upper > self._source_idx:
@@ -4720,7 +4759,8 @@ class HAIRPIPE_OT_cross_section_spread(bpy.types.Operator):
                     self._lower += 1
                 elif self._upper < last_idx:
                     self._upper += 1
-            self.apply_range()
+            self.apply_range(old_lower, old_upper)
+            self.update_range_highlight()
             context.area.header_text_set(
                 f"横截面传递：{self._lower + 1}—{self._upper + 1}（来源 {self._source_idx + 1}） | 左键确认 | Esc 取消"
             )

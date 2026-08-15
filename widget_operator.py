@@ -2660,7 +2660,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     if event.type == 'Z' and event.value == 'PRESS' and event.ctrl:
         if pop_widget_undo(context):
             clear_pipe_mesh_cache()
-        redraw_view3d(context)
+            refresh_pipe_during_widget_edit(context, min_interval=0.0)
+        redraw_view3d(context, refresh_pipe=False)
         return {'RUNNING_MODAL'}
 
     if close_on_key_release and event.value == 'RELEASE' and event.type == getattr(operator, '_hold_key', None):
