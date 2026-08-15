@@ -169,12 +169,7 @@ class HairPipeWidgetSettings(PropertyGroup):
     auto_alignment_signature: bpy.props.StringProperty(default="")
     rotate_initial_offsets: bpy.props.StringProperty(default="")
     proportional_weights: bpy.props.StringProperty(default="{}")
-    proportional_mode: bpy.props.EnumProperty(
-        items=(('CROSS', "横截面衰减", "在当前横截面内衰减"), ('LONGITUDINAL', "纵向衰减", "沿多个横截面的同一列衰减")),
-        default='CROSS',
-    )
     longitudinal_radius: FloatProperty(default=3.0, min=1.0, max=1000.0)
-    longitudinal_move_mode: IntProperty(default=0, min=0, max=5)
     longitudinal_initial_state: bpy.props.StringProperty(default="{}")
     mouse_x: FloatProperty(default=0.0)
     mouse_y: FloatProperty(default=0.0)
@@ -455,7 +450,7 @@ def apply_longitudinal_move(context, settings, wd, selected, delta_x, delta_y):
     state = get_longitudinal_initial_state(wd)
     restore_longitudinal_initial_state(settings, state)
     weights = get_longitudinal_weights(context, settings, settings.active_point_index, wd.longitudinal_radius)
-    frames = get_all_control_point_frames(context) if wd.longitudinal_move_mode != 0 else None
+    frames = None
     for point_idx, weight in weights.items():
         point_state = state.get(point_idx, {})
         if point_idx >= len(settings.point_settings):
@@ -470,7 +465,7 @@ def apply_longitudinal_move(context, settings, wd, selected, delta_x, delta_y):
                     point_idx,
                     delta_x,
                     delta_y,
-                    wd.longitudinal_move_mode,
+                    0,
                     initial_offset,
                     frames,
                 )
@@ -623,17 +618,15 @@ def get_longitudinal_circle_screen_data(context, obj, settings, radius):
     if center is None:
         return None, 0.0
 
-    target_distance = max(1, int(math.ceil(radius)))
-    projected_distances = []
-    for target_idx in (active_idx - target_distance, active_idx + target_distance):
+    adjacent_distances = []
+    for target_idx in (active_idx - 1, active_idx + 1):
         if 0 <= target_idx < len(world_positions):
             projected = view3d_utils.location_3d_to_region_2d(region, region_data, world_positions[target_idx])
             if projected is not None:
-                projected_distances.append(math.hypot(projected.x - center.x, projected.y - center.y))
-    if not projected_distances:
-        return (center.x, center.y), 24.0
-    fractional_scale = radius / target_distance
-    return (center.x, center.y), max(18.0, max(projected_distances) * fractional_scale)
+                adjacent_distances.append(math.hypot(projected.x - center.x, projected.y - center.y))
+    pixels_per_section = sum(adjacent_distances) / len(adjacent_distances) if adjacent_distances else 24.0
+    pixels_per_section = max(8.0, min(80.0, pixels_per_section))
+    return (center.x, center.y), max(18.0, radius * pixels_per_section)
 
 
 def draw_circle_outline(shader, points, color, radius, segments=24, line_width=1.4):
@@ -1409,43 +1402,18 @@ def draw_widget_callback():
                                cx, cy, sf, alignment_angle, flip_h, half, True, wd)
 
     if proportional_edit_enabled(context) and wd.move_active:
-        if wd.proportional_mode == 'CROSS':
-            circle_center = (wd.proportional_center_x, wd.proportional_center_y)
-            circle_radius = wd.proportional_radius
-            circle_color = (0.15, 0.85, 1.0, 0.9)
-        else:
-            circle_center, circle_radius = get_longitudinal_circle_screen_data(
-                context, obj, settings, wd.longitudinal_radius
-            )
-            circle_color = (0.55, 0.4, 1.0, 0.95)
+        circle_center, circle_radius = get_longitudinal_circle_screen_data(
+            context, obj, settings, wd.longitudinal_radius
+        )
         if circle_center is not None:
             draw_circle_outline(
                 shader,
                 [circle_center],
-                circle_color,
+                (1.0, 1.0, 1.0, 0.92),
                 circle_radius,
                 segments=64,
-                line_width=1.7,
+                line_width=1.5,
             )
-
-        mode_label = "横截面衰减" if wd.proportional_mode == 'CROSS' else "纵向衰减"
-        move_label = (
-            LONGITUDINAL_MOVE_MODE_LABELS[wd.longitudinal_move_mode]
-            if wd.proportional_mode == 'LONGITUDINAL'
-            else "—"
-        )
-        hint_lines = (
-            f"当前模式：{mode_label}",
-            f"纵向移动：{move_label}",
-        )
-        font_id = 0
-        text_x = min(wd.mouse_x + 20.0, region.width - 190.0)
-        text_top = min(wd.mouse_y + 22.0, region.height - 18.0)
-        blf.size(font_id, 14)
-        for line_idx, line in enumerate(hint_lines):
-            blf.color(font_id, *(circle_color[:3] if line_idx == 0 else (0.88, 0.9, 0.94)), 1.0)
-            blf.position(font_id, text_x, text_top - line_idx * 19.0, 0)
-            blf.draw(font_id, line)
 
     cross_size = 9.0
     cross_lines = [
@@ -2789,32 +2757,14 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     if wd.move_active:
         sel = sorted(get_selected_widget_verts(wd))
         initial = get_rotate_offsets(wd)
-        if proportional_edit_enabled(context) and event.type == 'F' and event.value == 'PRESS':
-            wd.proportional_mode = 'LONGITUDINAL' if wd.proportional_mode == 'CROSS' else 'CROSS'
-            restore_longitudinal_initial_state(settings, get_longitudinal_initial_state(wd))
-            for vi, initial_offset in initial.items():
-                if vi < len(verts):
-                    verts[vi].offset_x = initial_offset[0]
-                    verts[vi].offset_y = initial_offset[1]
-            redraw_view3d(context)
-            return {'RUNNING_MODAL'}
-        if (proportional_edit_enabled(context) and wd.proportional_mode == 'LONGITUDINAL'
-                and event.type == 'V' and event.value == 'PRESS'):
-            wd.longitudinal_move_mode = (wd.longitudinal_move_mode + 1) % len(LONGITUDINAL_MOVE_MODE_LABELS)
+        if proportional_edit_enabled(context) and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.value == 'PRESS':
+            step = -0.5 if event.type == 'WHEELUPMOUSE' else 0.5
+            wd.longitudinal_radius = max(1.0, min(1000.0, wd.longitudinal_radius + step))
             dx, dy = widget_to_effective(mx, my, cx, cy, sf, alignment_angle, flip_h)
             sx, sy = widget_to_effective(wd.move_start_x, wd.move_start_y, cx, cy, sf, alignment_angle, flip_h)
             apply_longitudinal_move(context, settings, wd, set(sel), dx - sx, dy - sy)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
-        if proportional_edit_enabled(context) and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.value == 'PRESS':
-            factor = 0.88 if event.type == 'WHEELUPMOUSE' else 1.0 / 0.88
-            if wd.proportional_mode == 'LONGITUDINAL':
-                wd.longitudinal_radius = max(1.0, min(1000.0, wd.longitudinal_radius * factor))
-                dx, dy = widget_to_effective(mx, my, cx, cy, sf, alignment_angle, flip_h)
-                sx, sy = widget_to_effective(wd.move_start_x, wd.move_start_y, cx, cy, sf, alignment_angle, flip_h)
-                apply_longitudinal_move(context, settings, wd, set(sel), dx - sx, dy - sy)
-                redraw_view3d(context)
-                return {'RUNNING_MODAL'}
             wd.proportional_radius = max(8.0, min(5000.0, wd.proportional_radius * factor))
             weights = get_proportional_vertex_weights(
                 context,
@@ -2847,7 +2797,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             sx, sy = widget_to_effective(wd.move_start_x, wd.move_start_y, cx, cy, sf, alignment_angle, flip_h)
             delta_x = dx - sx
             delta_y = dy - sy
-            if proportional_edit_enabled(context) and wd.proportional_mode == 'LONGITUDINAL':
+            if proportional_edit_enabled(context):
                 apply_longitudinal_move(context, settings, wd, set(sel), delta_x, delta_y)
             else:
                 weights = get_proportional_weights(wd)
