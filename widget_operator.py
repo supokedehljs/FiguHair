@@ -3395,7 +3395,10 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         return {'PASS_THROUGH'}
 
     if event.type == 'RIGHTMOUSE' and event.value == 'PRESS':
-        return {'PASS_THROUGH'}
+        if event.alt or event.ctrl or event.shift or event.oskey:
+            return {'PASS_THROUGH'}
+        bpy.ops.wm.call_menu(name="HAIRPIPE_MT_widget_context_menu")
+        return {'RUNNING_MODAL'}
 
     # ESC - close editor
     if event.type == 'ESC':
@@ -3459,6 +3462,23 @@ class HAIRPIPE_OT_widget_remove_vertex(bpy.types.Operator):
             wd.drag_vert_index = -1
         redraw_view3d(context)
         return {'FINISHED'}
+
+
+class HAIRPIPE_MT_widget_context_menu(bpy.types.Menu):
+    bl_idname = "HAIRPIPE_MT_widget_context_menu"
+    bl_label = "横截面编辑"
+
+    def draw(self, context):
+        layout = self.layout
+        op = layout.operator("hair_pipe.widget_smooth_selected_vertices", text="普通平滑", icon='SMOOTHCURVE')
+        op.mode = 'NEIGHBOR'
+        op = layout.operator("hair_pipe.widget_smooth_selected_vertices", text="圆形平滑", icon='MESH_CIRCLE')
+        op.mode = 'CIRCULAR'
+        layout.separator()
+        layout.operator("hair_pipe.widget_toggle_ghost", text="设置为幽灵点")
+        layout.operator("hair_pipe.widget_make_normal", text="设置为正常点")
+        layout.separator()
+        layout.operator("hair_pipe.cross_section_spread", text="横截面传递", icon='DUPLICATE')
 
 
 class HAIRPIPE_OT_widget_smooth_selected_vertices(bpy.types.Operator):
@@ -3713,6 +3733,7 @@ class HAIRPIPE_OT_widget_stop(bpy.types.Operator):
 
 
 classes = (
+    HAIRPIPE_MT_widget_context_menu,
     HairPipeWidgetSettings,
     HAIRPIPE_OT_widget_interact,
     HAIRPIPE_OT_widget_hold,
@@ -3730,15 +3751,29 @@ classes = (
 )
 
 
+def draw_widget_context_menu(self, context):
+    wd = getattr(context.window_manager, "hair_pipe_widget", None)
+    obj = context.active_object
+    if obj is None or obj.type != 'CURVE' or wd is None or not wd.is_active or not is_curve_edit_mode(obj):
+        return
+    self.layout.separator()
+    self.layout.operator("wm.call_menu", text="横截面编辑", icon='MOD_CURVE').name = "HAIRPIPE_MT_widget_context_menu"
+
+
 def register_keymaps():
     bpy.types.VIEW3D_MT_edit_curve_delete.append(draw_cross_section_delete_menu)
+    bpy.types.VIEW3D_MT_edit_curve_context_menu.append(draw_widget_context_menu)
 
 
 def unregister_keymaps():
-    try:
-        bpy.types.VIEW3D_MT_edit_curve_delete.remove(draw_cross_section_delete_menu)
-    except (AttributeError, ValueError):
-        pass
+    for menu, callback in (
+        (bpy.types.VIEW3D_MT_edit_curve_delete, draw_cross_section_delete_menu),
+        (bpy.types.VIEW3D_MT_edit_curve_context_menu, draw_widget_context_menu),
+    ):
+        try:
+            menu.remove(callback)
+        except (AttributeError, ValueError):
+            pass
 
 
 def register():

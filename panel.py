@@ -152,21 +152,6 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         else:
             row.operator("hair_pipe.widget_interact", text="打开编辑器", icon='MOUSE_LMB')
 
-        row = box.row(align=True)
-        row.enabled = widget_active
-        row.scale_y = 1.2
-        row.operator("hair_pipe.cross_section_spread", text="横截面传递", icon='DUPLICATE')
-        row = box.row(align=True)
-        row.enabled = widget_active
-        row.operator("hair_pipe.widget_toggle_ghost", text="设置为幽灵点")
-        row.operator("hair_pipe.widget_make_normal", text="设置为正常点")
-        row = box.row(align=True)
-        row.enabled = widget_active
-        row.scale_y = 1.15
-        op = row.operator("hair_pipe.widget_smooth_selected_vertices", text="普通平滑", icon='SMOOTHCURVE')
-        op.mode = 'NEIGHBOR'
-        op = row.operator("hair_pipe.widget_smooth_selected_vertices", text="圆形平滑", icon='MESH_CIRCLE')
-        op.mode = 'CIRCULAR'
 
 
 classes = (
