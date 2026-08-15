@@ -146,9 +146,12 @@ class HairPipeWidgetSettings(PropertyGroup):
             ('SUBDIV', "细分显示", "保留细分并使用平滑着色"),
             ('ROLL', "滚转显示", "去除细分，仅显示纵向网格"),
         ),
-        default='BASE',
+        default='SUBDIV',
     )
-    preview_in_front: BoolProperty(name="显示在最前", default=True)
+    preview_in_front: BoolProperty(name="显示在最前", default=False)
+    preview_hold_active: BoolProperty(default=False)
+    preview_hold_key: bpy.props.StringProperty(default="")
+    preview_hold_previous_mode: bpy.props.StringProperty(default="BASE")
     show_unsubdivided_mesh: BoolProperty(default=True)
     show_mesh_in_front: BoolProperty(default=True)
     rotate_start_x: FloatProperty(default=0.0)
@@ -1029,7 +1032,7 @@ def draw_active_pipe_cross_section_ring(context, ps):
                     highlight_lines.append(point)
                 previous_point = point
         if highlight_lines:
-            gpu.state.line_width_set(1.35)
+            gpu.state.line_width_set(1.65)
             active_ring_idx = selected_ring_starts[0][1] // segments if selected_ring_starts else ring_count // 2
             max_distance = max(1, max(active_ring_idx, ring_count - 1 - active_ring_idx))
             for ring_idx in range(len(projected_rings) - 1):
@@ -2508,6 +2511,8 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
             self.report({'ERROR'}, "No 3D View")
             return {'CANCELLED'}
         wd.hold_key_mode = False
+        wd.preview_hold_active = False
+        wd.preview_hold_key = ""
         self._trigger_key = event.type
         self._trigger_ctrl = event.ctrl
         self._trigger_shift = event.shift
@@ -2538,6 +2543,10 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
         set_curve_overlay_hidden(context, source_curve, False)
         set_pipe_basemesh_preview(context, source_curve, False)
         wd = context.window_manager.hair_pipe_widget
+        if wd.preview_hold_active:
+            wd.preview_mode = wd.preview_hold_previous_mode
+            wd.preview_hold_active = False
+            wd.preview_hold_key = ""
         wd.is_active = False
         wd.drag_vert_index = -1
         redraw_view3d(context)
@@ -2629,6 +2638,17 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     if view_region is None:
         operator._finish(context)
         return {'CANCELLED'}
+    if wd.preview_hold_active and event.value == 'RELEASE' and event.type == wd.preview_hold_key:
+        wd.preview_mode = wd.preview_hold_previous_mode
+        wd.preview_hold_active = False
+        wd.preview_hold_key = ""
+        source_curve = get_widget_source_curve(context)
+        if source_curve is not None:
+            set_pipe_basemesh_preview(context, source_curve, False)
+            set_pipe_basemesh_preview(context, source_curve, True)
+        redraw_view3d(context)
+        return {'RUNNING_MODAL'}
+
     if view_area is not None:
         event_region = None
         for candidate_region in view_area.regions:
@@ -2660,6 +2680,39 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
 
     view_cx = view_region.width * 0.5
     view_cy = view_region.height * 0.5
+
+    if event.type in {'Q', 'W'} and not event.ctrl and not event.shift and not event.alt:
+        if event.value == 'PRESS':
+            if not wd.preview_hold_active:
+                wd.preview_hold_previous_mode = wd.preview_mode
+            wd.preview_hold_active = True
+            wd.preview_hold_key = event.type
+            wd.preview_mode = 'BASE' if event.type == 'Q' else 'ROLL'
+            source_curve = get_widget_source_curve(context)
+            if source_curve is not None:
+                set_pipe_basemesh_preview(context, source_curve, False)
+                set_pipe_basemesh_preview(context, source_curve, True)
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.value == 'RELEASE' and wd.preview_hold_active and event.type == wd.preview_hold_key:
+            wd.preview_mode = wd.preview_hold_previous_mode
+            wd.preview_hold_active = False
+            wd.preview_hold_key = ""
+            source_curve = get_widget_source_curve(context)
+            if source_curve is not None:
+                set_pipe_basemesh_preview(context, source_curve, False)
+                set_pipe_basemesh_preview(context, source_curve, True)
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+
+    if event.type == 'T' and event.value == 'PRESS' and not event.ctrl and not event.shift and not event.alt:
+        wd.preview_in_front = not wd.preview_in_front
+        source_curve = get_widget_source_curve(context)
+        if source_curve is not None:
+            set_pipe_basemesh_preview(context, source_curve, False)
+            set_pipe_basemesh_preview(context, source_curve, True)
+        redraw_view3d(context)
+        return {'RUNNING_MODAL'}
 
     if event.type == 'T' and event.value == 'PRESS' and event.ctrl:
         push_widget_undo(context, "旋转修正横截面编辑器")
