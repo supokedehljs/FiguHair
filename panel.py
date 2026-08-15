@@ -117,8 +117,20 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         widget_data = getattr(context.window_manager, "hair_pipe_widget", None)
 
         box = header_box.box()
-        box.enabled = edit_controls_enabled
-        row = box.row(align=True)
+        options_row = box.row(align=True)
+        widget_options = getattr(context.window_manager, "hair_pipe_widget", None)
+        options_row.enabled = widget_options is not None
+        options_row.prop(widget_options, "preview_mode", text="显示模式")
+        op = options_row.operator(
+            "hair_pipe.widget_apply_preview_options",
+            text="显示在最前",
+            depress=bool(getattr(widget_options, "preview_in_front", True)),
+        )
+        op.option = 'IN_FRONT'
+
+        controls = box.column()
+        controls.enabled = edit_controls_enabled
+        row = controls.row(align=True)
         row.scale_y = 1.25
         op = row.operator("hair_pipe.apply_edge_flow", text="截面边流")
         op.mode = settings.edge_flow_mode

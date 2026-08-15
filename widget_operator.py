@@ -139,6 +139,18 @@ class HairPipeWidgetSettings(PropertyGroup):
     show_vert_indices: BoolProperty(default=False)
     show_full_mesh_grid: BoolProperty(default=False)
     show_smooth_preview: BoolProperty(default=False)
+    preview_mode: bpy.props.EnumProperty(
+        name="横截面预览模式",
+        items=(
+            ('BASE', "去细分显示", "去除细分并使用平直着色"),
+            ('SUBDIV', "细分显示", "保留细分并使用平滑着色"),
+            ('ROLL', "滚转显示", "去除细分，仅显示纵向网格"),
+        ),
+        default='BASE',
+    )
+    preview_in_front: BoolProperty(name="显示在最前", default=True)
+    show_unsubdivided_mesh: BoolProperty(default=True)
+    show_mesh_in_front: BoolProperty(default=True)
     rotate_start_x: FloatProperty(default=0.0)
     rotate_start_y: FloatProperty(default=0.0)
     move_start_x: FloatProperty(default=0.0)
@@ -823,27 +835,11 @@ def draw_curve_start_marker(context, obj):
     x, y = pos.x, pos.y
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
     gpu.state.blend_set('ALPHA')
-    gpu.state.point_size_set(18.0)
+    gpu.state.point_size_set(9.0)
     batch = batch_for_shader(shader, 'POINTS', {"pos": [(x, y)]})
     shader.bind()
     shader.uniform_float("color", (0.1, 1.0, 0.15, 1.0))
     batch.draw(shader)
-
-    marker_lines = [
-        (x - 10.0, y), (x + 10.0, y),
-        (x, y - 10.0), (x, y + 10.0),
-    ]
-    gpu.state.line_width_set(2.0)
-    batch = batch_for_shader(shader, 'LINES', {"pos": marker_lines})
-    shader.bind()
-    shader.uniform_float("color", (0.1, 1.0, 0.15, 1.0))
-    batch.draw(shader)
-
-    font_id = 0
-    blf.size(font_id, 14)
-    blf.color(font_id, 0.1, 1.0, 0.15, 1.0)
-    blf.position(font_id, x + 12.0, y + 8.0, 0)
-    blf.draw(font_id, "Start")
 
     gpu.state.point_size_set(1.0)
     gpu.state.line_width_set(1.0)
@@ -965,6 +961,8 @@ def draw_active_pipe_cross_section_ring(context, ps):
 
     wd = context.window_manager.hair_pipe_widget
     show_full_grid = bool(getattr(wd, 'show_full_mesh_grid', False))
+    preview_mode = getattr(wd, 'preview_mode', 'BASE')
+    show_roll_grid = preview_mode == 'ROLL'
     ring_count = len(mesh_verts) // segments
     view_forward = region_data.view_rotation @ Vector((0.0, 0.0, -1.0))
     camera_dir = -safe_normalized(view_forward)
@@ -995,15 +993,16 @@ def draw_active_pipe_cross_section_ring(context, ps):
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
     gpu.state.blend_set('ALPHA')
 
-    if show_full_grid:
+    if show_full_grid or show_roll_grid:
         grid_lines = []
         valid_projected = [(ring, mask) for ring, mask in zip(projected_rings, front_masks) if ring is not None and mask is not None]
-        for ring, front_mask in valid_projected:
-            for idx, point in enumerate(ring):
-                next_idx = (idx + 1) % len(ring)
-                if front_mask[idx] or front_mask[next_idx]:
-                    grid_lines.append(point)
-                    grid_lines.append(ring[next_idx])
+        if show_full_grid:
+            for ring, front_mask in valid_projected:
+                for idx, point in enumerate(ring):
+                    next_idx = (idx + 1) % len(ring)
+                    if front_mask[idx] or front_mask[next_idx]:
+                        grid_lines.append(point)
+                        grid_lines.append(ring[next_idx])
         for ring_idx in range(len(projected_rings) - 1):
             ring = projected_rings[ring_idx]
             next_ring = projected_rings[ring_idx + 1]
@@ -1037,11 +1036,26 @@ def draw_active_pipe_cross_section_ring(context, ps):
                     highlight_lines.append(point)
                 previous_point = point
         if highlight_lines:
-            gpu.state.line_width_set(2.0)
-            batch = batch_for_shader(shader, 'LINES', {"pos": highlight_lines})
-            shader.bind()
-            shader.uniform_float("color", (1.0, 0.55, 0.0, 0.95))
-            batch.draw(shader)
+            gpu.state.line_width_set(1.35)
+            active_ring_idx = selected_ring_starts[0][1] // segments if selected_ring_starts else ring_count // 2
+            max_distance = max(1, max(active_ring_idx, ring_count - 1 - active_ring_idx))
+            for ring_idx in range(len(projected_rings) - 1):
+                ring = projected_rings[ring_idx]
+                next_ring = projected_rings[ring_idx + 1]
+                if ring is None or next_ring is None:
+                    continue
+                distance = min(abs(ring_idx - active_ring_idx), abs(ring_idx + 1 - active_ring_idx))
+                influence = max(0.0, 1.0 - distance / max_distance)
+                alpha = 0.12 + 0.83 * influence * influence
+                segment_lines = []
+                for selected_idx in sorted(selected_indices):
+                    if selected_idx < len(ring) and selected_idx < len(next_ring):
+                        segment_lines.extend((ring[selected_idx], next_ring[selected_idx]))
+                if segment_lines:
+                    batch = batch_for_shader(shader, 'LINES', {"pos": segment_lines})
+                    shader.bind()
+                    shader.uniform_float("color", (1.0, 0.55, 0.0, alpha))
+                    batch.draw(shader)
 
     widget_selected_indices = get_selected_widget_verts(wd)
     for point_idx, ring_start in selected_ring_starts:
@@ -1059,7 +1073,7 @@ def draw_active_pipe_cross_section_ring(context, ps):
 
         is_active_ring = point_idx == active_idx
         if lines:
-            gpu.state.line_width_set(2.4 if is_active_ring else 1.8)
+            gpu.state.line_width_set(1.65 if is_active_ring else 1.3)
             batch = batch_for_shader(shader, 'LINES', {"pos": lines})
             shader.bind()
             shader.uniform_float("color", (1.0, 0.55, 0.0, 1.0) if is_active_ring else (1.0, 0.78, 0.05, 0.78))
@@ -1076,9 +1090,9 @@ def draw_active_pipe_cross_section_ring(context, ps):
             else:
                 normal_points.append(point)
         if normal_points:
-            draw_circle_points(shader, normal_points, (1.0, 0.55, 0.0, 0.95) if is_active_ring else (1.0, 0.78, 0.05, 0.72), 3.4 if is_active_ring else 3.0, segments=18)
+            draw_circle_points(shader, normal_points, (1.0, 1.0, 1.0, 0.92) if is_active_ring else (1.0, 0.78, 0.05, 0.72), 3.4 if is_active_ring else 3.0, segments=18)
         if selected_points:
-            draw_circle_points(shader, selected_points, (1.0, 1.0, 0.15, 1.0), 4.2, segments=18)
+            draw_circle_points(shader, selected_points, (1.0, 0.5, 0.0, 1.0), 4.2, segments=18)
 
     gpu.state.point_size_set(1.0)
     gpu.state.line_width_set(1.0)
@@ -1618,16 +1632,21 @@ def set_pipe_basemesh_preview(context, curve_obj, enabled):
                 "polygon_smooth_states": polygon_smooth_states,
                 "smooth_shading": bool(getattr(curve_obj.hair_pipe_settings, "smooth_shading", True)),
             })
-        curve_obj.hair_pipe_settings.smooth_shading = False
+        wd = getattr(context.window_manager, 'hair_pipe_widget', None) if context is not None else None
+        preview_mode = getattr(wd, 'preview_mode', 'BASE')
+        curve_obj.hair_pipe_settings.smooth_shading = preview_mode == 'SUBDIV'
+        disable_subdiv = preview_mode in {'BASE', 'ROLL'}
+        show_in_front = bool(getattr(wd, 'preview_in_front', True))
         pipe_obj.display_type = 'TEXTURED'
-        pipe_obj.show_wire = True
-        pipe_obj.show_in_front = True
+        pipe_obj.show_wire = preview_mode == 'BASE'
+        pipe_obj.show_in_front = show_in_front
         if mesh is not None:
-            mesh.polygons.foreach_set("use_smooth", [False] * len(mesh.polygons))
+            use_smooth = preview_mode == 'SUBDIV'
+            mesh.polygons.foreach_set("use_smooth", [use_smooth] * len(mesh.polygons))
             mesh.update()
         for modifier in pipe_obj.modifiers:
             if modifier.type == 'SUBSURF':
-                modifier.show_viewport = False
+                modifier.show_viewport = not disable_subdiv
     else:
         raw_state = pipe_obj.get(_PIPE_BASEMESH_STATE_KEY)
         if raw_state:
@@ -2727,25 +2746,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     if wd.left_drag_pending:
         moved = math.sqrt((mx - wd.left_drag_start_x) ** 2 + (my - wd.left_drag_start_y) ** 2)
         if event.type == 'MOUSEMOVE' and moved >= drag_threshold:
-            if wd.left_drag_vert_index >= 0:
-                sel = get_selected_widget_verts(wd)
-                if wd.left_drag_vert_index not in sel:
-                    sel = {wd.left_drag_vert_index}
-                    set_selected_widget_verts(wd, sel)
-                movable = {vi for vi in sel if 0 <= vi < len(verts) and not getattr(verts[vi], 'is_ghost', False)}
-                if movable:
-                    push_widget_undo(context, "移动横截面顶点")
-                    set_selected_widget_verts(wd, movable)
-                    wd.left_drag_active = True
-                    wd.move_active = True
-                    wd.move_start_x = wd.left_drag_start_x
-                    wd.move_start_y = wd.left_drag_start_y
-                    prepare_proportional_transform(context, wd, verts, movable, cx, cy, sf, alignment_angle, flip_h)
-                    store_longitudinal_initial_state(wd, settings, movable)
-                wd.left_drag_pending = False
-                redraw_view3d(context)
-                return {'RUNNING_MODAL'}
             wd.left_drag_pending = False
+            wd.left_drag_vert_index = -1
             wd.box_select_active = True
             wd.box_select_3d = not wd.left_drag_started_inside_widget
             wd.box_x0 = wd.left_drag_start_x
@@ -3535,6 +3537,27 @@ class HAIRPIPE_OT_widget_toggle_grid(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class HAIRPIPE_OT_widget_apply_preview_options(bpy.types.Operator):
+    bl_idname = "hair_pipe.widget_apply_preview_options"
+    bl_label = "更新横截面预览显示"
+
+    option: bpy.props.EnumProperty(
+        items=(('IN_FRONT', "显示在最前", ""),),
+        default='IN_FRONT',
+    )
+
+    def execute(self, context):
+        wd = context.window_manager.hair_pipe_widget
+        if self.option == 'IN_FRONT':
+            wd.preview_in_front = not wd.preview_in_front
+        curve_obj = get_widget_source_curve(context)
+        if wd.is_active and curve_obj is not None:
+            set_pipe_basemesh_preview(context, curve_obj, False)
+            set_pipe_basemesh_preview(context, curve_obj, True)
+        redraw_view3d(context)
+        return {'FINISHED'}
+
+
 class HAIRPIPE_OT_widget_stop(bpy.types.Operator):
     """Close the interactive cross-section editor"""
     bl_idname = "hair_pipe.widget_stop"
@@ -3564,6 +3587,7 @@ classes = (
     HAIRPIPE_OT_widget_toggle_smooth_preview,
     HAIRPIPE_OT_widget_toggle_flip,
     HAIRPIPE_OT_widget_toggle_grid,
+    HAIRPIPE_OT_widget_apply_preview_options,
     HAIRPIPE_OT_widget_stop,
 )
 
