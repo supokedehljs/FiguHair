@@ -146,14 +146,14 @@ class HairPipeWidgetSettings(PropertyGroup):
         items=(
             ('BASE', "去细分显示", "去除细分并使用平直着色"),
             ('SUBDIV', "细分显示", "保留细分并使用平滑着色"),
-            ('ROLL', "滚转显示", "去除细分，仅显示纵向网格"),
         ),
         default='SUBDIV',
     )
     preview_in_front: BoolProperty(name="显示在最前", default=False)
     preview_hold_active: BoolProperty(default=False)
     preview_hold_key: bpy.props.StringProperty(default="")
-    preview_hold_previous_mode: bpy.props.StringProperty(default="BASE")
+    preview_hold_previous_mode: bpy.props.StringProperty(default="SUBDIV")
+    preview_hold_started_at: FloatProperty(default=0.0)
     show_unsubdivided_mesh: BoolProperty(default=True)
     show_mesh_in_front: BoolProperty(default=True)
     rotate_start_x: FloatProperty(default=0.0)
@@ -959,8 +959,9 @@ def draw_active_pipe_cross_section_ring(context, ps):
 
     wd = context.window_manager.hair_pipe_widget
     show_full_grid = bool(getattr(wd, 'show_full_mesh_grid', False))
-    preview_mode = getattr(wd, 'preview_mode', 'BASE')
-    show_roll_grid = preview_mode == 'ROLL'
+    preview_mode = getattr(wd, 'preview_mode', 'SUBDIV')
+    show_roll_grid = False
+    show_section_grid = False
     ring_count = len(mesh_verts) // segments
     view_forward = region_data.view_rotation @ Vector((0.0, 0.0, -1.0))
     camera_dir = -safe_normalized(view_forward)
@@ -991,17 +992,18 @@ def draw_active_pipe_cross_section_ring(context, ps):
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
     gpu.state.blend_set('ALPHA')
 
-    if show_full_grid or show_roll_grid:
+    if show_full_grid or show_roll_grid or show_section_grid:
         grid_lines = []
         valid_projected = [(ring, mask) for ring, mask in zip(projected_rings, front_masks) if ring is not None and mask is not None]
-        if show_full_grid:
+        if show_full_grid or show_section_grid:
             for ring, front_mask in valid_projected:
                 for idx, point in enumerate(ring):
                     next_idx = (idx + 1) % len(ring)
                     if front_mask[idx] or front_mask[next_idx]:
                         grid_lines.append(point)
                         grid_lines.append(ring[next_idx])
-        for ring_idx in range(len(projected_rings) - 1):
+        ring_connection_range = range(len(projected_rings) - 1) if (show_full_grid or show_roll_grid) else ()
+        for ring_idx in ring_connection_range:
             ring = projected_rings[ring_idx]
             next_ring = projected_rings[ring_idx + 1]
             mask = front_masks[ring_idx]
@@ -1036,15 +1038,18 @@ def draw_active_pipe_cross_section_ring(context, ps):
         if highlight_lines:
             gpu.state.line_width_set(1.65)
             active_ring_idx = selected_ring_starts[0][1] // segments if selected_ring_starts else ring_count // 2
-            max_distance = max(1, max(active_ring_idx, ring_count - 1 - active_ring_idx))
+            fade_distance = max(3, min(12, int(math.ceil(ring_count * 0.18))))
             for ring_idx in range(len(projected_rings) - 1):
                 ring = projected_rings[ring_idx]
                 next_ring = projected_rings[ring_idx + 1]
                 if ring is None or next_ring is None:
                     continue
-                distance = min(abs(ring_idx - active_ring_idx), abs(ring_idx + 1 - active_ring_idx))
-                influence = max(0.0, 1.0 - distance / max_distance)
-                alpha = 0.12 + 0.83 * influence * influence
+                segment_center = ring_idx + 0.5
+                distance = abs(segment_center - active_ring_idx)
+                if distance >= fade_distance:
+                    continue
+                influence = 1.0 - distance / fade_distance
+                alpha = 0.95 * influence
                 segment_lines = []
                 for selected_idx in sorted(selected_indices):
                     if selected_idx < len(ring) and selected_idx < len(next_ring):
@@ -1088,7 +1093,8 @@ def draw_active_pipe_cross_section_ring(context, ps):
             else:
                 normal_points.append(point)
         if normal_points:
-            draw_circle_points(shader, normal_points, (1.0, 1.0, 1.0, 0.92) if is_active_ring else (1.0, 0.78, 0.05, 0.72), 3.4 if is_active_ring else 3.0, segments=18)
+            normal_color = (1.0, 1.0, 1.0, 0.92) if is_active_ring else (1.0, 0.78, 0.05, 0.72)
+            draw_circle_points(shader, normal_points, normal_color, 3.4 if is_active_ring else 3.0, segments=18)
         if selected_points:
             draw_circle_points(shader, selected_points, (1.0, 0.5, 0.0, 1.0), 4.2, segments=18)
 
@@ -1608,8 +1614,8 @@ def set_pipe_basemesh_preview(context, curve_obj, enabled):
         wd = getattr(context.window_manager, 'hair_pipe_widget', None) if context is not None else None
         preview_mode = getattr(wd, 'preview_mode', 'BASE')
         curve_obj.hair_pipe_settings.smooth_shading = preview_mode == 'SUBDIV'
-        disable_subdiv = preview_mode in {'BASE', 'ROLL'}
-        show_in_front = bool(getattr(wd, 'preview_in_front', True))
+        disable_subdiv = preview_mode == 'BASE'
+        show_in_front = True if disable_subdiv else bool(getattr(wd, 'preview_in_front', False))
         pipe_obj.display_type = 'TEXTURED'
         pipe_obj.show_wire = preview_mode == 'BASE'
         pipe_obj.show_in_front = show_in_front
@@ -1928,6 +1934,18 @@ def get_active_curve_point(context):
                 return point
             global_idx += 1
     return None
+
+
+def get_transform_mouse_pivot(context, fallback_x, fallback_y):
+    world_position = get_active_curve_point_world_position(context)
+    region = context.region
+    region_data = context.region_data
+    if world_position is None or region is None or region_data is None:
+        return fallback_x, fallback_y
+    projected = view3d_utils.location_3d_to_region_2d(region, region_data, world_position)
+    if projected is None:
+        return fallback_x, fallback_y
+    return projected.x, projected.y
 
 
 def get_active_curve_point_world_position(context):
@@ -2658,7 +2676,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     if view_region is None:
         operator._finish(context)
         return {'CANCELLED'}
-    if wd.preview_hold_active and event.value == 'RELEASE' and event.type == wd.preview_hold_key:
+    if (wd.preview_hold_active and
+            ((event.value == 'RELEASE' and event.type == wd.preview_hold_key) or
+             (event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS'))):
         wd.preview_mode = wd.preview_hold_previous_mode
         wd.preview_hold_active = False
         wd.preview_hold_key = ""
@@ -2701,13 +2721,14 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     view_cx = view_region.width * 0.5
     view_cy = view_region.height * 0.5
 
-    if event.type in {'Q', 'W'} and not event.ctrl and not event.shift and not event.alt:
+    if event.type == 'Q' and not event.ctrl and not event.shift and not event.alt:
         if event.value == 'PRESS':
             if not wd.preview_hold_active:
                 wd.preview_hold_previous_mode = wd.preview_mode
             wd.preview_hold_active = True
             wd.preview_hold_key = event.type
-            wd.preview_mode = 'BASE' if event.type == 'Q' else 'ROLL'
+            wd.preview_hold_started_at = time.perf_counter()
+            wd.preview_mode = 'BASE'
             source_curve = get_widget_source_curve(context)
             if source_curve is not None:
                 set_pipe_basemesh_preview(context, source_curve, False)
@@ -2906,8 +2927,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
 
     if wd.display_scale_active:
         if event.type == 'MOUSEMOVE':
-            start_dist = math.sqrt((wd.scale_start_x - cx) ** 2 + (wd.scale_start_y - cy) ** 2)
-            now_dist = math.sqrt((mx - cx) ** 2 + (my - cy) ** 2)
+            mouse_pivot_x, mouse_pivot_y = get_transform_mouse_pivot(context, cx, cy)
+            start_dist = math.hypot(wd.scale_start_x - mouse_pivot_x, wd.scale_start_y - mouse_pivot_y)
+            now_dist = math.hypot(mx - mouse_pivot_x, my - mouse_pivot_y)
             factor = now_dist / max(start_dist, 1.0)
             wd.widget_scale_factor = max(8.0, min(50000.0, wd.scale_start_factor * factor))
             redraw_view3d(context)
@@ -2929,8 +2951,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         if event.type == 'MOUSEMOVE':
             ctr_x = wd.transform_pivot_x
             ctr_y = wd.transform_pivot_y
-            start_dist = math.sqrt((wd.scale_start_x - cx) ** 2 + (wd.scale_start_y - cy) ** 2)
-            now_dist = math.sqrt((mx - cx) ** 2 + (my - cy) ** 2)
+            mouse_pivot_x, mouse_pivot_y = get_transform_mouse_pivot(context, cx, cy)
+            start_dist = math.hypot(wd.scale_start_x - mouse_pivot_x, wd.scale_start_y - mouse_pivot_y)
+            now_dist = math.hypot(mx - mouse_pivot_x, my - mouse_pivot_y)
             factor = now_dist / max(start_dist, 1.0)
             weights = get_proportional_weights(wd)
             for vi, weight in weights.items():
@@ -2950,10 +2973,10 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type in {'RIGHTMOUSE', 'ESC'}:
-            for ip, vi in enumerate(sel):
-                if vi < len(verts) and ip < len(initial):
-                    verts[vi].offset_x = initial[ip][0]
-                    verts[vi].offset_y = initial[ip][1]
+            for vi, initial_offset in initial.items():
+                if vi < len(verts):
+                    verts[vi].offset_x = initial_offset[0]
+                    verts[vi].offset_y = initial_offset[1]
             wd.scale_active = False
             update_ghost_vertices(ps)
             redraw_view3d(context)
@@ -2965,8 +2988,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         sel = sorted(get_selected_widget_verts(wd))
         initial = get_rotate_offsets(wd)
         if event.type == 'MOUSEMOVE':
-            a_start = math.atan2(wd.rotate_start_y - cy, wd.rotate_start_x - cx)
-            a_now = math.atan2(my - cy, mx - cx)
+            mouse_pivot_x, mouse_pivot_y = get_transform_mouse_pivot(context, cx, cy)
+            a_start = math.atan2(wd.rotate_start_y - mouse_pivot_y, wd.rotate_start_x - mouse_pivot_x)
+            a_now = math.atan2(my - mouse_pivot_y, mx - mouse_pivot_x)
             angle = a_now - a_start
             if flip_h:
                 angle = -angle
@@ -3187,6 +3211,10 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 redraw_view3d(context)
                 return {'RUNNING_MODAL'}
 
+            if not event.shift:
+                set_selected_widget_verts(wd, set())
+                ps.active_vert_index = -1
+                redraw_view3d(context)
             return {'RUNNING_MODAL'}
 
         if not inside_widget:
