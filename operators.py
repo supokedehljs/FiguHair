@@ -4077,21 +4077,19 @@ class HAIRPIPE_OT_toggle_solo_display(bpy.types.Operator):
             return {'CANCELLED'}
 
         if solo_enabled:
-            for obj in bpy.data.objects:
-                if _is_figuhair_family_obj(obj):
-                    obj["hair_pipe_solo_prev_hidden"] = obj.hide_get()
-                    obj.hide_set(obj.name not in family_ids)
+            for obj in context.view_layer.objects:
+                obj["hair_pipe_solo_prev_hidden"] = obj.hide_get()
+                obj.hide_set(obj.name not in family_ids)
             for root_obj in roots:
                 root_obj["hair_pipe_solo_active"] = True
             self.report({'INFO'}, "已单独显示选中的头发")
         else:
-            for obj in bpy.data.objects:
-                if not _is_figuhair_family_obj(obj):
+            for obj in context.view_layer.objects:
+                if "hair_pipe_solo_prev_hidden" not in obj:
                     continue
                 prev_hidden = bool(obj.get("hair_pipe_solo_prev_hidden", False))
                 obj.hide_set(prev_hidden)
-                if "hair_pipe_solo_prev_hidden" in obj:
-                    del obj["hair_pipe_solo_prev_hidden"]
+                del obj["hair_pipe_solo_prev_hidden"]
             for root_obj in roots:
                 if "hair_pipe_solo_active" in root_obj:
                     del root_obj["hair_pipe_solo_active"]
@@ -4292,6 +4290,9 @@ class HAIRPIPE_OT_delete_hair(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         return get_context_curve_object(context) is not None
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
 
     def execute(self, context):
         selected_objects = list(getattr(context, 'selected_objects', ()))

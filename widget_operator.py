@@ -2947,9 +2947,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 angle = -angle
             cos_a = math.cos(angle)
             sin_a = math.sin(angle)
-            cnt = max(1, len(initial))
-            ctr_x = sum(offset[0] for offset in initial.values()) / cnt
-            ctr_y = sum(offset[1] for offset in initial.values()) / cnt
+            ctr_x = wd.transform_pivot_x
+            ctr_y = wd.transform_pivot_y
             weights = get_proportional_weights(wd)
             for vi, weight in weights.items():
                 initial_offset = initial.get(vi)
@@ -3322,6 +3321,86 @@ class HAIRPIPE_OT_widget_remove_vertex(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class HAIRPIPE_OT_widget_smooth_selected_vertices(bpy.types.Operator):
+    bl_idname = "hair_pipe.widget_smooth_selected_vertices"
+    bl_label = "平滑横截面顶点"
+    bl_description = "将选中的横截面顶点向相邻顶点平均位置平滑"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    mode: bpy.props.EnumProperty(
+        name="平滑模式",
+        items=(
+            ('NEIGHBOR', "普通平滑", "向相邻顶点的平均位置平滑"),
+            ('CIRCULAR', "圆形平滑", "向以横截面中心为圆心的均匀圆形平滑"),
+        ),
+        default='NEIGHBOR',
+    )
+    strength: FloatProperty(name="强度", default=0.5, min=0.0, max=1.0)
+    iterations: IntProperty(name="次数", default=1, min=1, max=20)
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        wd = getattr(context.window_manager, "hair_pipe_widget", None)
+        return obj is not None and obj.type == 'CURVE' and wd is not None and wd.is_active
+
+    def execute(self, context):
+        obj = context.active_object
+        settings = obj.hair_pipe_settings
+        if not settings.point_settings:
+            return {'CANCELLED'}
+        point_idx = max(0, min(settings.active_point_index, len(settings.point_settings) - 1))
+        ps = settings.point_settings[point_idx]
+        verts = ps.cross_section_verts
+        wd = context.window_manager.hair_pipe_widget
+        selected = {
+            idx for idx in get_selected_widget_verts(wd)
+            if 0 <= idx < len(verts) and not getattr(verts[idx], 'is_ghost', False)
+        }
+        if not selected:
+            self.report({'WARNING'}, "请先选择需要平滑的横截面顶点")
+            return {'CANCELLED'}
+
+        push_widget_undo(context, "平滑横截面顶点")
+        for _iteration in range(self.iterations):
+            original = [(vertex.offset_x, vertex.offset_y) for vertex in verts]
+            updates = {}
+            count = len(verts)
+            center_x = sum(point[0] for point in original) / count
+            center_y = sum(point[1] for point in original) / count
+            mean_radius = sum(math.hypot(point[0] - center_x, point[1] - center_y) for point in original) / count
+            for idx in selected:
+                if self.mode == 'CIRCULAR':
+                    radial_x = original[idx][0] - center_x
+                    radial_y = original[idx][1] - center_y
+                    radial_length = math.hypot(radial_x, radial_y)
+                    if radial_length > 1e-8:
+                        target_x = center_x + radial_x / radial_length * mean_radius
+                        target_y = center_y + radial_y / radial_length * mean_radius
+                    else:
+                        angle = math.tau * idx / count
+                        target_x = center_x + math.cos(angle) * mean_radius
+                        target_y = center_y + math.sin(angle) * mean_radius
+                else:
+                    previous_idx = (idx - 1) % count
+                    next_idx = (idx + 1) % count
+                    target_x = (original[previous_idx][0] + original[next_idx][0]) * 0.5
+                    target_y = (original[previous_idx][1] + original[next_idx][1]) * 0.5
+                updates[idx] = (
+                    original[idx][0] + (target_x - original[idx][0]) * self.strength,
+                    original[idx][1] + (target_y - original[idx][1]) * self.strength,
+                )
+            for idx, (offset_x, offset_y) in updates.items():
+                verts[idx].offset_x = offset_x
+                verts[idx].offset_y = offset_y
+
+        update_ghost_vertices(ps)
+        sync_active_cross_section_to_selected_points(context)
+        clear_pipe_mesh_cache()
+        redraw_view3d(context)
+        return {'FINISHED'}
+
+
 class HAIRPIPE_OT_widget_delete_selected_vertices(bpy.types.Operator):
     bl_idname = "hair_pipe.widget_delete_selected_vertices"
     bl_label = "删除横截面顶点"
@@ -3478,6 +3557,7 @@ classes = (
     HAIRPIPE_OT_widget_hold,
     HAIRPIPE_OT_widget_add_vertex,
     HAIRPIPE_OT_widget_remove_vertex,
+    HAIRPIPE_OT_widget_smooth_selected_vertices,
     HAIRPIPE_OT_widget_delete_selected_vertices,
     HAIRPIPE_OT_widget_toggle_ghost,
     HAIRPIPE_OT_widget_make_normal,

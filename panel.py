@@ -23,7 +23,7 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
 
         box = disabled.box()
         box.label(text="默认设置", icon='MESH_CIRCLE')
-        for label in ("滚转算法", "强力平滑", "平滑次数", "平滑着色", "细分层级"):
+        for label in ("滚转算法", "平滑着色", "细分层级"):
             box.label(text=label)
 
         edit_box = disabled.box()
@@ -36,6 +36,15 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         row.operator("hair_pipe.copy_cross_section", text="复制", icon='COPYDOWN')
         row.operator("hair_pipe.paste_cross_section", text="粘贴", icon='PASTEDOWN')
         edit_box.operator("hair_pipe.widget_interact", text="打开编辑器", icon='MOUSE_LMB')
+        edit_box.operator("hair_pipe.cross_section_spread", text="横截面传递", icon='DUPLICATE')
+        row = edit_box.row(align=True)
+        row.operator("hair_pipe.widget_toggle_ghost", text="设置为幽灵点")
+        row.operator("hair_pipe.widget_make_normal", text="设置为正常点")
+        row = edit_box.row(align=True)
+        op = row.operator("hair_pipe.widget_smooth_selected_vertices", text="普通平滑", icon='SMOOTHCURVE')
+        op.mode = 'NEIGHBOR'
+        op = row.operator("hair_pipe.widget_smooth_selected_vertices", text="圆形平滑", icon='MESH_CIRCLE')
+        op.mode = 'CIRCULAR'
 
     def draw(self, context):
         layout = self.layout
@@ -91,9 +100,6 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         box = layout.box()
         box.label(text="默认设置", icon='MESH_CIRCLE')
         box.prop(settings, "roll_mode", text="滚转算法")
-        box.prop(settings, "strong_smoothing", text="强力平滑")
-        if settings.strong_smoothing:
-            box.prop(settings, "strong_smoothing_iterations", text="平滑次数")
         box.prop(settings, "smooth_shading", text="平滑着色")
         row = box.row(align=True)
         row.prop(settings, "subdivision_levels", text="细分层级")
@@ -101,8 +107,9 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         row.prop(settings, "default_subdiv", text="", icon=icon, toggle=True)
 
         header_box = layout.box()
-        header_box.enabled = edit_mode
-        header_box.prop(settings, "auto_update", text="编辑模式操作", icon='EDITMODE_HLT', emboss=False)
+        auto_update_row = header_box.row()
+        auto_update_row.enabled = edit_mode
+        auto_update_row.prop(settings, "auto_update", text="编辑模式操作", icon='EDITMODE_HLT', emboss=False)
 
         edit_controls_enabled = edit_mode and settings.auto_update and len(settings.point_settings) > 0
         active_idx = min(settings.active_point_index, len(settings.point_settings) - 1) if settings.point_settings else -1
@@ -124,26 +131,30 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         row.operator("hair_pipe.copy_cross_section", text="复制", icon='COPYDOWN')
         row.operator("hair_pipe.paste_cross_section", text="粘贴", icon='PASTEDOWN')
 
-        if widget_data is None:
-            box.label(text="横截面编辑器未初始化，请重新加载插件", icon='ERROR')
+        widget_ready = widget_data is not None and edit_controls_enabled and active_ps is not None
+        widget_active = widget_ready and widget_data.is_active
+        row = box.row(align=True)
+        row.enabled = widget_ready
+        if widget_active:
+            row.operator("hair_pipe.widget_stop", text="关闭编辑器", icon='PANEL_CLOSE')
         else:
-            row = box.row(align=True)
-            if active_ps is None:
-                row.enabled = False
-                row.operator("hair_pipe.widget_interact", text="没有可编辑的横截面", icon='LOCKED')
-            elif getattr(active_ps, "use_transition", False):
-                row.enabled = False
-                row.operator("hair_pipe.widget_interact", text="过渡模式下无法编辑横截面", icon='LOCKED')
-            elif widget_data.is_active:
-                row.operator("hair_pipe.widget_stop", text="关闭编辑器", icon='PANEL_CLOSE')
-                row = box.row(align=True)
-                row.scale_y = 1.2
-                row.operator("hair_pipe.cross_section_spread", text="横截面传递", icon='DUPLICATE')
-                row = box.row(align=True)
-                row.operator("hair_pipe.widget_toggle_ghost", text="设置为幽灵点")
-                row.operator("hair_pipe.widget_make_normal", text="设置为正常点")
-            else:
-                row.operator("hair_pipe.widget_interact", text="打开编辑器", icon='MOUSE_LMB')
+            row.operator("hair_pipe.widget_interact", text="打开编辑器", icon='MOUSE_LMB')
+
+        row = box.row(align=True)
+        row.enabled = widget_active
+        row.scale_y = 1.2
+        row.operator("hair_pipe.cross_section_spread", text="横截面传递", icon='DUPLICATE')
+        row = box.row(align=True)
+        row.enabled = widget_active
+        row.operator("hair_pipe.widget_toggle_ghost", text="设置为幽灵点")
+        row.operator("hair_pipe.widget_make_normal", text="设置为正常点")
+        row = box.row(align=True)
+        row.enabled = widget_active
+        row.scale_y = 1.15
+        op = row.operator("hair_pipe.widget_smooth_selected_vertices", text="普通平滑", icon='SMOOTHCURVE')
+        op.mode = 'NEIGHBOR'
+        op = row.operator("hair_pipe.widget_smooth_selected_vertices", text="圆形平滑", icon='MESH_CIRCLE')
+        op.mode = 'CIRCULAR'
 
 
 classes = (
