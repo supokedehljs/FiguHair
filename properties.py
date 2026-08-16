@@ -180,6 +180,7 @@ class HairPipeSettings(PropertyGroup):
         description="How generated cross-section frames respond when curve points move",
         items=(
             ('START_FIXED', "START 绝对锁定", "Keep every ring orientation fixed from START; only moving START can rotate the hair, but rings may not stay perpendicular to sharp bends"),
+            ('HYBRID_STABLE', "前向独立锁定", "Each section uses only its own position and the following section for direction; moving a point cannot rotate the next section"),
             ('START_PROJECTED', "START 投影", "Project a persistent START direction onto every tangent; follows bends without accumulated roll, but nearby rings can rotate when their tangent changes"),
             ('PARALLEL_TRANSPORT', "最小扭转", "Transport the START frame along the curve; natural but later points can change downstream roll"),
             ('WORLD_UP', "世界向上", "Use a fixed world-up reference for every cross-section"),

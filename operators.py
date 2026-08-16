@@ -748,6 +748,26 @@ def make_ring_from_interpolated(center, tangent, interp_offsets):
 
 _ROLL_DIAGNOSTIC_LOG_PATH = Path(bpy.app.tempdir) / "figuhair_roll_diagnostics.log"
 _ROLL_DIAGNOSTIC_STATE = {}
+_ROLL_DIAGNOSTIC_RESULTS = {}
+_ROLL_DIAGNOSTIC_ACTIVITY = {}
+
+
+def get_uncontrolled_roll_diagnostics(curve_obj):
+    if curve_obj is None:
+        return []
+    results = []
+    pointer = curve_obj.as_pointer()
+    now = time.monotonic()
+    for key, values in _ROLL_DIAGNOSTIC_RESULTS.items():
+        curve_pointer, _spline_index = key
+        if curve_pointer != pointer:
+            continue
+        # A changing geometry signature is a more reliable indication of an
+        # active G transform than WindowManager.operators, which does not expose
+        # Blender's currently running transform consistently.
+        if now - _ROLL_DIAGNOSTIC_ACTIVITY.get(key, 0.0) <= 0.75:
+            results.extend(values)
+    return results
 
 
 def _frame_roll_angle(tangent, normal):
@@ -766,13 +786,29 @@ def _write_roll_diagnostic(curve_obj, spline_index, ring_specs, frames, is_cycli
     key = (curve_obj.as_pointer(), spline_index)
     previous = _ROLL_DIAGNOSTIC_STATE.get(key)
     current = [(tangent.copy(), normal.copy()) for tangent, normal, _binormal in frames]
-    _ROLL_DIAGNOSTIC_STATE[key] = (signature, current)
-    if previous is None or previous[0] == signature:
+    control_signature = tuple(
+        (round(ps.rotation, 5), round(getattr(get_curve_point_by_global_index(curve_obj, idx), 'tilt', 0.0), 5))
+        for idx, ps in enumerate(curve_obj.hair_pipe_settings.point_settings)
+    )
+    _ROLL_DIAGNOSTIC_STATE[key] = (signature, current, control_signature)
+    if previous is None:
+        return
+    if previous[0] == signature:
+        return
+    _ROLL_DIAGNOSTIC_ACTIVITY[key] = time.monotonic()
+    if curve_obj.hair_pipe_settings.roll_mode != 'START_FIXED':
+        _ROLL_DIAGNOSTIC_RESULTS.pop(key, None)
         return
 
     old_frames = previous[1]
-    samples = sorted({0, len(frames) // 2, len(frames) - 1})
+    old_control_signature = previous[2] if len(previous) > 2 else control_signature
+    if old_control_signature != control_signature:
+        _ROLL_DIAGNOSTIC_RESULTS.pop(key, None)
+        return
+
+    samples = list(range(len(frames)))
     messages = []
+    detected = []
     for idx in samples:
         old_idx = round(idx * (len(old_frames) - 1) / max(1, len(frames) - 1))
         old_tangent, old_normal = old_frames[old_idx]
@@ -787,6 +823,30 @@ def _write_roll_diagnostic(curve_obj, spline_index, ring_specs, frames, is_cycli
             f"ring={idx}/{len(frames) - 1} tangent_change={tangent_delta:.3f}deg "
             f"frame_roll_change={roll_delta:.3f}deg current_roll={_frame_roll_angle(tangent, normal):.3f}deg"
         )
+        if idx > 0 and abs(roll_delta) >= 0.1:
+            detected.append((ring_specs[idx][0].copy(), roll_delta))
+
+    # Collapse dense sampled-ring warnings to the strongest value near each
+    # curve control point, so the viewport remains readable.
+    point_positions = [
+        Vector(point.co[:3])
+        for spline in curve_obj.data.splines
+        for point in (spline.bezier_points if spline.type == 'BEZIER' else spline.points)
+    ]
+    point_results = {}
+    for center, roll_delta in detected:
+        if not point_positions:
+            continue
+        point_idx = min(range(len(point_positions)), key=lambda idx: (point_positions[idx] - center).length_squared)
+        old_result = point_results.get(point_idx)
+        if old_result is None or abs(roll_delta) > abs(old_result[1]):
+            point_results[point_idx] = (point_positions[point_idx].copy(), roll_delta)
+    new_results = [
+        (point_idx, position, angle)
+        for point_idx, (position, angle) in sorted(point_results.items())
+    ]
+    if new_results:
+        _ROLL_DIAGNOSTIC_RESULTS[key] = new_results
 
     start_tangent, start_normal, _binormal = frames[0]
     with _ROLL_DIAGNOSTIC_LOG_PATH.open("a", encoding="utf-8") as log_file:
@@ -865,6 +925,70 @@ def _minimal_twist_frames_from_tangents(raw_tangents, is_cyclic=False, start_nor
     return frames
 
 
+def _forward_independent_tangents(centers, fallback_tangents):
+    count = len(centers)
+    if count < 2:
+        return [safe_normalized(tangent) for tangent in fallback_tangents]
+    tangents = []
+    for idx in range(count):
+        # A ring must not use the previous center in its direction. Moving point
+        # i therefore cannot rotate the frame at i+1. The final ring reuses the
+        # last forward segment because it has no following point.
+        if idx < count - 1:
+            direction = centers[idx + 1] - centers[idx]
+        else:
+            direction = centers[idx] - centers[idx - 1]
+        fallback = fallback_tangents[min(idx, len(fallback_tangents) - 1)]
+        tangents.append(safe_normalized(direction, fallback))
+    return tangents
+
+
+def _hybrid_stable_frames(raw_tangents, start_normal):
+    if not raw_tangents:
+        return []
+
+    # The first two curve points define one global roll anchor. Every later
+    # frame is solved directly from this anchor, never from the preceding ring.
+    # Therefore moving an intermediate point cannot propagate accumulated roll
+    # into the following cross-sections.
+    anchor_tangent = safe_normalized(raw_tangents[0])
+    anchor_normal = start_normal - anchor_tangent * start_normal.dot(anchor_tangent)
+    if anchor_normal.length < 1e-8:
+        anchor_normal, _anchor_binormal = get_cross_section_frame(anchor_tangent)
+    else:
+        anchor_normal.normalize()
+    anchor_binormal = anchor_tangent.cross(anchor_normal).normalized()
+
+    frames = []
+    for raw_tangent in raw_tangents:
+        tangent = safe_normalized(raw_tangent, anchor_tangent)
+        tangent_dot = max(-1.0, min(1.0, anchor_tangent.dot(tangent)))
+
+        if tangent_dot > -0.9999:
+            # Shortest-arc rotation contains no roll around the destination
+            # tangent and depends only on START plus this ring's own tangent.
+            try:
+                normal = anchor_tangent.rotation_difference(tangent) @ anchor_normal
+            except ValueError:
+                normal = anchor_normal.copy()
+        else:
+            # At the exact opposite direction the shortest arc is ambiguous.
+            # Use the START normal as a deterministic 180-degree rotation axis,
+            # rather than borrowing a direction from the previous ring.
+            normal = anchor_normal.copy()
+
+        normal = normal - tangent * normal.dot(tangent)
+        if normal.length < 1e-8:
+            normal = anchor_binormal - tangent * anchor_binormal.dot(tangent)
+        if normal.length < 1e-8:
+            normal, binormal = get_cross_section_frame(tangent)
+        else:
+            normal.normalize()
+            binormal = tangent.cross(normal).normalized()
+        frames.append((tangent, normal.copy(), binormal.copy()))
+    return frames
+
+
 def _endpoint_driven_frames(centers, raw_tangents, is_cyclic=False, start_normal=None, roll_mode='START_FIXED'):
     if not raw_tangents:
         return []
@@ -881,6 +1005,9 @@ def _endpoint_driven_frames(centers, raw_tangents, is_cyclic=False, start_normal
 
     if roll_mode == 'PARALLEL_TRANSPORT':
         return _minimal_twist_frames_from_tangents(raw_tangents, False, anchor_normal)
+    if roll_mode == 'HYBRID_STABLE':
+        independent_tangents = _forward_independent_tangents(centers, raw_tangents)
+        return _hybrid_stable_frames(independent_tangents, anchor_normal)
 
     if roll_mode == 'WORLD_UP':
         anchor_normal = Vector((0.0, 0.0, 1.0))
@@ -4066,7 +4193,10 @@ def apply_plugin_enabled_state(enabled):
                 if obj.hair_pipe_settings.plugin_enabled != enabled:
                     obj.hair_pipe_settings.plugin_enabled = enabled
             if _is_pipe_mesh_obj(obj) or _is_tail_mesh_only_obj(obj):
-                obj.hide_select = enabled
+                # Enabled meshes must remain hit-testable; the selection handler
+                # redirects the click to the source curve. hide_select would
+                # make the click pass through to unrelated objects behind it.
+                obj.hide_select = False
     finally:
         _PLUGIN_ENABLED_STATE_GUARD = False
 

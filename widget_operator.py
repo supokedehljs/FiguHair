@@ -28,6 +28,7 @@ from .operators import (
     get_cross_section_frame,
     add_cross_section_vertex_after,
     remove_cross_section_vertex_all,
+    get_uncontrolled_roll_diagnostics,
 )
 
 
@@ -855,6 +856,28 @@ def draw_curve_start_marker(context, obj):
     gpu.state.blend_set('NONE')
 
 
+def draw_uncontrolled_roll_markers(context, obj):
+    if obj is None or obj.type != 'CURVE' or not is_curve_edit_mode(obj):
+        return
+    diagnostics = get_uncontrolled_roll_diagnostics(obj)
+    if not diagnostics:
+        return
+    region = context.region
+    region_data = context.region_data
+    if region is None or region_data is None:
+        return
+
+    font_id = 0
+    blf.size(font_id, 13)
+    blf.color(font_id, 1.0, 0.08, 0.04, 1.0)
+    for point_idx, local_position, angle in diagnostics:
+        screen = view3d_utils.location_3d_to_region_2d(region, region_data, obj.matrix_world @ local_position)
+        if screen is None:
+            continue
+        blf.position(font_id, screen.x + 9.0, screen.y + 9.0, 0)
+        blf.draw(font_id, f"{angle:+.1f}°")
+
+
 def draw_transition_point_markers(context, obj, settings):
     if not is_curve_edit_mode(obj):
         return
@@ -1360,6 +1383,7 @@ def draw_widget_callback():
         return
 
     draw_transition_point_markers(context, obj, settings)
+    draw_uncontrolled_roll_markers(context, obj)
 
     wm = context.window_manager
     if not hasattr(wm, 'hair_pipe_widget'):
