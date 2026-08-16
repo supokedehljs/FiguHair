@@ -149,7 +149,8 @@ class HairPipeWidgetSettings(PropertyGroup):
         ),
         default='SUBDIV',
     )
-    preview_in_front: BoolProperty(name="显示在最前", default=False)
+    preview_in_front: BoolProperty(name="细分显示在最前", default=False)
+    preview_base_in_front: BoolProperty(name="去细分显示在最前", default=False)
     distraction_free: BoolProperty(default=False)
     solo_hold_active: BoolProperty(default=False)
     solo_hold_states: bpy.props.StringProperty(default="{}")
@@ -1628,7 +1629,11 @@ def set_pipe_basemesh_preview(context, curve_obj, enabled):
         preview_mode = getattr(wd, 'preview_mode', 'BASE')
         curve_obj.hair_pipe_settings.smooth_shading = preview_mode == 'SUBDIV'
         disable_subdiv = preview_mode == 'BASE'
-        show_in_front = True if disable_subdiv else bool(getattr(wd, 'preview_in_front', False))
+        show_in_front = bool(
+            getattr(wd, 'preview_base_in_front', False)
+            if disable_subdiv
+            else getattr(wd, 'preview_in_front', False)
+        )
         pipe_obj.display_type = 'TEXTURED'
         pipe_obj.show_wire = preview_mode == 'BASE'
         pipe_obj.show_in_front = show_in_front
@@ -2815,10 +2820,10 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         if event.value == 'PRESS':
             if not wd.preview_hold_active:
                 wd.preview_hold_previous_mode = wd.preview_mode
+                wd.preview_mode = 'BASE' if wd.preview_mode == 'SUBDIV' else 'SUBDIV'
             wd.preview_hold_active = True
             wd.preview_hold_key = event.type
             wd.preview_hold_started_at = time.perf_counter()
-            wd.preview_mode = 'BASE'
             source_curve = get_widget_source_curve(context)
             if source_curve is not None:
                 set_pipe_basemesh_preview(context, source_curve, False)
@@ -2837,7 +2842,10 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             return {'RUNNING_MODAL'}
 
     if event.type == in_front_key and event.value == 'PRESS' and not event.ctrl and not event.shift and not event.alt:
-        wd.preview_in_front = not wd.preview_in_front
+        if wd.preview_mode == 'BASE':
+            wd.preview_base_in_front = not wd.preview_base_in_front
+        else:
+            wd.preview_in_front = not wd.preview_in_front
         source_curve = get_widget_source_curve(context)
         if source_curve is not None:
             set_pipe_basemesh_preview(context, source_curve, False)
@@ -3484,11 +3492,6 @@ class HAIRPIPE_MT_widget_context_menu(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
-        op = layout.operator("hair_pipe.widget_smooth_selected_vertices", text="普通平滑", icon='SMOOTHCURVE')
-        op.mode = 'NEIGHBOR'
-        op = layout.operator("hair_pipe.widget_smooth_selected_vertices", text="圆形平滑", icon='MESH_CIRCLE')
-        op.mode = 'CIRCULAR'
-        layout.separator()
         layout.operator_context = 'INVOKE_DEFAULT'
         layout.operator("hair_pipe.widget_toggle_ghost", text="设置为幽灵点")
         layout.operator("hair_pipe.widget_make_normal", text="转换为正常点", icon='CHECKMARK')
@@ -3719,7 +3722,10 @@ class HAIRPIPE_OT_widget_apply_preview_options(bpy.types.Operator):
     def execute(self, context):
         wd = context.window_manager.hair_pipe_widget
         if self.option == 'IN_FRONT':
-            wd.preview_in_front = not wd.preview_in_front
+            if wd.preview_mode == 'BASE':
+                wd.preview_base_in_front = not wd.preview_base_in_front
+            else:
+                wd.preview_in_front = not wd.preview_in_front
         curve_obj = get_widget_source_curve(context)
         if wd.is_active and curve_obj is not None:
             set_pipe_basemesh_preview(context, curve_obj, False)

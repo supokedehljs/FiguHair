@@ -65,8 +65,9 @@ def sync_figuhair_visibility():
             if curve_obj is None:
                 continue
             pipe_obj = get_pipe_object_for_curve(curve_obj)
-            if pipe_obj is not None and pipe_obj.hide_select:
-                pipe_obj.hide_select = False
+            plugin_enabled = bool(curve_obj.hair_pipe_settings.plugin_enabled)
+            if pipe_obj is not None and pipe_obj.hide_select != plugin_enabled:
+                pipe_obj.hide_select = plugin_enabled
             tail_obj = get_tail_object_for_curve(curve_obj)
             curve_overlay_hidden = bool(curve_obj.get("hair_pipe_widget_hide_curve_overlay", False))
 

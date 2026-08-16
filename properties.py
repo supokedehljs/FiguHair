@@ -7,6 +7,14 @@ from bpy.props import (
 from bpy.types import PropertyGroup
 
 
+def update_plugin_enabled(self, context):
+    try:
+        from .operators import apply_plugin_enabled_state
+        apply_plugin_enabled_state(bool(self.plugin_enabled))
+    except (ImportError, AttributeError, RuntimeError):
+        pass
+
+
 def update_subdivision_modifier_settings(self, context):
     owner = getattr(self, "id_data", None)
     if owner is None or getattr(owner, "type", None) != 'CURVE':
@@ -76,20 +84,42 @@ class HairPipePointSettings(PropertyGroup):
     )
 
 
-def update_auto_ghost_tolerance(self, context):
+def update_one_shot_slider(self, context, slider_name):
     owner = getattr(self, "id_data", None)
     if owner is None or getattr(owner, "type", None) != 'CURVE':
         return
     try:
-        from .operators import ensure_auto_ghost_slider_gesture, update_auto_ghost_slider
-        update_auto_ghost_slider(owner, self)
-        ensure_auto_ghost_slider_gesture(context, owner)
+        from .operators import ensure_one_shot_slider_gesture, update_one_shot_slider_value
+        update_one_shot_slider_value(owner, self, slider_name)
+        ensure_one_shot_slider_gesture(owner, slider_name)
     except (ImportError, AttributeError, RuntimeError):
         pass
 
 
+def update_auto_ghost_tolerance(self, context):
+    update_one_shot_slider(self, context, 'auto_ghost_tolerance')
+
+
+def update_curve_smooth_slider(self, context):
+    update_one_shot_slider(self, context, 'curve_smooth_slider')
+
+
+def update_neighbor_smooth_slider(self, context):
+    update_one_shot_slider(self, context, 'neighbor_smooth_slider')
+
+
+def update_circular_smooth_slider(self, context):
+    update_one_shot_slider(self, context, 'circular_smooth_slider')
+
+
 class HairPipeSettings(PropertyGroup):
     """Global settings for the hair pipe"""
+    plugin_enabled: BoolProperty(
+        name="启用 FiguHair",
+        description="开启时锁定头发网格并使用 FiguHair 编辑；关闭时允许直接选择头发网格",
+        default=True,
+        update=update_plugin_enabled,
+    )
     default_radius: FloatProperty(
         name="Default Radius",
         description="Default radius when initializing cross-section to a circle",
@@ -228,6 +258,24 @@ class HairPipeSettings(PropertyGroup):
         subtype='FACTOR',
         precision=3,
         update=update_auto_ghost_tolerance,
+    )
+    curve_smooth_slider: FloatProperty(
+        name="曲线平滑",
+        description="将选中的曲线控制点向相邻点连线平滑",
+        default=0.0, min=0.0, max=1.0, subtype='FACTOR', precision=3,
+        update=update_curve_smooth_slider,
+    )
+    neighbor_smooth_slider: FloatProperty(
+        name="普通平滑",
+        description="将横截面编辑器中选中的正常点向相邻点平均位置平滑",
+        default=0.0, min=0.0, max=1.0, subtype='FACTOR', precision=3,
+        update=update_neighbor_smooth_slider,
+    )
+    circular_smooth_slider: FloatProperty(
+        name="圆形平滑",
+        description="将横截面编辑器中选中的正常点向平均圆周平滑",
+        default=0.0, min=0.0, max=1.0, subtype='FACTOR', precision=3,
+        update=update_circular_smooth_slider,
     )
     point_settings: CollectionProperty(type=HairPipePointSettings)
     active_point_index: IntProperty(

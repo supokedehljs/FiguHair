@@ -1121,6 +1121,8 @@ def _ghost_vertex_error(point_setting, vertex_idx):
 
 _AUTO_GHOST_SLIDER_STATE = {}
 _AUTO_GHOST_SLIDER_RESETTING = set()
+_ONE_SHOT_SLIDER_STATE = {}
+_ONE_SHOT_SLIDER_RESETTING = set()
 
 
 def _restore_auto_ghost_snapshot(settings, snapshot):
@@ -1176,6 +1178,179 @@ def apply_auto_ghost_vertices(settings, tolerance, selected_indices, snapshot):
         update_ghost_vertices(point_setting)
 
     return changed
+
+
+def _capture_curve_point_snapshot(curve_obj, selected_indices):
+    snapshot = {}
+    for point_idx in selected_indices:
+        point = get_curve_point_by_global_index(curve_obj, point_idx)
+        if point is None:
+            continue
+        snapshot[point_idx] = point.co.copy()
+    return snapshot
+
+
+def _restore_curve_point_snapshot(curve_obj, snapshot):
+    for point_idx, co in snapshot.items():
+        point = get_curve_point_by_global_index(curve_obj, point_idx)
+        if point is None:
+            continue
+        if hasattr(point.co, 'w'):
+            point.co = co
+        else:
+            delta = Vector(co[:3]) - point.co
+            point.co = Vector(co[:3])
+            if hasattr(point, 'handle_left'):
+                point.handle_left += delta
+                point.handle_right += delta
+
+
+def _apply_curve_smooth_slider(curve_obj, value, state):
+    _restore_curve_point_snapshot(curve_obj, state['snapshot'])
+    selected = state['selected_indices']
+    selected_set = set(selected)
+    for point_idx in selected:
+        prev_idx = point_idx - 1
+        next_idx = point_idx + 1
+        if prev_idx in selected_set or next_idx in selected_set:
+            continue
+        point = get_curve_point_by_global_index(curve_obj, point_idx)
+        prev_point = get_curve_point_by_global_index(curve_obj, prev_idx)
+        next_point = get_curve_point_by_global_index(curve_obj, next_idx)
+        if point is None or prev_point is None or next_point is None:
+            continue
+        old_co = Vector(state['snapshot'][point_idx][:3])
+        target = (Vector(prev_point.co[:3]) + Vector(next_point.co[:3])) * 0.5
+        new_co = old_co.lerp(target, value)
+        if hasattr(point, 'handle_left'):
+            delta = new_co - point.co
+            point.co = new_co
+            point.handle_left += delta
+            point.handle_right += delta
+        else:
+            point.co.x, point.co.y, point.co.z = new_co
+
+
+def _apply_section_smooth_slider(curve_obj, value, state, circular=False):
+    settings = curve_obj.hair_pipe_settings
+    _restore_auto_ghost_snapshot(settings, state['snapshot'])
+    wd = getattr(bpy.context.window_manager, 'hair_pipe_widget', None)
+    selected_vertices = state['selected_vertices']
+    for point_idx in state['selected_indices']:
+        if point_idx < 0 or point_idx >= len(settings.point_settings):
+            continue
+        ps = settings.point_settings[point_idx]
+        verts = ps.cross_section_verts
+        original = [(v.offset_x, v.offset_y) for v in verts]
+        if not original:
+            continue
+        center_x = sum(x for x, _y in original) / len(original)
+        center_y = sum(y for _x, y in original) / len(original)
+        mean_radius = sum(math.hypot(x - center_x, y - center_y) for x, y in original) / len(original)
+        for idx in selected_vertices:
+            if idx >= len(verts) or getattr(verts[idx], 'is_ghost', False):
+                continue
+            if circular:
+                radial_x = original[idx][0] - center_x
+                radial_y = original[idx][1] - center_y
+                length = math.hypot(radial_x, radial_y)
+                if length <= 1e-8:
+                    continue
+                target_x = center_x + radial_x / length * mean_radius
+                target_y = center_y + radial_y / length * mean_radius
+            else:
+                prev_idx = (idx - 1) % len(verts)
+                next_idx = (idx + 1) % len(verts)
+                target_x = (original[prev_idx][0] + original[next_idx][0]) * 0.5
+                target_y = (original[prev_idx][1] + original[next_idx][1]) * 0.5
+            verts[idx].offset_x = original[idx][0] + (target_x - original[idx][0]) * value
+            verts[idx].offset_y = original[idx][1] + (target_y - original[idx][1]) * value
+        update_ghost_vertices(ps)
+    if wd is not None:
+        try:
+            from .widget_operator import clear_pipe_mesh_cache, redraw_view3d
+            clear_pipe_mesh_cache()
+            redraw_view3d(bpy.context)
+        except (ImportError, AttributeError, RuntimeError):
+            pass
+
+
+def update_one_shot_slider_value(curve_obj, settings, slider_name):
+    if slider_name == 'auto_ghost_tolerance':
+        return update_auto_ghost_slider(curve_obj, settings)
+    key = (curve_obj.as_pointer(), slider_name)
+    if key in _ONE_SHOT_SLIDER_RESETTING:
+        return 0
+    value = max(0.0, min(1.0, float(getattr(settings, slider_name))))
+    state = _ONE_SHOT_SLIDER_STATE.get(key)
+    if state is None:
+        selected_indices = get_selected_curve_point_indices(curve_obj) if is_curve_edit_mode(curve_obj) else []
+        if not selected_indices:
+            return 0
+        state = {'selected_indices': selected_indices, 'last_change_time': time.monotonic()}
+        if slider_name == 'curve_smooth_slider':
+            state['snapshot'] = _capture_curve_point_snapshot(curve_obj, selected_indices)
+            try:
+                bpy.ops.ed.undo_push(message="曲线平滑")
+            except RuntimeError:
+                pass
+        else:
+            wd = getattr(bpy.context.window_manager, 'hair_pipe_widget', None)
+            if wd is None or not wd.is_active:
+                return 0
+            from .widget_operator import get_selected_widget_verts, push_widget_undo
+            state['selected_vertices'] = get_selected_widget_verts(wd)
+            if not state['selected_vertices']:
+                return 0
+            state['snapshot'] = _capture_auto_ghost_snapshot(settings, selected_indices)
+            push_widget_undo(bpy.context, "平滑横截面顶点")
+        _ONE_SHOT_SLIDER_STATE[key] = state
+    else:
+        state['last_change_time'] = time.monotonic()
+
+    if slider_name == 'curve_smooth_slider':
+        _apply_curve_smooth_slider(curve_obj, value, state)
+    else:
+        _apply_section_smooth_slider(curve_obj, value, state, slider_name == 'circular_smooth_slider')
+    curve_obj.data.update_tag()
+    curve_obj.update_tag()
+    return 1
+
+
+def finish_one_shot_slider(curve_obj, slider_name):
+    key = (curve_obj.as_pointer(), slider_name)
+    _ONE_SHOT_SLIDER_STATE.pop(key, None)
+    _ONE_SHOT_SLIDER_RESETTING.add(key)
+    try:
+        setattr(curve_obj.hair_pipe_settings, slider_name, 0.0)
+    finally:
+        _ONE_SHOT_SLIDER_RESETTING.discard(key)
+
+
+def ensure_one_shot_slider_gesture(curve_obj, slider_name):
+    if slider_name == 'auto_ghost_tolerance':
+        ensure_auto_ghost_slider_gesture(bpy.context, curve_obj)
+        return
+    key = (curve_obj.as_pointer(), slider_name)
+    state = _ONE_SHOT_SLIDER_STATE.get(key)
+    if state is None or state.get('timer_registered', False):
+        return
+    state['timer_registered'] = True
+    curve_name = curve_obj.name
+
+    def finish_when_idle():
+        live_curve = bpy.data.objects.get(curve_name)
+        if live_curve is None:
+            return None
+        live_state = _ONE_SHOT_SLIDER_STATE.get((live_curve.as_pointer(), slider_name))
+        if live_state is None:
+            return None
+        if time.monotonic() - live_state.get('last_change_time', 0.0) < 1.5:
+            return 0.08
+        finish_one_shot_slider(live_curve, slider_name)
+        return None
+
+    bpy.app.timers.register(finish_when_idle, first_interval=0.08)
 
 
 def update_auto_ghost_slider(curve_obj, settings):
@@ -2725,7 +2900,7 @@ def redirect_pipe_selection(context, pipe_obj=None):
     if active_curve is None:
         return False
 
-    if not active_curve.hair_pipe_settings.redirect_selection:
+    if not active_curve.hair_pipe_settings.plugin_enabled:
         return False
 
     if context.view_layer.objects.get(active_curve.name) is None:
@@ -2741,7 +2916,7 @@ def redirect_pipe_selection(context, pipe_obj=None):
             selected_curves.append(obj)
         elif obj.type == 'MESH':
             source_curve = get_pipe_source_curve(obj)
-            if source_curve is not None and source_curve.hair_pipe_settings.redirect_selection:
+            if source_curve is not None and source_curve.hair_pipe_settings.plugin_enabled:
                 selected_meshes.append(obj)
                 selected_curves.append(source_curve)
 
@@ -3869,12 +4044,35 @@ class HAIRPIPE_OT_copy_cs_to_all(bpy.types.Operator):
 
 
 
-def apply_global_mesh_selectability(enabled):
-    # Pipe meshes must remain hit-testable so a viewport click can be redirected
-    # to their source curve. hide_select=True makes clicks pass through them.
+_PLUGIN_ENABLED_STATE_GUARD = False
+
+
+def is_plugin_enabled():
     for obj in bpy.data.objects:
-        if _is_pipe_mesh_obj(obj):
-            obj.hide_select = False
+        if obj.type == 'CURVE' and hasattr(obj, 'hair_pipe_settings') and obj.get("hair_pipe_base_name"):
+            return bool(obj.hair_pipe_settings.plugin_enabled)
+    return True
+
+
+def apply_plugin_enabled_state(enabled):
+    global _PLUGIN_ENABLED_STATE_GUARD
+    if _PLUGIN_ENABLED_STATE_GUARD:
+        return
+    enabled = bool(enabled)
+    _PLUGIN_ENABLED_STATE_GUARD = True
+    try:
+        for obj in bpy.data.objects:
+            if obj.type == 'CURVE' and hasattr(obj, 'hair_pipe_settings'):
+                if obj.hair_pipe_settings.plugin_enabled != enabled:
+                    obj.hair_pipe_settings.plugin_enabled = enabled
+            if _is_pipe_mesh_obj(obj) or _is_tail_mesh_only_obj(obj):
+                obj.hide_select = enabled
+    finally:
+        _PLUGIN_ENABLED_STATE_GUARD = False
+
+
+def apply_global_mesh_selectability(enabled):
+    apply_plugin_enabled_state(enabled)
 
 
 def sync_global_redirect_selection(source_curve):

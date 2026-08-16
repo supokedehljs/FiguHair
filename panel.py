@@ -50,6 +50,19 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         layout = self.layout
         curve_obj = get_context_curve_object(context)
 
+        enable_box = layout.box()
+        if curve_obj is not None:
+            settings = curve_obj.hair_pipe_settings
+            enable_box.prop(
+                settings,
+                "plugin_enabled",
+                text="FiguHair 已开启" if settings.plugin_enabled else "FiguHair 已关闭",
+                icon='CHECKBOX_HLT' if settings.plugin_enabled else 'CHECKBOX_DEHLT',
+                toggle=True,
+            )
+        else:
+            enable_box.label(text="选择 FiguHair 曲线以切换插件", icon='INFO')
+
         box = layout.box()
         box.label(text="通用", icon='MESH_CYLINDER')
         row = box.row(align=True)
@@ -93,11 +106,10 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
             self.draw_unavailable_settings(context, layout)
             return
 
-        mode_text = "只选曲线模式" if settings.redirect_selection else "头发网格可选模式"
-        row = box.row(align=True)
-        op = row.operator("hair_pipe.toggle_redirect_selection", text=mode_text, depress=settings.redirect_selection)
+        plugin_controls = layout.column()
+        plugin_controls.enabled = settings.plugin_enabled
 
-        box = layout.box()
+        box = plugin_controls.box()
         box.label(text="默认设置", icon='MESH_CIRCLE')
         box.prop(settings, "roll_mode", text="滚转算法")
         box.prop(settings, "smooth_shading", text="平滑着色")
@@ -124,21 +136,32 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         op = options_row.operator(
             "hair_pipe.widget_apply_preview_options",
             text="显示在最前",
-            depress=bool(getattr(widget_options, "preview_in_front", True)),
+            depress=bool(
+                getattr(widget_options, "preview_base_in_front", False)
+                if getattr(widget_options, "preview_mode", 'SUBDIV') == 'BASE'
+                else getattr(widget_options, "preview_in_front", False)
+            ),
         )
         op.option = 'IN_FRONT'
 
         controls = box.column()
         controls.enabled = edit_controls_enabled
-        controls.prop(settings, "auto_ghost_tolerance", text="自动简化", icon='GHOST_ENABLED', slider=True)
         row = controls.row(align=True)
         row.scale_y = 1.25
         op = row.operator("hair_pipe.apply_edge_flow", text="截面边流")
         op.mode = settings.edge_flow_mode
         op.power = settings.edge_flow_power
         op.blend = settings.edge_flow_blend
-        row.operator("hair_pipe.equalize_point_distance", text="曲线平滑", icon='SMOOTHCURVE')
         row.operator("hair_pipe.reverse_curve_direction", text="翻转方向", icon='ARROW_LEFTRIGHT')
+
+        sliders = header_box.box()
+        sliders.label(text="滑块区域", icon='DRIVER_DISTANCE')
+        slider_controls = sliders.column(align=True)
+        slider_controls.enabled = edit_controls_enabled
+        slider_controls.prop(settings, "curve_smooth_slider", text="曲线平滑", icon='SMOOTHCURVE', slider=True)
+        slider_controls.prop(settings, "auto_ghost_tolerance", text="自动简化", icon='GHOST_ENABLED', slider=True)
+        slider_controls.prop(settings, "neighbor_smooth_slider", text="普通平滑", icon='MOD_SMOOTH', slider=True)
+        slider_controls.prop(settings, "circular_smooth_slider", text="圆形平滑", icon='MESH_CIRCLE', slider=True)
 
         row = box.row(align=True)
         row.operator("hair_pipe.copy_cross_section", text="复制", icon='COPYDOWN')
