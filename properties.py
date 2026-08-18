@@ -307,6 +307,18 @@ class HairPipeSettings(PropertyGroup):
         max=1.0,
         precision=2,
     )
+    custom_profile_data: bpy.props.StringProperty(
+        name="自定义横截面数据",
+        default="",
+    )
+    custom_profile_name: bpy.props.StringProperty(
+        name="自定义横截面名称",
+        default="椭圆",
+    )
+    use_custom_profile: BoolProperty(
+        name="使用自定义横截面",
+        default=False,
+    )
     widget_area_scale: FloatProperty(
         name="大小",
         description="横截面编辑器显示区域的整体大小",

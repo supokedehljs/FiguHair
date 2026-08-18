@@ -40,6 +40,44 @@ _pipe_mesh_cache = {}
 _last_widget_pipe_refresh = 0.0
 
 
+def refresh_widget_preview_from_property(self, context):
+    curve_obj = get_widget_source_curve(context)
+    if self.is_active and curve_obj is not None:
+        set_pipe_basemesh_preview(context, curve_obj, False)
+        set_pipe_basemesh_preview(context, curve_obj, True)
+    redraw_view3d(context)
+
+
+def get_base_preview_enabled(self):
+    return self.preview_mode == 'BASE'
+
+
+def set_base_preview_enabled(self, enabled):
+    if enabled:
+        self.preview_mode = 'BASE'
+    elif self.preview_mode == 'BASE':
+        self.preview_mode = 'SUBDIV'
+
+
+def get_subdiv_preview_enabled(self):
+    return self.preview_mode == 'SUBDIV'
+
+
+def set_subdiv_preview_enabled(self, enabled):
+    if enabled:
+        self.preview_mode = 'SUBDIV'
+    elif self.preview_mode == 'SUBDIV':
+        self.preview_mode = 'BASE'
+
+
+def get_solo_display_enabled(self):
+    return self.solo_hold_active
+
+
+def set_solo_display_enabled(self, enabled):
+    set_widget_solo_state(bpy.context, self, bool(enabled))
+
+
 def get_cached_pipe_mesh(obj):
     """Reuse generated geometry while the curve and cross-section data are unchanged."""
     if obj is None:
@@ -150,15 +188,34 @@ class HairPipeWidgetSettings(PropertyGroup):
         ),
         default='SUBDIV',
     )
-    preview_in_front: BoolProperty(name="细分显示在最前", default=False)
-    preview_base_in_front: BoolProperty(name="去细分显示在最前", default=False)
-    distraction_free: BoolProperty(default=False)
+    preview_in_front: BoolProperty(
+        name="显示在最前",
+        description="让当前头发预览始终显示在其他物体前方",
+        default=False,
+        update=refresh_widget_preview_from_property,
+    )
+    base_preview_enabled: BoolProperty(
+        name="去细分显示",
+        description="显示无细分、平直着色的基础网格；与细分显示互斥",
+        get=get_base_preview_enabled,
+        set=set_base_preview_enabled,
+        update=refresh_widget_preview_from_property,
+    )
+    subdiv_preview_enabled: BoolProperty(
+        name="细分显示",
+        description="显示带细分和平滑着色的网格；与去细分显示互斥",
+        get=get_subdiv_preview_enabled,
+        set=set_subdiv_preview_enabled,
+        update=refresh_widget_preview_from_property,
+    )
     solo_hold_active: BoolProperty(default=False)
+    solo_display_enabled: BoolProperty(
+        name="单独显示",
+        description="只显示当前选中的 FiguHair 头发及其关联对象",
+        get=get_solo_display_enabled,
+        set=set_solo_display_enabled,
+    )
     solo_hold_states: bpy.props.StringProperty(default="{}")
-    preview_hold_active: BoolProperty(default=False)
-    preview_hold_key: bpy.props.StringProperty(default="")
-    preview_hold_previous_mode: bpy.props.StringProperty(default="SUBDIV")
-    preview_hold_started_at: FloatProperty(default=0.0)
     show_unsubdivided_mesh: BoolProperty(default=True)
     show_mesh_in_front: BoolProperty(default=True)
     rotate_start_x: FloatProperty(default=0.0)
@@ -1404,9 +1461,6 @@ def draw_widget_callback():
     if n < 3:
         return
 
-    if wd.distraction_free:
-        return
-
     draw_curve_start_marker(context, obj)
     draw_active_pipe_cross_section_ring(context, ps)
 
@@ -1653,11 +1707,7 @@ def set_pipe_basemesh_preview(context, curve_obj, enabled):
         preview_mode = getattr(wd, 'preview_mode', 'BASE')
         curve_obj.hair_pipe_settings.smooth_shading = preview_mode == 'SUBDIV'
         disable_subdiv = preview_mode == 'BASE'
-        show_in_front = bool(
-            getattr(wd, 'preview_base_in_front', False)
-            if disable_subdiv
-            else getattr(wd, 'preview_in_front', False)
-        )
+        show_in_front = bool(getattr(wd, 'preview_in_front', False))
         pipe_obj.display_type = 'TEXTURED'
         pipe_obj.show_wire = preview_mode == 'BASE'
         pipe_obj.show_in_front = show_in_front
@@ -1752,6 +1802,62 @@ def restore_widget_solo_hold(context, wd):
             scene_obj.hide_set(bool(states[scene_obj.name]))
     wd.solo_hold_states = "{}"
     wd.solo_hold_active = False
+
+
+def set_widget_solo_state(context, wd, enabled):
+    if context is None or getattr(context, 'view_layer', None) is None:
+        return
+    if not enabled:
+        restore_widget_solo_hold(context, wd)
+        redraw_view3d(context)
+        return
+    if wd.solo_hold_active:
+        return
+
+    source_curve = get_widget_source_curve(context)
+    family_names = set()
+    selected_curves = []
+    for selected_obj in context.selected_objects:
+        curve = None
+        if selected_obj.type == 'CURVE' and hasattr(selected_obj, 'hair_pipe_settings'):
+            curve = selected_obj
+        elif selected_obj.type == 'MESH':
+            curve = get_pipe_source_curve(selected_obj)
+        elif selected_obj.type == 'EMPTY':
+            curve = next(
+                (child for child in selected_obj.children
+                 if child.type == 'CURVE' and hasattr(child, 'hair_pipe_settings')),
+                None,
+            )
+        if curve is not None and curve not in selected_curves:
+            selected_curves.append(curve)
+    if source_curve is not None and source_curve not in selected_curves:
+        selected_curves.append(source_curve)
+
+    for curve in selected_curves:
+        family_names.add(curve.name)
+        pipe_obj = get_pipe_object_for_curve(curve)
+        if pipe_obj is not None:
+            family_names.add(pipe_obj.name)
+        root_obj = curve.parent
+        if root_obj is not None:
+            family_names.add(root_obj.name)
+            family_names.update(child.name for child in root_obj.children)
+
+    states = {}
+    for scene_obj in context.view_layer.objects:
+        states[scene_obj.name] = bool(scene_obj.hide_get())
+        scene_obj.hide_set(scene_obj.name not in family_names)
+    wd.solo_hold_states = json.dumps(states)
+    wd.solo_hold_active = True
+    redraw_view3d(context)
+
+
+def cleanup_widget_display_state(context, wd):
+    source_curve = get_widget_source_curve(context)
+    restore_widget_solo_hold(context, wd)
+    set_curve_overlay_hidden(context, source_curve, False)
+    set_pipe_basemesh_preview(context, source_curve, False)
 
 
 def refresh_pipe_during_widget_edit(context, min_interval=1.0 / 30.0):
@@ -2594,9 +2700,7 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
     def invoke(self, context, event):
         wd = context.window_manager.hair_pipe_widget
         if wd.is_active:
-            source_curve = get_widget_source_curve(context)
-            set_curve_overlay_hidden(context, source_curve, False)
-            set_pipe_basemesh_preview(context, source_curve, False)
+            cleanup_widget_display_state(context, wd)
             wd.is_active = False
             wd.drag_vert_index = -1
             redraw_view3d(context)
@@ -2605,8 +2709,6 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
             self.report({'ERROR'}, "No 3D View")
             return {'CANCELLED'}
         wd.hold_key_mode = False
-        wd.preview_hold_active = False
-        wd.preview_hold_key = ""
         self._trigger_key = event.type
         self._trigger_ctrl = event.ctrl
         self._trigger_shift = event.shift
@@ -2633,16 +2735,8 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
         return handle_widget_modal(self, context, event, close_on_key_release=False)
 
     def _finish(self, context):
-        source_curve = get_widget_source_curve(context)
-        set_curve_overlay_hidden(context, source_curve, False)
-        set_pipe_basemesh_preview(context, source_curve, False)
         wd = context.window_manager.hair_pipe_widget
-        if wd.preview_hold_active:
-            wd.preview_mode = wd.preview_hold_previous_mode
-            wd.preview_hold_active = False
-            wd.preview_hold_key = ""
-        restore_widget_solo_hold(context, wd)
-        wd.distraction_free = False
+        cleanup_widget_display_state(context, wd)
         wd.is_active = False
         wd.drag_vert_index = -1
         redraw_view3d(context)
@@ -2674,8 +2768,8 @@ class HAIRPIPE_OT_widget_hold(bpy.types.Operator):
         return handle_widget_modal(self, context, event, close_on_key_release=True)
 
     def _finish(self, context):
-        set_pipe_basemesh_preview(context, context.active_object, False)
         wd = context.window_manager.hair_pipe_widget
+        cleanup_widget_display_state(context, wd)
         wd.is_active = False
         wd.drag_vert_index = -1
         wd.move_active = False
@@ -2735,18 +2829,6 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     if view_region is None:
         operator._finish(context)
         return {'CANCELLED'}
-    if (wd.preview_hold_active and
-            event.value == 'RELEASE' and event.type == wd.preview_hold_key):
-        wd.preview_mode = wd.preview_hold_previous_mode
-        wd.preview_hold_active = False
-        wd.preview_hold_key = ""
-        source_curve = get_widget_source_curve(context)
-        if source_curve is not None:
-            set_pipe_basemesh_preview(context, source_curve, False)
-            set_pipe_basemesh_preview(context, source_curve, True)
-        redraw_view3d(context)
-        return {'RUNNING_MODAL'}
-
     if view_area is not None:
         event_region = None
         for candidate_region in view_area.regions:
@@ -2782,99 +2864,24 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     view_cx = view_region.width * 0.5
     view_cy = view_region.height * 0.5
     base_key = 'Q'
-    clean_key = 'W'
+    in_front_key = 'W'
     solo_key = 'E'
-    in_front_key = 'T'
 
-    if wd.solo_hold_active and event.value == 'RELEASE' and event.type == solo_key:
-        restore_widget_solo_hold(context, wd)
-        redraw_view3d(context)
-        return {'RUNNING_MODAL'}
-
-    if event.type == clean_key and not event.ctrl and not event.shift and not event.alt:
-        if event.value == 'PRESS':
-            wd.distraction_free = True
-            redraw_view3d(context)
-            return {'RUNNING_MODAL'}
-        if event.value == 'RELEASE':
-            wd.distraction_free = False
-            redraw_view3d(context)
-            return {'RUNNING_MODAL'}
-
-    if event.type == solo_key and not event.ctrl and not event.shift and not event.alt:
-        if event.value == 'PRESS' and not wd.solo_hold_active:
-            source_curve = get_widget_source_curve(context)
-            family_names = set()
-            selected_curves = []
-            for selected_obj in context.selected_objects:
-                curve = None
-                if selected_obj.type == 'CURVE' and hasattr(selected_obj, 'hair_pipe_settings'):
-                    curve = selected_obj
-                elif selected_obj.type == 'MESH':
-                    curve = get_pipe_source_curve(selected_obj)
-                elif selected_obj.type == 'EMPTY':
-                    curve = next((child for child in selected_obj.children if child.type == 'CURVE' and hasattr(child, 'hair_pipe_settings')), None)
-                if curve is not None and curve not in selected_curves:
-                    selected_curves.append(curve)
-            if source_curve is not None and source_curve not in selected_curves:
-                selected_curves.append(source_curve)
-            for curve in selected_curves:
-                family_names.add(curve.name)
-                pipe_obj = get_pipe_object_for_curve(curve)
-                if pipe_obj is not None:
-                    family_names.add(pipe_obj.name)
-                root_obj = curve.parent
-                if root_obj is not None:
-                    family_names.add(root_obj.name)
-                    family_names.update(child.name for child in root_obj.children)
-            states = {}
-            for scene_obj in context.view_layer.objects:
-                states[scene_obj.name] = bool(scene_obj.hide_get())
-                scene_obj.hide_set(scene_obj.name not in family_names)
-            wd.solo_hold_states = json.dumps(states)
-            wd.solo_hold_active = True
-            redraw_view3d(context)
-            return {'RUNNING_MODAL'}
-        if event.value == 'RELEASE' and wd.solo_hold_active:
-            restore_widget_solo_hold(context, wd)
-            redraw_view3d(context)
-            return {'RUNNING_MODAL'}
-
-    if event.type == base_key and not event.ctrl and not event.shift and not event.alt:
-        if event.value == 'PRESS':
-            if not wd.preview_hold_active:
-                wd.preview_hold_previous_mode = wd.preview_mode
-                wd.preview_mode = 'BASE' if wd.preview_mode == 'SUBDIV' else 'SUBDIV'
-            wd.preview_hold_active = True
-            wd.preview_hold_key = event.type
-            wd.preview_hold_started_at = time.perf_counter()
-            source_curve = get_widget_source_curve(context)
-            if source_curve is not None:
-                set_pipe_basemesh_preview(context, source_curve, False)
-                set_pipe_basemesh_preview(context, source_curve, True)
-            redraw_view3d(context)
-            return {'RUNNING_MODAL'}
-        if event.value == 'RELEASE' and wd.preview_hold_active and event.type == wd.preview_hold_key:
-            wd.preview_mode = wd.preview_hold_previous_mode
-            wd.preview_hold_active = False
-            wd.preview_hold_key = ""
-            source_curve = get_widget_source_curve(context)
-            if source_curve is not None:
-                set_pipe_basemesh_preview(context, source_curve, False)
-                set_pipe_basemesh_preview(context, source_curve, True)
-            redraw_view3d(context)
-            return {'RUNNING_MODAL'}
-
-    if event.type == in_front_key and event.value == 'PRESS' and not event.ctrl and not event.shift and not event.alt:
-        if wd.preview_mode == 'BASE':
-            wd.preview_base_in_front = not wd.preview_base_in_front
-        else:
-            wd.preview_in_front = not wd.preview_in_front
+    if event.type == base_key and event.value == 'PRESS' and not event.ctrl and not event.shift and not event.alt:
+        wd.preview_mode = 'BASE' if wd.preview_mode == 'SUBDIV' else 'SUBDIV'
         source_curve = get_widget_source_curve(context)
         if source_curve is not None:
             set_pipe_basemesh_preview(context, source_curve, False)
             set_pipe_basemesh_preview(context, source_curve, True)
         redraw_view3d(context)
+        return {'RUNNING_MODAL'}
+
+    if event.type == in_front_key and event.value == 'PRESS' and not event.ctrl and not event.shift and not event.alt:
+        wd.preview_in_front = not wd.preview_in_front
+        return {'RUNNING_MODAL'}
+
+    if event.type == solo_key and event.value == 'PRESS' and not event.ctrl and not event.shift and not event.alt:
+        set_widget_solo_state(context, wd, not wd.solo_hold_active)
         return {'RUNNING_MODAL'}
 
     if event.type == 'T' and event.value == 'PRESS' and event.ctrl:
@@ -3734,39 +3741,14 @@ class HAIRPIPE_OT_widget_toggle_grid(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class HAIRPIPE_OT_widget_apply_preview_options(bpy.types.Operator):
-    bl_idname = "hair_pipe.widget_apply_preview_options"
-    bl_label = "更新横截面预览显示"
-
-    option: bpy.props.EnumProperty(
-        items=(('IN_FRONT', "显示在最前", ""),),
-        default='IN_FRONT',
-    )
-
-    def execute(self, context):
-        wd = context.window_manager.hair_pipe_widget
-        if self.option == 'IN_FRONT':
-            if wd.preview_mode == 'BASE':
-                wd.preview_base_in_front = not wd.preview_base_in_front
-            else:
-                wd.preview_in_front = not wd.preview_in_front
-        curve_obj = get_widget_source_curve(context)
-        if wd.is_active and curve_obj is not None:
-            set_pipe_basemesh_preview(context, curve_obj, False)
-            set_pipe_basemesh_preview(context, curve_obj, True)
-        redraw_view3d(context)
-        return {'FINISHED'}
-
-
 class HAIRPIPE_OT_widget_stop(bpy.types.Operator):
     """Close the interactive cross-section editor"""
     bl_idname = "hair_pipe.widget_stop"
     bl_label = "关闭横截面编辑器"
 
     def execute(self, context):
-        set_curve_overlay_hidden(context, context.active_object, False)
-        set_pipe_basemesh_preview(context, context.active_object, False)
         wd = context.window_manager.hair_pipe_widget
+        cleanup_widget_display_state(context, wd)
         wd.is_active = False
         wd.drag_vert_index = -1
         wd.hold_key_mode = False
@@ -3788,7 +3770,6 @@ classes = (
     HAIRPIPE_OT_widget_toggle_smooth_preview,
     HAIRPIPE_OT_widget_toggle_flip,
     HAIRPIPE_OT_widget_toggle_grid,
-    HAIRPIPE_OT_widget_apply_preview_options,
     HAIRPIPE_OT_widget_stop,
 )
 

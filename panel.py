@@ -96,12 +96,6 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
                 settings = None
                 edit_mode = False
 
-        context_available = settings is not None
-        context_box = box.column()
-        context_box.enabled = context_available
-        row = context_box.row(align=True)
-        row.operator("hair_pipe.toggle_solo_display", text="单独显示", icon='HIDE_OFF')
-
         if settings is None:
             self.draw_unavailable_settings(context, layout)
             return
@@ -129,20 +123,13 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         widget_data = getattr(context.window_manager, "hair_pipe_widget", None)
 
         box = header_box.box()
-        options_row = box.row(align=True)
         widget_options = getattr(context.window_manager, "hair_pipe_widget", None)
-        options_row.enabled = widget_options is not None
-        options_row.prop(widget_options, "preview_mode", text="显示模式")
-        op = options_row.operator(
-            "hair_pipe.widget_apply_preview_options",
-            text="显示在最前",
-            depress=bool(
-                getattr(widget_options, "preview_base_in_front", False)
-                if getattr(widget_options, "preview_mode", 'SUBDIV') == 'BASE'
-                else getattr(widget_options, "preview_in_front", False)
-            ),
-        )
-        op.option = 'IN_FRONT'
+        display_options = box.column(align=True)
+        display_options.enabled = widget_options is not None
+        display_options.prop(widget_options, "base_preview_enabled", text="去细分显示")
+        display_options.prop(widget_options, "subdiv_preview_enabled", text="细分显示")
+        display_options.prop(widget_options, "solo_display_enabled", text="单独显示")
+        display_options.prop(widget_options, "preview_in_front", text="显示在最前")
 
         controls = box.column()
         controls.enabled = edit_controls_enabled
@@ -153,6 +140,20 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         op.power = settings.edge_flow_power
         op.blend = settings.edge_flow_blend
         row.operator("hair_pipe.reverse_curve_direction", text="翻转方向", icon='ARROW_LEFTRIGHT')
+
+        profile_box = header_box.box()
+        profile_box.label(text="我的横截面库", icon='MESH_CIRCLE')
+        row = profile_box.row(align=True)
+        row.operator("hair_pipe.save_custom_profile", text="保存当前横截面", icon='ADD')
+        if settings.custom_profile_data:
+            row = profile_box.row(align=True)
+            row.operator(
+                "hair_pipe.toggle_custom_profile",
+                text=settings.custom_profile_name,
+                icon='RADIOBUT_ON' if settings.use_custom_profile else 'RADIOBUT_OFF',
+                depress=settings.use_custom_profile,
+            )
+            row.label(text="缩略图", icon='MESH_CIRCLE')
 
         sliders = header_box.box()
         sliders.label(text="滑块区域", icon='DRIVER_DISTANCE')

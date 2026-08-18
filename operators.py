@@ -1,7 +1,9 @@
 import bpy
+import gpu
 import math
 import json
 import time
+from gpu_extras.batch import batch_for_shader
 from pathlib import Path
 from mathutils import Matrix, Vector
 from bpy.props import IntProperty, FloatProperty, EnumProperty, BoolProperty, StringProperty
@@ -5319,10 +5321,51 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
     _start_normal = None
     _preview_curve = None
     _preview_mesh = None
+    _points = None
+    _radius = 0.012
+    _draw_handle = None
+    _hover_world = None
 
     @classmethod
     def poll(cls, context):
         return context.mode == 'OBJECT' and context.area is not None and context.area.type == 'VIEW_3D'
+
+    def draw_path_preview(self, context):
+        if not self._points:
+            return
+        region = context.region
+        region_data = context.region_data
+        if region is None or region_data is None:
+            return
+        world_points = list(self._points)
+        if self._hover_world is not None:
+            world_points.append(self._hover_world)
+        screen_points = [
+            view3d_utils.location_3d_to_region_2d(region, region_data, point)
+            for point in world_points
+        ]
+        screen_points = [(point.x, point.y) for point in screen_points if point is not None]
+        if not screen_points:
+            return
+        shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+        gpu.state.blend_set('ALPHA')
+        if len(screen_points) >= 2:
+            lines = []
+            for idx in range(len(screen_points) - 1):
+                lines.extend((screen_points[idx], screen_points[idx + 1]))
+            gpu.state.line_width_set(2.0)
+            batch = batch_for_shader(shader, 'LINES', {"pos": lines})
+            shader.bind()
+            shader.uniform_float("color", (1.0, 0.55, 0.05, 1.0))
+            batch.draw(shader)
+        gpu.state.point_size_set(7.0)
+        batch = batch_for_shader(shader, 'POINTS', {"pos": screen_points})
+        shader.bind()
+        shader.uniform_float("color", (1.0, 0.85, 0.2, 1.0))
+        batch.draw(shader)
+        gpu.state.point_size_set(1.0)
+        gpu.state.line_width_set(1.0)
+        gpu.state.blend_set('NONE')
 
     def raycast_surface(self, context, event):
         region = context.region
@@ -5352,15 +5395,43 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
             return None
         return origin + direction * ((self._start_world - origin).dot(plane_normal) / denominator)
 
-    def update_curve_points(self, curve_obj, end_world):
+    def update_curve_points(self, curve_obj, hover_world=None):
+        points = list(self._points or [])
+        if hover_world is not None:
+            points.append(hover_world)
+        if not points:
+            return
         spline = curve_obj.data.splines[0]
+        while len(spline.points) < len(points):
+            spline.points.add(1)
         for index, point in enumerate(spline.points):
-            point.co = (*self._start_world.lerp(end_world, index / 4.0), 1.0)
+            source = points[min(index, len(points) - 1)]
+            point.co = (*source, 1.0)
+        curve_obj.data.bevel_depth = max(0.001, self._radius)
         curve_obj.data.update_tag()
 
-    def create_curve(self, context, end_world, preview=False):
-        direction = end_world - self._start_world
-        if direction.length < 1e-5:
+    def create_preview_curve(self, context, hover_world):
+        points = list(self._points or []) + [hover_world]
+        curve_data = bpy.data.curves.new("FiguHair Draw Preview", 'CURVE')
+        curve_data.dimensions = '3D'
+        curve_data.resolution_u = 1
+        curve_data.bevel_depth = 0.0
+        spline = curve_data.splines.new('POLY')
+        spline.points.add(len(points) - 1)
+        for point, world_co in zip(spline.points, points):
+            point.co = (*world_co, 1.0)
+        curve_obj = bpy.data.objects.new("FiguHair Draw Preview", curve_data)
+        curve_obj["hair_pipe_draw_preview"] = True
+        curve_obj.display_type = 'WIRE'
+        curve_obj.color = (1.0, 0.55, 0.05, 1.0)
+        context.collection.objects.link(curve_obj)
+        return curve_obj
+
+    def create_curve(self, context, end_world=None, preview=False):
+        points = list(self._points or [])
+        if end_world is not None:
+            points.append(end_world)
+        if len(points) < 2:
             return None
         base_name = get_next_figuhair_base_name()
         suffix = " Preview" if preview else " Curve"
@@ -5369,12 +5440,10 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
         curve_data.resolution_u = 16
         curve_data.render_resolution_u = 16
         spline = curve_data.splines.new('NURBS')
-        spline.points.add(4)
-        for index, point in enumerate(spline.points):
-            factor = index / 4.0
-            world_co = self._start_world.lerp(end_world, factor)
+        spline.points.add(len(points) - 1)
+        for point, world_co in zip(spline.points, points):
             point.co = (*world_co, 1.0)
-        spline.order_u = 5
+        spline.order_u = min(3, len(points))
         spline.use_endpoint_u = True
         curve_obj = bpy.data.objects.new(base_name + suffix, curve_data)
         curve_obj["hair_pipe_base_name"] = base_name
@@ -5383,11 +5452,45 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
         context.collection.objects.link(curve_obj)
         sync_point_settings(curve_obj)
         curve_obj.hair_pipe_settings.pipe_resolution = 0
+        curve_obj.hair_pipe_settings.default_radius = self._radius
+        source_settings = None
+        active_obj = context.active_object
+        if active_obj is not None and active_obj.type == 'CURVE' and hasattr(active_obj, 'hair_pipe_settings'):
+            source_settings = active_obj.hair_pipe_settings
+        custom_profile = None
+        if source_settings is not None and source_settings.use_custom_profile:
+            try:
+                library = json.loads(context.scene.get("figuhair_custom_profiles", "[]"))
+                selected = next(
+                    (item for item in library if item.get("name") == source_settings.custom_profile_name),
+                    None,
+                )
+                custom_profile = selected.get("points") if selected else json.loads(source_settings.custom_profile_data or "null")
+            except (TypeError, ValueError):
+                custom_profile = None
+        for point_setting in curve_obj.hair_pipe_settings.point_settings:
+            if custom_profile and len(custom_profile) >= 3:
+                point_setting.cross_section_verts.clear()
+                max_extent = max(max(math.hypot(x, y), 1e-8) for x, y in custom_profile)
+                for x, y in custom_profile:
+                    vertex = point_setting.cross_section_verts.add()
+                    vertex.offset_x = x / max_extent * self._radius
+                    vertex.offset_y = y / max_extent * self._radius
+                    vertex.is_ghost = False
+            else:
+                for vertex_idx, vertex in enumerate(point_setting.cross_section_verts):
+                    angle = math.tau * vertex_idx / max(1, len(point_setting.cross_section_verts))
+                    vertex.offset_x = math.cos(angle) * self._radius
+                    vertex.offset_y = math.sin(angle) * self._radius * 0.55
         if preview:
-            curve_data.bevel_depth = max(0.002, curve_obj.hair_pipe_settings.default_radius)
+            curve_data.bevel_depth = max(0.001, self._radius)
             curve_data.bevel_resolution = 0
-            curve_data.resolution_u = 2
-            curve_data.render_resolution_u = 2
+            curve_data.resolution_u = 1
+            curve_data.render_resolution_u = 1
+            curve_data.resolution_v = 0
+            curve_obj.display_type = 'SOLID'
+            curve_obj.show_wire = True
+            curve_obj.show_all_edges = True
         for obj in context.selected_objects:
             obj.select_set(False)
         curve_obj.select_set(not preview)
@@ -5398,6 +5501,9 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
         return curve_obj
 
     def cleanup_preview(self):
+        if self._draw_handle is not None:
+            bpy.types.SpaceView3D.draw_handler_remove(self._draw_handle, 'WINDOW')
+            self._draw_handle = None
         preview_curve = self._preview_curve
         preview_mesh = self._preview_mesh
         self._preview_curve = None
@@ -5418,40 +5524,143 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
         self._start_normal = None
         self._preview_curve = None
         self._preview_mesh = None
+        self._points = []
+        self._radius = 0.012
         self._start_world, self._start_normal = self.raycast_surface(context, event)
         if self._start_world is None:
             self.report({'WARNING'}, "请在网格物体表面开始拖动")
             return {'CANCELLED'}
+        self._points.append(self._start_world.copy())
+        self._hover_world = self.get_drag_end(context, event)
+        self._draw_handle = bpy.types.SpaceView3D.draw_handler_add(
+            self.draw_path_preview, (context,), 'WINDOW', 'POST_PIXEL'
+        )
         context.window_manager.modal_handler_add(self)
         context.window.cursor_modal_set('CROSSHAIR')
-        context.area.header_text_set("拖动并松开创建头发曲线；Esc 取消")
+        context.area.header_text_set("左键逐点添加 | 滚轮调整横截面宽度 | 空格/Enter 确认 | 右键/Esc 取消")
         return {'RUNNING_MODAL'}
 
     def modal(self, context, event):
-        if event.type in {'ESC', 'RIGHTMOUSE'}:
+        if event.type in {'ESC', 'RIGHTMOUSE'} and event.value == 'PRESS':
             self.cleanup_preview()
             context.window.cursor_modal_restore()
             context.area.header_text_set(None)
             return {'CANCELLED'}
-        if self._start_world is not None and event.type == 'MOUSEMOVE':
-            end_world = self.get_drag_end(context, event)
-            if end_world is not None and (end_world - self._start_world).length >= 1e-5:
-                if self._preview_curve is None:
-                    self._preview_curve = self.create_curve(context, end_world, preview=True)
-                else:
-                    self.update_curve_points(self._preview_curve, end_world)
-                context.area.tag_redraw()
+        if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.value == 'PRESS':
+            factor = 1.12 if event.type == 'WHEELUPMOUSE' else 1.0 / 1.12
+            self._radius = max(0.001, min(10.0, self._radius * factor))
+            if self._preview_curve is not None:
+                self._preview_curve.data.update_tag()
+            context.area.header_text_set(
+                f"横截面宽度 {self._radius:.4f} | 左键逐点添加 | 空格/Enter 确认 | 右键/Esc 取消"
+            )
+            context.area.tag_redraw()
             return {'RUNNING_MODAL'}
-        if self._start_world is not None and event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
-            end_world = self.get_drag_end(context, event)
+        if event.type in {'SPACE', 'RET', 'NUMPAD_ENTER'} and event.value == 'PRESS':
+            if len(self._points) < 3:
+                self.report({'WARNING'}, "至少需要设置三个顶点")
+                return {'RUNNING_MODAL'}
             self.cleanup_preview()
-            if end_world is None or self.create_curve(context, end_world) is None:
-                self.report({'WARNING'}, "拖动距离太短，未创建头发")
+            if self.create_curve(context) is None:
                 return {'RUNNING_MODAL'}
             context.window.cursor_modal_restore()
             context.area.header_text_set(None)
             return {'FINISHED'}
+        if event.type == 'MOUSEMOVE':
+            hover_world = self.get_drag_end(context, event)
+            if hover_world is not None:
+                self._hover_world = hover_world.copy()
+                context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            point_world = self.get_drag_end(context, event)
+            if point_world is not None and (point_world - self._points[-1]).length >= 1e-5:
+                self._points.append(point_world.copy())
+                self._hover_world = point_world.copy()
+                context.area.header_text_set(
+                    f"已设置 {len(self._points)} 个点 | 滚轮调整宽度 | 空格/Enter 确认 | 右键/Esc 取消"
+                )
+                context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
         return {'RUNNING_MODAL'}
+
+
+class HAIRPIPE_OT_begin_custom_profile(bpy.types.Operator):
+    bl_idname = "hair_pipe.begin_custom_profile"
+    bl_label = "添加自定义横截面"
+
+    def execute(self, context):
+        obj = get_context_curve_object(context)
+        if obj is None or not is_curve_edit_mode(obj):
+            self.report({'WARNING'}, "请先选择头发曲线并进入曲线编辑模式")
+            return {'CANCELLED'}
+        try:
+            bpy.ops.hair_pipe.widget_interact('INVOKE_DEFAULT')
+        except RuntimeError:
+            pass
+        obj["hair_pipe_custom_profile_editing"] = True
+        self.report({'INFO'}, "请在横截面编辑窗口中编辑，完成后点击确认保存")
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_save_custom_profile(bpy.types.Operator):
+    bl_idname = "hair_pipe.save_custom_profile"
+    bl_label = "保存自定义横截面"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    profile_name: StringProperty(name="名称", default="自定义横截面")
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        obj = get_context_curve_object(context)
+        if obj is None or not obj.hair_pipe_settings.point_settings:
+            self.report({'WARNING'}, "请先打开横截面编辑器并创建横截面")
+            return {'CANCELLED'}
+        settings = obj.hair_pipe_settings
+        point_idx = max(0, min(settings.active_point_index, len(settings.point_settings) - 1))
+        verts = settings.point_settings[point_idx].cross_section_verts
+        if len(verts) < 3:
+            return {'CANCELLED'}
+        points = [(v.offset_x, v.offset_y) for v in verts]
+        name = self.profile_name.strip() or "自定义横截面"
+        try:
+            library = json.loads(context.scene.get("figuhair_custom_profiles", "[]"))
+        except (TypeError, ValueError):
+            library = []
+        library = [item for item in library if item.get("name") != name]
+        library.append({"name": name, "points": points})
+        context.scene["figuhair_custom_profiles"] = json.dumps(library)
+        settings.custom_profile_data = json.dumps(points)
+        settings.custom_profile_name = name
+        settings.use_custom_profile = True
+        self.report({'INFO'}, f"已保存横截面：{name}")
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_cancel_custom_profile(bpy.types.Operator):
+    bl_idname = "hair_pipe.cancel_custom_profile"
+    bl_label = "取消自定义横截面"
+
+    def execute(self, context):
+        obj = get_context_curve_object(context)
+        if obj is not None:
+            obj["hair_pipe_custom_profile_editing"] = False
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_toggle_custom_profile(bpy.types.Operator):
+    bl_idname = "hair_pipe.toggle_custom_profile"
+    bl_label = "选择自定义横截面"
+
+    def execute(self, context):
+        obj = get_context_curve_object(context)
+        if obj is None:
+            return {'CANCELLED'}
+        settings = obj.hair_pipe_settings
+        settings.use_custom_profile = not settings.use_custom_profile
+        return {'FINISHED'}
 
 
 class HAIRPIPE_WST_draw_hair_curve(bpy.types.WorkSpaceTool):
@@ -5459,7 +5668,7 @@ class HAIRPIPE_WST_draw_hair_curve(bpy.types.WorkSpaceTool):
     bl_context_mode = 'OBJECT'
     bl_idname = "hair_pipe.draw_hair_curve_tool"
     bl_label = "新建头发曲线"
-    bl_description = "从物体表面拖动创建一条新的 FiguHair 曲线"
+    bl_description = "左键逐点创建 FiguHair 曲线，滚轮调整横截面宽度，空格或回车确认"
     bl_icon = "ops.curve.draw"
     bl_widget = None
     bl_keymap = (
@@ -5470,6 +5679,10 @@ class HAIRPIPE_WST_draw_hair_curve(bpy.types.WorkSpaceTool):
 classes = (
     HAIRPIPE_OT_cross_section_spread,
     HAIRPIPE_OT_draw_hair_curve,
+    HAIRPIPE_OT_begin_custom_profile,
+    HAIRPIPE_OT_save_custom_profile,
+    HAIRPIPE_OT_cancel_custom_profile,
+    HAIRPIPE_OT_toggle_custom_profile,
     HAIRPIPE_OT_mesh_to_hair_curve,
     HAIRPIPE_OT_generate_pipe,
     HAIRPIPE_OT_sync_points,
