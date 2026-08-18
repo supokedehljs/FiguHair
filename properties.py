@@ -82,6 +82,13 @@ class HairPipePointSettings(PropertyGroup):
         description="This point is automatically interpolated from neighboring editable cross-sections and cannot be edited directly",
         default=False,
     )
+    bridge_offset: IntProperty(
+        name="上下桥接错位",
+        description="当前横截面与上一个横截面之间的桥接顶点偏移量；正负值控制错位方向",
+        default=0,
+        min=-64,
+        max=64,
+    )
 
 
 def update_one_shot_slider(self, context, slider_name):

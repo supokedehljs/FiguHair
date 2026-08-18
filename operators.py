@@ -1796,12 +1796,16 @@ def generate_pipe_mesh(curve_obj, settings):
         ring_count = num_rings if is_cyclic else num_rings - 1
         for i in range(ring_count):
             i_next = (i + 1) % num_rings
+            bridge_offset = 0
+            target_idx = global_point_idx - num_points + min(i + 1, num_points - 1)
+            if 0 <= target_idx < len(point_settings):
+                bridge_offset = int(getattr(point_settings[target_idx], 'bridge_offset', 0))
             for j in range(segments):
                 j_next = (j + 1) % segments
                 v0 = vert_offset + i * segments + j
                 v1 = vert_offset + i * segments + j_next
-                v2 = vert_offset + i_next * segments + j_next
-                v3 = vert_offset + i_next * segments + j
+                v2 = vert_offset + i_next * segments + ((j_next + bridge_offset) % segments)
+                v3 = vert_offset + i_next * segments + ((j + bridge_offset) % segments)
                 all_faces.append((v0, v1, v2, v3))
         if settings.cap_ends and not is_cyclic and num_rings > 0:
             cap_s = list(range(vert_offset, vert_offset + segments))

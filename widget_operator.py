@@ -91,7 +91,12 @@ def get_cached_pipe_mesh(obj):
             for point in points
         )
     for point_setting in settings.point_settings:
-        signature.extend((len(point_setting.cross_section_verts), point_setting.scale, point_setting.rotation))
+        signature.extend((
+            len(point_setting.cross_section_verts),
+            point_setting.scale,
+            point_setting.rotation,
+            getattr(point_setting, 'bridge_offset', 0),
+        ))
         signature.extend(
             (vertex.offset_x, vertex.offset_y, bool(getattr(vertex, 'is_ghost', False)))
             for vertex in point_setting.cross_section_verts
@@ -166,6 +171,7 @@ class HairPipeWidgetSettings(PropertyGroup):
     flip_horizontal: BoolProperty(default=False)
     selected_verts: bpy.props.StringProperty(default="")
     source_curve_name: bpy.props.StringProperty(default="")
+    context_menu_point_index: IntProperty(default=-1)
     box_select_active: BoolProperty(default=False)
     box_select_3d: BoolProperty(default=False)
     box_x0: FloatProperty(default=0.0)
@@ -618,6 +624,34 @@ def get_rotate_offsets(wd):
                 continue
     return result
 
+
+
+def map_vertex_index_between_sections(settings, source_idx, target_idx, vertex_idx):
+    if source_idx == target_idx:
+        return vertex_idx
+    total = len(settings.point_settings)
+    if not (0 <= source_idx < total and 0 <= target_idx < total):
+        return vertex_idx
+
+    mapped_idx = int(vertex_idx)
+    if abs(target_idx - source_idx) != 1:
+        target_count = len(settings.point_settings[target_idx].cross_section_verts)
+        return mapped_idx % target_count if target_count > 0 else mapped_idx
+    if target_idx > source_idx:
+        for section_idx in range(source_idx + 1, target_idx + 1):
+            target_count = len(settings.point_settings[section_idx].cross_section_verts)
+            if target_count <= 0:
+                return mapped_idx
+            offset = int(getattr(settings.point_settings[section_idx], 'bridge_offset', 0))
+            mapped_idx = (mapped_idx + offset) % target_count
+    else:
+        for section_idx in range(source_idx, target_idx, -1):
+            target_count = len(settings.point_settings[section_idx - 1].cross_section_verts)
+            if target_count <= 0:
+                return mapped_idx
+            offset = int(getattr(settings.point_settings[section_idx], 'bridge_offset', 0))
+            mapped_idx = (mapped_idx - offset) % target_count
+    return mapped_idx
 
 
 def get_neighbor_point_indices(settings):
@@ -1080,6 +1114,23 @@ def draw_active_pipe_cross_section_ring(context, ps):
         projected_rings.append(projected)
         front_masks.append([(world_pos - ring_center).dot(camera_dir) >= 0.0 for world_pos in ring_world])
 
+    bridge_offsets = [0] * max(0, ring_count - 1)
+    for ring_idx in range(len(bridge_offsets)):
+        next_start = (ring_idx + 1) * segments
+        next_ring = mesh_verts[next_start:next_start + segments]
+        if len(next_ring) != segments or not control_positions:
+            continue
+        next_center = sum((Vector(vertex) for vertex in next_ring), Vector((0.0, 0.0, 0.0))) / segments
+        next_center_world = obj.matrix_world @ next_center
+        target_idx = min(
+            range(len(control_positions)),
+            key=lambda idx: (control_positions[idx] - next_center_world).length_squared,
+        )
+        if target_idx < len(obj.hair_pipe_settings.point_settings):
+            bridge_offsets[ring_idx] = int(
+                getattr(obj.hair_pipe_settings.point_settings[target_idx], 'bridge_offset', 0)
+            )
+
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
     gpu.state.blend_set('ALPHA')
 
@@ -1115,41 +1166,36 @@ def draw_active_pipe_cross_section_ring(context, ps):
 
     selected_indices = {idx for idx in get_selected_widget_verts(wd) if 0 <= idx < segments}
     if selected_indices and any(ring is not None for ring in projected_rings):
-        highlight_lines = []
+        active_ring_idx = selected_ring_starts[0][1] // segments if selected_ring_starts else ring_count // 2
+        fade_distance = max(3, min(12, int(math.ceil(ring_count * 0.18))))
+        gpu.state.line_width_set(1.65)
         for selected_idx in sorted(selected_indices):
-            previous_point = None
-            for ring in projected_rings:
-                if ring is None or selected_idx >= len(ring):
-                    continue
-                point = ring[selected_idx]
-                if previous_point is not None:
-                    highlight_lines.append(previous_point)
-                    highlight_lines.append(point)
-                previous_point = point
-        if highlight_lines:
-            gpu.state.line_width_set(1.65)
-            active_ring_idx = selected_ring_starts[0][1] // segments if selected_ring_starts else ring_count // 2
-            fade_distance = max(3, min(12, int(math.ceil(ring_count * 0.18))))
+            ring_indices = {active_ring_idx: selected_idx}
+            for ring_idx in range(active_ring_idx, len(projected_rings) - 1):
+                current_idx = ring_indices[ring_idx]
+                offset = bridge_offsets[ring_idx] if ring_idx < len(bridge_offsets) else 0
+                ring_indices[ring_idx + 1] = (current_idx + offset) % segments
+            for ring_idx in range(active_ring_idx - 1, -1, -1):
+                next_idx = ring_indices[ring_idx + 1]
+                offset = bridge_offsets[ring_idx] if ring_idx < len(bridge_offsets) else 0
+                ring_indices[ring_idx] = (next_idx - offset) % segments
+
             for ring_idx in range(len(projected_rings) - 1):
                 ring = projected_rings[ring_idx]
                 next_ring = projected_rings[ring_idx + 1]
-                if ring is None or next_ring is None:
+                current_idx = ring_indices.get(ring_idx)
+                next_idx = ring_indices.get(ring_idx + 1)
+                if ring is None or next_ring is None or current_idx is None or next_idx is None:
                     continue
-                segment_center = ring_idx + 0.5
-                distance = abs(segment_center - active_ring_idx)
+                distance = abs(ring_idx + 0.5 - active_ring_idx)
                 if distance >= fade_distance:
                     continue
-                influence = 1.0 - distance / fade_distance
-                alpha = 0.95 * influence
-                segment_lines = []
-                for selected_idx in sorted(selected_indices):
-                    if selected_idx < len(ring) and selected_idx < len(next_ring):
-                        segment_lines.extend((ring[selected_idx], next_ring[selected_idx]))
-                if segment_lines:
-                    batch = batch_for_shader(shader, 'LINES', {"pos": segment_lines})
-                    shader.bind()
-                    shader.uniform_float("color", (1.0, 0.55, 0.0, alpha))
-                    batch.draw(shader)
+                alpha = 0.95 * (1.0 - distance / fade_distance)
+                segment_lines = (ring[current_idx], next_ring[next_idx])
+                batch = batch_for_shader(shader, 'LINES', {"pos": segment_lines})
+                shader.bind()
+                shader.uniform_float("color", (1.0, 0.55, 0.0, alpha))
+                batch.draw(shader)
 
     widget_selected_indices = get_selected_widget_verts(wd)
     for point_idx, ring_start in selected_ring_starts:
@@ -1895,6 +1941,7 @@ def serialize_cross_section_undo_state(obj):
         state["points"].append({
             "scale": ps.scale,
             "rotation": ps.rotation,
+            "bridge_offset": getattr(ps, "bridge_offset", 0),
             "active_vert_index": ps.active_vert_index,
             "use_transition": getattr(ps, "use_transition", False),
             "verts": [
@@ -1922,6 +1969,7 @@ def restore_cross_section_undo_state(obj, state):
             v.is_ghost = is_ghost
         ps.scale = point_state.get("scale", ps.scale)
         ps.rotation = point_state.get("rotation", ps.rotation)
+        ps.bridge_offset = point_state.get("bridge_offset", getattr(ps, "bridge_offset", 0))
         ps.active_vert_index = min(point_state.get("active_vert_index", ps.active_vert_index), max(0, len(verts) - 1))
         ps.use_transition = point_state.get("use_transition", getattr(ps, "use_transition", False))
         update_ghost_vertices(ps)
@@ -2916,16 +2964,26 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         total_points = len(settings.point_settings)
         if total_points > 0:
             previous_selection = get_selected_widget_verts(wd)
+            previous_point_idx = settings.active_point_index
             step = -1 if event.type == 'WHEELUPMOUSE' else 1
-            new_idx = (settings.active_point_index + step) % total_points
+            new_idx = (previous_point_idx + step) % total_points
             settings.active_point_index = new_idx
             wd.auto_alignment_initialized = False
             wd.fitted_point_index = -1
             select_curve_point_by_index(obj, new_idx)
             target_ps = settings.point_settings[new_idx]
             target_count = len(target_ps.cross_section_verts)
-            preserved_selection = {idx for idx in previous_selection if 0 <= idx < target_count}
-            target_ps.active_vert_index = ps.active_vert_index if 0 <= ps.active_vert_index < target_count else -1
+            preserved_selection = {
+                map_vertex_index_between_sections(settings, previous_point_idx, new_idx, idx)
+                for idx in previous_selection
+            }
+            preserved_selection = {idx for idx in preserved_selection if 0 <= idx < target_count}
+            target_ps.active_vert_index = map_vertex_index_between_sections(
+                settings,
+                previous_point_idx,
+                new_idx,
+                ps.active_vert_index,
+            ) if ps.active_vert_index >= 0 and target_count > 0 else -1
             wd.drag_vert_index = -1
             wd.left_drag_pending = False
             wd.left_drag_active = False
@@ -3444,6 +3502,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     if event.type == 'RIGHTMOUSE' and event.value == 'PRESS':
         if event.alt or event.ctrl or event.shift or event.oskey:
             return {'PASS_THROUGH'}
+        target_point_index = settings.active_point_index
+        wd.context_menu_point_index = target_point_index
         if inside_widget:
             closest_idx = find_nearest_raw_vertex(verts, mx, my, cx, cy, sf, alignment_angle, flip_h)
             if closest_idx >= 0:
@@ -3451,6 +3511,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 set_selected_widget_verts(wd, {closest_idx})
                 redraw_view3d(context)
         bpy.ops.wm.call_menu(name="HAIRPIPE_MT_widget_context_menu")
+        settings.active_point_index = target_point_index
+        wd.context_menu_point_index = target_point_index
         return {'RUNNING_MODAL'}
 
     # ESC - close editor
@@ -3524,8 +3586,16 @@ class HAIRPIPE_MT_widget_context_menu(bpy.types.Menu):
     def draw(self, context):
         layout = self.layout
         layout.operator_context = 'INVOKE_DEFAULT'
-        layout.operator("hair_pipe.widget_toggle_ghost", text="设置为幽灵点")
-        layout.operator("hair_pipe.widget_make_normal", text="转换为正常点", icon='CHECKMARK')
+        wd = getattr(context.window_manager, 'hair_pipe_widget', None)
+        bridge_op = layout.operator(
+            "hair_pipe.widget_bridge_offset",
+            text="上下桥接错位",
+            icon='ARROW_LEFTRIGHT',
+        )
+        bridge_op.point_index = int(getattr(wd, 'context_menu_point_index', -1))
+        layout.separator()
+        layout.operator("hair_pipe.widget_toggle_ghost", text="设置为幽灵点", icon='GHOST_ENABLED')
+        layout.operator("hair_pipe.widget_make_normal", text="转换为正常点", icon='GHOST_DISABLED')
         layout.separator()
         layout.operator("hair_pipe.cross_section_spread", text="横截面传递", icon='DUPLICATE')
 
@@ -3637,6 +3707,63 @@ class HAIRPIPE_OT_widget_delete_selected_vertices(bpy.types.Operator):
         set_selected_widget_verts(wd, set())
         wd.drag_vert_index = -1
         redraw_view3d(context)
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_widget_bridge_offset(bpy.types.Operator):
+    bl_idname = "hair_pipe.widget_bridge_offset"
+    bl_label = "上下桥接错位"
+    bl_description = "调整当前横截面与上一个横截面的顶点连接偏移"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    offset: IntProperty(
+        name="偏移数量",
+        description="当前横截面与上一个横截面之间的顶点偏移数量",
+        default=0,
+        min=-64,
+        max=64,
+    )
+    point_index: IntProperty(default=-1, options={'HIDDEN', 'SKIP_SAVE'})
+
+    @classmethod
+    def poll(cls, context):
+        obj, settings, ps, wd = get_widget_edit_context(context)
+        return obj is not None and ps is not None and wd is not None and wd.is_active
+
+    def invoke(self, context, event):
+        obj, settings, ps, wd = get_widget_edit_context(context)
+        if settings is None:
+            return {'CANCELLED'}
+        target_index = int(getattr(wd, 'context_menu_point_index', -1)) if wd is not None else -1
+        if not (0 <= target_index < len(settings.point_settings)):
+            target_index = settings.active_point_index
+        self.point_index = target_index
+        settings.active_point_index = target_index
+        select_curve_point_by_index(obj, target_index)
+        self.offset = int(getattr(settings.point_settings[target_index], 'bridge_offset', 0))
+        return self.execute(context)
+
+    def draw(self, context):
+        self.layout.prop(self, "offset", text="偏移数量")
+        self.layout.label(text="正值向后偏移，负值向前偏移")
+
+    def execute(self, context):
+        obj, settings, ps, wd = get_widget_edit_context(context)
+        if settings is None:
+            return {'CANCELLED'}
+        target_index = self.point_index
+        if not (0 <= target_index < len(settings.point_settings)):
+            return {'CANCELLED'}
+        settings.active_point_index = target_index
+        select_curve_point_by_index(obj, target_index)
+        settings.point_settings[target_index].bridge_offset = int(self.offset)
+        clear_pipe_mesh_cache()
+        refresh_pipe_during_widget_edit(context, min_interval=0.0)
+        settings.active_point_index = target_index
+        select_curve_point_by_index(obj, target_index)
+        if wd is not None:
+            wd.context_menu_point_index = target_index
+        redraw_view3d(context, refresh_pipe=False)
         return {'FINISHED'}
 
 
@@ -3765,6 +3892,7 @@ classes = (
     HAIRPIPE_OT_widget_remove_vertex,
     HAIRPIPE_OT_widget_smooth_selected_vertices,
     HAIRPIPE_OT_widget_delete_selected_vertices,
+    HAIRPIPE_OT_widget_bridge_offset,
     HAIRPIPE_OT_widget_toggle_ghost,
     HAIRPIPE_OT_widget_make_normal,
     HAIRPIPE_OT_widget_toggle_smooth_preview,
