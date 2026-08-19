@@ -1892,7 +1892,15 @@ def set_widget_solo_state(context, wd, enabled):
 
     states = {}
     for scene_obj in context.view_layer.objects:
-        states[scene_obj.name] = bool(scene_obj.hide_get())
+        hidden_before_solo = bool(scene_obj.hide_get())
+        if scene_obj.type == 'CURVE' and scene_obj.get("hair_pipe_widget_hide_curve_overlay", False):
+            raw_overlay_state = scene_obj.get(_CURVE_OVERLAY_STATE_KEY)
+            if raw_overlay_state:
+                try:
+                    hidden_before_solo = bool(json.loads(raw_overlay_state).get("hide_set", hidden_before_solo))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+        states[scene_obj.name] = hidden_before_solo
         scene_obj.hide_set(scene_obj.name not in family_names)
     wd.solo_hold_states = json.dumps(states)
     wd.solo_hold_active = True
@@ -1901,7 +1909,6 @@ def set_widget_solo_state(context, wd, enabled):
 
 def cleanup_widget_display_state(context, wd):
     source_curve = get_widget_source_curve(context)
-    restore_widget_solo_hold(context, wd)
     set_curve_overlay_hidden(context, source_curve, False)
     set_pipe_basemesh_preview(context, source_curve, False)
 
