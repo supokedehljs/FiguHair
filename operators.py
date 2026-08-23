@@ -2172,28 +2172,29 @@ def select_figuhair_group(context, curve_obj, extend=False):
 
 
 def get_figuhair_root(curve_obj):
-    if curve_obj is None:
+    """The only supported hair root is the curve object itself."""
+    if curve_obj is None or curve_obj.type != 'CURVE':
         return None
-    root_name = curve_obj.get("hair_pipe_root")
-    root_obj = bpy.data.objects.get(root_name) if root_name else None
-    if root_obj is not None and root_obj.type in {'CURVE', 'EMPTY'}:
-        return root_obj
-    if curve_obj.parent is not None and curve_obj.parent.type in {'CURVE', 'EMPTY'}:
-        return curve_obj.parent
-    return curve_obj if curve_obj.type == 'CURVE' else None
+    return curve_obj
 
 
 def ensure_figuhair_root(curve_obj):
+    """Normalize a hair curve so its generated mesh is always its direct child."""
+    if curve_obj is None or curve_obj.type != 'CURVE':
+        return None
     base_name = curve_obj.get("hair_pipe_base_name")
     if not base_name:
         base_name = get_next_figuhair_base_name()
         curve_obj["hair_pipe_base_name"] = base_name
 
-    root_obj = curve_obj
-    root_obj.name = base_name + " Curve"
-    root_obj["hair_pipe_root"] = True
+    if curve_obj.parent is not None:
+        world_matrix = curve_obj.matrix_world.copy()
+        curve_obj.parent = None
+        curve_obj.matrix_world = world_matrix
+
+    curve_obj.name = base_name + " Curve"
     curve_obj["hair_pipe_root"] = curve_obj.name
-    return root_obj
+    return curve_obj
 
 
 def get_pipe_mesh_name(curve_obj):
@@ -2285,10 +2286,8 @@ def set_generated_object_transform(obj, curve_obj):
 def get_pipe_source_curve(pipe_obj):
     if pipe_obj is None or pipe_obj.type != 'MESH':
         return None
-    if pipe_obj.parent is not None and pipe_obj.parent.type == 'EMPTY':
-        curve_obj = get_curve_from_figuhair_root(pipe_obj.parent)
-        if curve_obj is not None:
-            return curve_obj
+    if pipe_obj.parent is not None and pipe_obj.parent.type == 'CURVE':
+        return pipe_obj.parent
     source_name = pipe_obj.get("hair_pipe_source_curve")
     if not source_name:
         return None
@@ -2306,8 +2305,8 @@ def get_tail_source_curve(tail_obj):
         curve_obj = bpy.data.objects.get(source_name)
         if curve_obj is not None and curve_obj.type == 'CURVE':
             return curve_obj
-    if tail_obj.parent is not None and tail_obj.parent.type == 'EMPTY':
-        return get_curve_from_figuhair_root(tail_obj.parent)
+    if tail_obj.parent is not None and tail_obj.parent.type == 'CURVE':
+        return tail_obj.parent
     return None
 
 
@@ -3052,7 +3051,7 @@ def update_tail_mesh_for_curve(curve_obj, settings, pipe_verts):
     tail_obj.display_type = 'TEXTURED'
     tail_obj.show_in_front = True
     tail_obj.hide_render = True
-    parent_keep_world(tail_obj, root_obj)
+    set_generated_object_transform(tail_obj, curve_obj)
     return tail_obj
 
 
