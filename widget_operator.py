@@ -236,6 +236,9 @@ class HairPipeWidgetSettings(PropertyGroup):
     proportional_center_y: FloatProperty(default=0.0)
     transform_pivot_x: FloatProperty(default=0.0)
     transform_pivot_y: FloatProperty(default=0.0)
+    transform_mouse_pivot_x: FloatProperty(default=0.0)
+    transform_mouse_pivot_y: FloatProperty(default=0.0)
+    transform_mouse_pivot_valid: BoolProperty(default=False)
     auto_alignment_angle: FloatProperty(default=0.0)
     auto_alignment_flip_h: BoolProperty(default=False)
     auto_alignment_initialized: BoolProperty(default=False)
@@ -547,7 +550,59 @@ def apply_longitudinal_move(context, settings, wd, selected, delta_x, delta_y):
     update_all_ghost_vertices(settings)
 
 
-def prepare_proportional_transform(context, wd, verts, selected, cx, cy, sf, alignment_angle, flip_h):
+def get_selected_3d_mesh_screen_center(context, selected):
+    """Project the active ring's selected generated-mesh vertices to screen space."""
+    obj = context.active_object
+    region = context.region
+    region_data = context.region_data
+    if obj is None or obj.type != 'CURVE' or region is None or region_data is None or not selected:
+        return None
+    settings = obj.hair_pipe_settings
+    active_idx = settings.active_point_index
+    if not (0 <= active_idx < len(settings.point_settings)):
+        return None
+    segments = len(settings.point_settings[active_idx].cross_section_verts)
+    if segments < 3:
+        return None
+    try:
+        mesh_verts, _faces = get_cached_pipe_mesh(obj)
+    except Exception:
+        return None
+    if not mesh_verts or len(mesh_verts) < segments:
+        return None
+
+    active_world = get_active_curve_point_world_position(context)
+    if active_world is None:
+        return None
+    best_ring = None
+    best_distance = None
+    for start in range(0, len(mesh_verts) - segments + 1, segments):
+        ring = mesh_verts[start:start + segments]
+        center = sum((Vector(vertex) for vertex in ring), Vector((0.0, 0.0, 0.0))) / segments
+        distance = ((obj.matrix_world @ center) - active_world).length_squared
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best_ring = ring
+    if best_ring is None:
+        return None
+
+    projected = []
+    for idx in selected:
+        if 0 <= idx < len(best_ring):
+            screen = view3d_utils.location_3d_to_region_2d(
+                region, region_data, obj.matrix_world @ Vector(best_ring[idx])
+            )
+            if screen is not None:
+                projected.append((screen.x, screen.y))
+    if not projected:
+        return None
+    return (
+        sum(point[0] for point in projected) / len(projected),
+        sum(point[1] for point in projected) / len(projected),
+    )
+
+
+def prepare_proportional_transform(context, wd, verts, selected, cx, cy, sf, alignment_angle, flip_h, mouse_inside_widget=True):
     weights = get_proportional_vertex_weights(
         context, verts, selected, cx, cy, sf, alignment_angle, flip_h, wd.proportional_radius
     )
@@ -563,6 +618,25 @@ def prepare_proportional_transform(context, wd, verts, selected, cx, cy, sf, ali
     if selected_offsets:
         wd.transform_pivot_x = sum(offset[0] for offset in selected_offsets) / len(selected_offsets)
         wd.transform_pivot_y = sum(offset[1] for offset in selected_offsets) / len(selected_offsets)
+
+    # The geometric pivot stays in profile coordinates, while the mouse pivot
+    # is the screen-space center of the selected points. Keep it fixed during
+    # the gesture so the mouse can make a full turn around the selection.
+    selected_widget_points = [
+        effective_to_widget(*get_raw_offset(verts[idx]), cx, cy, sf, alignment_angle, flip_h)
+        for idx in selected if 0 <= idx < len(verts)
+    ]
+    if mouse_inside_widget:
+        selected_mouse_points = selected_widget_points
+    else:
+        mesh_center = get_selected_3d_mesh_screen_center(context, selected)
+        selected_mouse_points = [mesh_center] if mesh_center is not None else selected_widget_points
+    if selected_mouse_points:
+        wd.transform_mouse_pivot_x = sum(point[0] for point in selected_mouse_points) / len(selected_mouse_points)
+        wd.transform_mouse_pivot_y = sum(point[1] for point in selected_mouse_points) / len(selected_mouse_points)
+        wd.transform_mouse_pivot_valid = True
+    else:
+        wd.transform_mouse_pivot_valid = False
     set_proportional_weights(wd, weights)
     if proportional_edit_enabled(context):
         store_rotate_offsets(
@@ -2154,15 +2228,10 @@ def get_active_curve_point(context):
 
 
 def get_transform_mouse_pivot(context, fallback_x, fallback_y):
-    world_position = get_active_curve_point_world_position(context)
-    region = context.region
-    region_data = context.region_data
-    if world_position is None or region is None or region_data is None:
-        return fallback_x, fallback_y
-    projected = view3d_utils.location_3d_to_region_2d(region, region_data, world_position)
-    if projected is None:
-        return fallback_x, fallback_y
-    return projected.x, projected.y
+    wd = getattr(context.window_manager, 'hair_pipe_widget', None)
+    if wd is not None and getattr(wd, 'transform_mouse_pivot_valid', False):
+        return wd.transform_mouse_pivot_x, wd.transform_mouse_pivot_y
+    return fallback_x, fallback_y
 
 
 def get_active_curve_point_world_position(context):
@@ -2742,7 +2811,9 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         obj = context.active_object
-        if obj is None or obj.type != 'CURVE' or not is_curve_edit_mode(obj):
+        if obj is None or obj.type != 'CURVE' or not hasattr(obj, 'hair_pipe_settings'):
+            return False
+        if context.mode not in {'OBJECT', 'EDIT_CURVE'}:
             return False
         s = obj.hair_pipe_settings
         if len(s.point_settings) == 0:
@@ -2753,6 +2824,17 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
         return not is_transition_point(ps) and len(ps.cross_section_verts) >= 3
 
     def invoke(self, context, event):
+        obj = context.active_object
+        if obj is not None and obj.type == 'CURVE' and context.mode == 'OBJECT':
+            try:
+                bpy.ops.object.mode_set(mode='EDIT')
+            except RuntimeError:
+                self.report({'ERROR'}, "无法进入曲线编辑模式")
+                return {'CANCELLED'}
+            sync_point_settings(obj)
+            if not sync_active_point_from_selection(obj):
+                select_curve_point_by_index(obj, obj.hair_pipe_settings.active_point_index)
+
         wd = context.window_manager.hair_pipe_widget
         if wd.is_active:
             cleanup_widget_display_state(context, wd)
@@ -2830,6 +2912,7 @@ class HAIRPIPE_OT_widget_hold(bpy.types.Operator):
         wd.move_active = False
         wd.rotate_active = False
         wd.scale_active = False
+        wd.transform_mouse_pivot_valid = False
         wd.display_scale_active = False
         wd.hold_key_mode = False
         redraw_view3d(context)
@@ -3163,6 +3246,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             return {'RUNNING_MODAL'}
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
             wd.scale_active = False
+            wd.transform_mouse_pivot_valid = False
             sync_active_cross_section_to_selected_points(context)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
@@ -3172,6 +3256,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                     verts[vi].offset_x = initial_offset[0]
                     verts[vi].offset_y = initial_offset[1]
             wd.scale_active = False
+            wd.transform_mouse_pivot_valid = False
             update_ghost_vertices(ps)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
@@ -3210,6 +3295,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             return {'RUNNING_MODAL'}
         if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
             wd.rotate_active = False
+            wd.transform_mouse_pivot_valid = False
             for vi in sel:
                 if vi < len(verts):
                     apply_active_vertex_edit_to_selected_points(context, ps, vi)
@@ -3221,6 +3307,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                     verts[vi].offset_x = initial_offset[0]
                     verts[vi].offset_y = initial_offset[1]
             wd.rotate_active = False
+            wd.transform_mouse_pivot_valid = False
             update_ghost_vertices(ps)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
@@ -3454,7 +3541,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             wd.move_active = True
             wd.move_start_x = mx
             wd.move_start_y = my
-            prepare_proportional_transform(context, wd, verts, sel, cx, cy, sf, alignment_angle, flip_h)
+            prepare_proportional_transform(context, wd, verts, sel, cx, cy, sf, alignment_angle, flip_h, inside_widget)
             store_longitudinal_initial_state(wd, settings, sel)
             redraw_view3d(context)
         return {'RUNNING_MODAL'}
@@ -3468,7 +3555,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             wd.rotate_active = True
             wd.rotate_start_x = mx
             wd.rotate_start_y = my
-            prepare_proportional_transform(context, wd, verts, sel, cx, cy, sf, alignment_angle, flip_h)
+            prepare_proportional_transform(context, wd, verts, sel, cx, cy, sf, alignment_angle, flip_h, inside_widget)
             redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
@@ -3489,7 +3576,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             wd.scale_active = True
             wd.scale_start_x = mx
             wd.scale_start_y = my
-            prepare_proportional_transform(context, wd, verts, sel, cx, cy, sf, alignment_angle, flip_h)
+            prepare_proportional_transform(context, wd, verts, sel, cx, cy, sf, alignment_angle, flip_h, inside_widget)
             redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
