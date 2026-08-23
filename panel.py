@@ -82,6 +82,11 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         row.scale_y = 1.2
         row.operator("hair_pipe.mesh_to_hair_curve", text="管状网格转头发曲线", icon='CURVE_DATA')
 
+        group_box = layout.box()
+        group_box.label(text="头发分组", icon='OUTLINER_COLLECTION')
+        group_box.prop(context.scene, "hair_pipe_group_color_mode", text="分组颜色显示", toggle=True)
+        group_box.operator("hair_pipe.sync_parent_collections", text="爸爸去哪了", icon='FILE_PARENT')
+
         if curve_obj is None:
             layout.label(text="未选择 FiguHair 头发；设置暂不可编辑", icon='INFO')
             settings = None

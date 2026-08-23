@@ -5195,6 +5195,107 @@ class HAIRPIPE_OT_merge_hair_for_export(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def apply_group_color_mode(scene, enabled):
+    """Use temporary viewport materials so only FiguHair meshes change color."""
+    palette = (
+        (0.95, 0.25, 0.25, 1.0), (0.25, 0.55, 1.0, 1.0),
+        (0.25, 0.85, 0.45, 1.0), (1.0, 0.65, 0.15, 1.0),
+        (0.75, 0.35, 1.0, 1.0), (0.1, 0.8, 0.8, 1.0),
+        (1.0, 0.35, 0.7, 1.0), (0.65, 0.8, 0.2, 1.0),
+    )
+    group_indices = {}
+    temp_materials = []
+    for obj in bpy.data.objects:
+        if not _is_hair_pipe_mesh_obj(obj):
+            continue
+        source_curve = get_pipe_source_curve(obj) or get_tail_source_curve(obj)
+        collection = (
+            source_curve.users_collection[0]
+            if source_curve is not None and source_curve.users_collection
+            else (obj.users_collection[0] if obj.users_collection else scene.collection)
+        )
+        group_indices.setdefault(collection.name, len(group_indices))
+        state_key = "hair_pipe_group_color_materials"
+        if enabled:
+            if state_key not in obj:
+                obj[state_key] = json.dumps([
+                    material.name if material is not None else None
+                    for material in obj.data.materials
+                ])
+            material_name = "FiguHair Group Color " + collection.name
+            material = bpy.data.materials.get(material_name)
+            if material is None:
+                material = bpy.data.materials.new(material_name)
+                material["hair_pipe_group_color_temp"] = True
+            material.diffuse_color = palette[group_indices[collection.name] % len(palette)]
+            obj.data.materials.clear()
+            obj.data.materials.append(material)
+        elif state_key in obj:
+            try:
+                original_names = json.loads(obj[state_key])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                original_names = []
+            obj.data.materials.clear()
+            for name in original_names:
+                obj.data.materials.append(bpy.data.materials.get(name) if name else None)
+            del obj[state_key]
+
+    screen = getattr(bpy.context, "screen", None)
+    if screen is not None:
+        if enabled and "hair_pipe_group_color_shading" not in scene:
+            scene["hair_pipe_group_color_shading"] = json.dumps([
+                area.spaces.active.shading.color_type
+                for area in screen.areas if area.type == 'VIEW_3D'
+            ])
+        saved_modes = []
+        if not enabled:
+            try:
+                saved_modes = json.loads(scene.get("hair_pipe_group_color_shading", "[]"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                saved_modes = []
+        view_index = 0
+        for area in screen.areas:
+            if area.type != 'VIEW_3D':
+                continue
+            area.spaces.active.shading.color_type = 'MATERIAL' if enabled else (
+                saved_modes[view_index] if view_index < len(saved_modes) else 'MATERIAL'
+            )
+            view_index += 1
+            area.tag_redraw()
+        if not enabled and "hair_pipe_group_color_shading" in scene:
+            del scene["hair_pipe_group_color_shading"]
+
+    if not enabled:
+        for material in list(bpy.data.materials):
+            if material.get("hair_pipe_group_color_temp") and material.users == 0:
+                bpy.data.materials.remove(material)
+
+
+class HAIRPIPE_OT_sync_parent_collections(bpy.types.Operator):
+    bl_idname = "hair_pipe.sync_parent_collections"
+    bl_label = "爸爸去哪了"
+    bl_description = "将所有头发网格移动到其父曲线所在的 Collection"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        moved = 0
+        for curve in bpy.data.objects:
+            if curve.type != 'CURVE' or not curve.get("hair_pipe_base_name"):
+                continue
+            target = curve.users_collection[0] if curve.users_collection else context.scene.collection
+            for mesh in (get_pipe_object_for_curve(curve), get_tail_object_for_curve(curve)):
+                if mesh is None or target in mesh.users_collection and len(mesh.users_collection) == 1:
+                    continue
+                if target not in mesh.users_collection:
+                    target.objects.link(mesh)
+                for collection in list(mesh.users_collection):
+                    if collection != target:
+                        collection.objects.unlink(mesh)
+                moved += 1
+        self.report({'INFO'}, f"已整理 {moved} 个头发网格")
+        return {'FINISHED'}
+
+
 def _is_pipe_mesh_obj(obj):
     """True for FiguHair pipe mesh objects (the generated tube)."""
     if obj.type != 'MESH':
@@ -5734,6 +5835,7 @@ class HAIRPIPE_WST_draw_hair_curve(bpy.types.WorkSpaceTool):
 
 
 classes = (
+    HAIRPIPE_OT_sync_parent_collections,
     HAIRPIPE_OT_cross_section_spread,
     HAIRPIPE_OT_draw_hair_curve,
     HAIRPIPE_OT_begin_custom_profile,
@@ -5781,7 +5883,9 @@ def register_keymaps():
     keyconfig = wm.keyconfigs.addon if wm is not None else None
     if keyconfig is None:
         return
-    keymap = keyconfig.keymaps.new(name='Object Mode', space_type='EMPTY')
+    keymap = keyconfig.keymaps.get('Object Mode')
+    if keymap is None:
+        keymap = keyconfig.keymaps.new(name='Object Mode', space_type='EMPTY')
     bindings = (
         ('hair_pipe.hide_hair', 'H', 'PRESS', {}),
         ('hair_pipe.show_all_hair', 'H', 'PRESS', {'alt': True}),
@@ -5790,7 +5894,10 @@ def register_keymaps():
         ('hair_pipe.delete_hair', 'DEL', 'PRESS', {}),
         ('hair_pipe.family_local_view', 'NUMPAD_SLASH', 'PRESS', {}),
     )
+    existing = {(item.idname, item.type, item.value, item.ctrl, item.shift, item.alt) for item in keymap.keymap_items}
     for operator, key_type, value, modifiers in bindings:
+        if any(item.idname == operator and item.type == key_type and item.value == value for item in keymap.keymap_items):
+            continue
         item = keymap.keymap_items.new(operator, key_type, value, **modifiers)
         _addon_keymaps.append((keymap, item))
 

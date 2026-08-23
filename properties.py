@@ -357,15 +357,30 @@ class HairPipeSettings(PropertyGroup):
     )
 
 
+def update_group_color_mode(self, context):
+    try:
+        from .operators import apply_group_color_mode
+        apply_group_color_mode(context.scene, bool(self.hair_pipe_group_color_mode))
+    except (ImportError, AttributeError, RuntimeError):
+        pass
+
+
 def register():
     bpy.utils.register_class(HairPipeCrossSectionVertex)
     bpy.utils.register_class(HairPipePointSettings)
     bpy.utils.register_class(HairPipeSettings)
     bpy.types.Object.hair_pipe_settings = PointerProperty(type=HairPipeSettings)
+    bpy.types.Scene.hair_pipe_group_color_mode = BoolProperty(
+        name="分组颜色显示",
+        description="仅让 FiguHair 头发按所属 Collection 显示颜色",
+        default=False,
+        update=update_group_color_mode,
+    )
 
 
 def unregister():
     del bpy.types.Object.hair_pipe_settings
+    del bpy.types.Scene.hair_pipe_group_color_mode
     bpy.utils.unregister_class(HairPipeSettings)
     bpy.utils.unregister_class(HairPipePointSettings)
     bpy.utils.unregister_class(HairPipeCrossSectionVertex)
