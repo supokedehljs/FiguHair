@@ -2134,12 +2134,41 @@ def get_next_figuhair_base_name():
 
 
 def get_curve_from_figuhair_root(root_obj):
-    if root_obj is None or root_obj.type != 'EMPTY':
+    if root_obj is None:
         return None
+    if root_obj.type == 'CURVE' and hasattr(root_obj, 'hair_pipe_settings'):
+        return root_obj
     for child in root_obj.children:
-        if child.type == 'CURVE':
+        if child.type == 'CURVE' and hasattr(child, 'hair_pipe_settings'):
             return child
     return None
+
+
+def set_figuhair_group_visibility(root_obj, visible):
+    if root_obj is None or root_obj.type != 'EMPTY':
+        return
+    root_obj.hide_set(not visible)
+    root_obj.hide_viewport = not visible
+
+
+def select_figuhair_group(context, curve_obj, extend=False):
+    root_obj = get_figuhair_root(curve_obj)
+    if root_obj is None:
+        return False
+    family = [
+        root_obj,
+        curve_obj,
+        get_pipe_object_for_curve(curve_obj),
+        get_tail_object_for_curve(curve_obj),
+    ]
+    if not extend:
+        for obj in context.selected_objects:
+            obj.select_set(False)
+    for obj in family:
+        if obj is not None:
+            obj.select_set(True)
+    context.view_layer.objects.active = root_obj
+    return True
 
 
 def get_figuhair_root(curve_obj):
@@ -2147,11 +2176,11 @@ def get_figuhair_root(curve_obj):
         return None
     root_name = curve_obj.get("hair_pipe_root")
     root_obj = bpy.data.objects.get(root_name) if root_name else None
-    if root_obj is not None and root_obj.type == 'EMPTY':
+    if root_obj is not None and root_obj.type in {'CURVE', 'EMPTY'}:
         return root_obj
-    if curve_obj.parent is not None and curve_obj.parent.type == 'EMPTY':
+    if curve_obj.parent is not None and curve_obj.parent.type in {'CURVE', 'EMPTY'}:
         return curve_obj.parent
-    return None
+    return curve_obj if curve_obj.type == 'CURVE' else None
 
 
 def ensure_figuhair_root(curve_obj):
@@ -2160,18 +2189,10 @@ def ensure_figuhair_root(curve_obj):
         base_name = get_next_figuhair_base_name()
         curve_obj["hair_pipe_base_name"] = base_name
 
-    root_obj = get_figuhair_root(curve_obj)
-    if root_obj is None:
-        root_obj = bpy.data.objects.new(base_name, None)
-        root_obj.empty_display_type = 'PLAIN_AXES'
-        root_obj.empty_display_size = 0.35
-        root_obj.matrix_world = Matrix.Identity(4)
-        target_collection = curve_obj.users_collection[0] if curve_obj.users_collection else bpy.context.scene.collection
-        target_collection.objects.link(root_obj)
-
-    root_obj.name = base_name
+    root_obj = curve_obj
+    root_obj.name = base_name + " Curve"
     root_obj["hair_pipe_root"] = True
-    curve_obj["hair_pipe_root"] = root_obj.name
+    curve_obj["hair_pipe_root"] = curve_obj.name
     return root_obj
 
 
@@ -2191,6 +2212,11 @@ def get_pipe_object_for_curve(curve_obj):
                 return child
             if child.type == 'MESH' and child.name.endswith(" Mesh"):
                 return child
+    for child in curve_obj.children:
+        if child.type == 'MESH' and get_pipe_source_curve(child) == curve_obj:
+            return child
+        if child.type == 'MESH' and child.name.endswith(" Mesh"):
+            return child
     mesh_name = get_pipe_mesh_name(curve_obj)
     obj = bpy.data.objects.get(mesh_name)
     if obj is not None and obj.type == 'MESH':
@@ -2210,6 +2236,11 @@ def get_tail_object_for_curve(curve_obj):
                 return child
             if child.type == 'MESH' and child.name.endswith(" Tail"):
                 return child
+    for child in curve_obj.children:
+        if child.type == 'MESH' and child.get("hair_pipe_tail_source_curve") == curve_obj.name:
+            return child
+        if child.type == 'MESH' and child.name.endswith(" Tail"):
+            return child
     tail_name = get_tail_mesh_name(curve_obj)
     obj = bpy.data.objects.get(tail_name)
     if obj is not None and obj.type == 'MESH':
@@ -2235,6 +2266,20 @@ def get_hair_root_object(curve_obj):
 def verts_to_world_space(verts, curve_obj):
     matrix = curve_obj.matrix_world
     return [matrix @ vert for vert in verts]
+
+
+def generated_pipe_vertices(verts, curve_obj):
+    """Generated meshes use curve-local coordinates and follow as curve children."""
+    return [Vector(vert) for vert in verts]
+
+
+def set_generated_object_transform(obj, curve_obj):
+    """Use the stable Curve -> Mesh hierarchy without world/local double transforms."""
+    if obj is None:
+        return
+    obj.parent = curve_obj
+    obj.matrix_parent_inverse = Matrix.Identity(4)
+    obj.matrix_basis = Matrix.Identity(4)
 
 
 def get_pipe_source_curve(pipe_obj):
@@ -2311,6 +2356,14 @@ def get_context_curve_object(context):
 def parent_keep_world(obj, parent_obj):
     world_matrix = obj.matrix_world.copy()
     obj.parent = parent_obj
+    obj.matrix_world = world_matrix
+
+
+def detach_keep_world(obj):
+    if obj is None or obj.parent is None:
+        return
+    world_matrix = obj.matrix_world.copy()
+    obj.parent = None
     obj.matrix_world = world_matrix
 
 
@@ -2958,12 +3011,12 @@ def update_tail_mesh_for_curve(curve_obj, settings, pipe_verts):
                 tail_obj.display_type = 'TEXTURED'
                 tail_obj.show_in_front = True
                 tail_obj.hide_render = True
-                parent_keep_world(tail_obj, root_obj)
+                detach_keep_world(tail_obj)
                 return tail_obj
             tail_obj.display_type = 'TEXTURED'
             tail_obj.show_in_front = True
             tail_obj.hide_render = True
-            parent_keep_world(tail_obj, root_obj)
+            detach_keep_world(tail_obj)
             return tail_obj
 
     if tail_obj is not None and update_tail_mesh_connection(tail_obj, last_ring, segments, direction):
@@ -2979,7 +3032,7 @@ def update_tail_mesh_for_curve(curve_obj, settings, pipe_verts):
         tail_obj.display_type = 'TEXTURED'
         tail_obj.show_in_front = True
         tail_obj.hide_render = True
-        parent_keep_world(tail_obj, root_obj)
+        set_generated_object_transform(tail_obj, curve_obj)
         return tail_obj
 
     verts, faces = create_tail_mesh_geometry(last_ring, direction)
@@ -3014,8 +3067,9 @@ def configure_pipe_object(pipe_obj, curve_obj):
     pipe_obj.data.name = pipe_obj.name
 
     pipe_obj["hair_pipe_source_curve"] = curve_obj.name
-    parent_keep_world(curve_obj, root_obj)
-    parent_keep_world(pipe_obj, root_obj)
+    if root_obj is not curve_obj:
+        parent_keep_world(curve_obj, root_obj)
+    set_generated_object_transform(pipe_obj, curve_obj)
 
     pipe_obj.show_in_front = False
     pipe_obj.hide_select = False
@@ -3725,7 +3779,7 @@ class HAIRPIPE_OT_generate_pipe(bpy.types.Operator):
         if verts is None:
             self.report({'ERROR'}, "Could not generate pipe from curve")
             return {'CANCELLED'}
-        verts = verts_to_world_space(verts, curve_obj)
+        verts = generated_pipe_vertices(verts, curve_obj)
         mesh_name = get_pipe_mesh_name(curve_obj)
         existing_obj = get_pipe_object_for_curve(curve_obj)
         if existing_obj:
@@ -4468,7 +4522,7 @@ class HAIRPIPE_OT_create_tail_mesh(bpy.types.Operator):
         if verts is None:
             self.report({'ERROR'}, "\u8bf7\u5148\u751f\u6210\u7ba1\u7ebf")
             return {'CANCELLED'}
-        verts = verts_to_world_space(verts, curve_obj)
+        verts = generated_pipe_vertices(verts, curve_obj)
         tail_obj = update_tail_mesh_for_curve(curve_obj, settings, verts)
         if tail_obj is None:
             self.report({'ERROR'}, "\u65e0\u6cd5\u521b\u5efa\u672b\u7aef\u7f51\u683c")
@@ -4939,7 +4993,6 @@ class HAIRPIPE_OT_duplicate_hair(bpy.types.Operator):
             bpy.ops.object.mode_set(mode='OBJECT')
 
         # Capture world matrices NOW, before creating anything
-        src_root_matrix  = root_obj.matrix_world.copy()  if root_obj  else Matrix.Identity(4)
         src_curve_matrix = curve_obj.matrix_world.copy()
         src_pipe_matrix  = pipe_obj.matrix_world.copy()  if pipe_obj  else None
         src_tail_matrix  = tail_obj.matrix_world.copy()  if tail_obj  else None
@@ -4951,23 +5004,18 @@ class HAIRPIPE_OT_duplicate_hair(bpy.types.Operator):
             else context.scene.collection
         )
 
-        # ── 1. Root empty ──────────────────────────────────────────────────
-        new_root = bpy.data.objects.new(new_base, None)
-        new_root.empty_display_type = 'PLAIN_AXES'
-        new_root.empty_display_size = 0.35
-        new_root["hair_pipe_root"] = True
-        target_col.objects.link(new_root)
-        new_root.matrix_world = src_root_matrix
+        # ── 1. Curve root (no legacy Empty hierarchy) ─────────────────────
+        # The curve itself is the FiguHair root. This keeps ordinary copies
+        # and plugin copies in the same Curve -> Mesh hierarchy.
 
         # ── 2. Curve (independent copy of curve data) ──────────────────────
         new_curve_data       = curve_obj.data.copy()
         new_curve_data.name  = new_base + " Curve"
         new_curve            = bpy.data.objects.new(new_base + " Curve", new_curve_data)
         new_curve["hair_pipe_base_name"] = new_base
-        new_curve["hair_pipe_root"]      = new_root.name
         target_col.objects.link(new_curve)
-        new_curve.parent      = new_root
         new_curve.matrix_world = src_curve_matrix
+        new_curve["hair_pipe_root"] = new_curve.name
 
         # Deep-copy hair_pipe_settings
         src_s = curve_obj.hair_pipe_settings
@@ -5009,7 +5057,7 @@ class HAIRPIPE_OT_duplicate_hair(bpy.types.Operator):
             new_pipe.hide_viewport = pipe_obj.hide_viewport
             new_pipe.display_type  = pipe_obj.display_type
             target_col.objects.link(new_pipe)
-            new_pipe.parent       = new_root
+            new_pipe.parent       = None
             new_pipe.matrix_world = src_pipe_matrix
 
             # Copy modifiers except Join-Tail GeoNodes (rebuilt in step 4)
@@ -5047,11 +5095,17 @@ class HAIRPIPE_OT_duplicate_hair(bpy.types.Operator):
             new_tail.hide_viewport = tail_obj.hide_viewport
             new_tail.display_type  = tail_obj.display_type
             target_col.objects.link(new_tail)
-            new_tail.parent       = new_root
+            new_tail.parent       = None
             new_tail.matrix_world = src_tail_matrix
 
             if new_pipe is not None:
                 ensure_tail_modifier_stack(new_pipe, new_tail, new_curve.hair_pipe_settings)
+
+        # Keep the copied preview in the same stable Curve -> Mesh hierarchy.
+        if new_pipe is not None:
+            set_generated_object_transform(new_pipe, new_curve)
+        if new_tail is not None:
+            set_generated_object_transform(new_tail, new_curve)
 
         # ── 5. Activate the new curve ─────────────────────────────────────
         for o in context.selected_objects:

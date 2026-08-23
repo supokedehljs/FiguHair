@@ -11,11 +11,12 @@ from .operators import (
     get_tail_object_for_curve,
     update_tail_mesh_for_curve,
     ensure_tail_modifier_stack,
-    verts_to_world_space,
+    generated_pipe_vertices,
     redirect_pipe_selection,
     get_curve_from_figuhair_root,
     get_pipe_source_curve,
     get_tail_source_curve,
+    select_figuhair_group,
 )
 
 
@@ -140,7 +141,7 @@ def rebuild_existing_pipe(curve_obj, fast=False):
         verts, faces = generate_pipe_mesh(curve_obj, settings)
         if verts is None:
             return
-        verts = verts_to_world_space(verts, curve_obj)
+        verts = generated_pipe_vertices(verts, curve_obj)
 
         update_mesh_data_in_place(pipe_obj.data, verts, faces, settings.smooth_shading)
         tail_obj = get_tail_object_for_curve(curve_obj)
