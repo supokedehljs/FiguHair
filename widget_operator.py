@@ -3730,7 +3730,11 @@ class HAIRPIPE_OT_widget_bridge_offset(bpy.types.Operator):
         min=-64,
         max=64,
     )
-    point_index: IntProperty(default=-1, options={'HIDDEN', 'SKIP_SAVE'})
+    point_index: IntProperty(default=-1, options={'HIDDEN'})
+    _start_mouse_x = 0
+    _initial_offset = 0
+    _undo_pushed = False
+    _confirmed = False
 
     @classmethod
     def poll(cls, context):
@@ -3747,12 +3751,53 @@ class HAIRPIPE_OT_widget_bridge_offset(bpy.types.Operator):
         self.point_index = target_index
         settings.active_point_index = target_index
         select_curve_point_by_index(obj, target_index)
-        self.offset = int(getattr(settings.point_settings[target_index], 'bridge_offset', 0))
-        return self.execute(context)
+        self._initial_offset = int(getattr(settings.point_settings[target_index], 'bridge_offset', 0))
+        self.offset = self._initial_offset
+        self._start_mouse_x = int(getattr(event, 'mouse_region_x', 0))
+        push_widget_undo(context, "上下桥接错位")
+        self._undo_pushed = True
+        self._confirmed = False
+        context.window_manager.modal_handler_add(self)
+        context.area.header_text_set(
+            f"上下桥接错位：左右移动调整 {self.offset:+d} | 左键确认 | 右键取消"
+        )
+        return {'RUNNING_MODAL'}
 
-    def draw(self, context):
-        self.layout.prop(self, "offset", text="偏移数量")
-        self.layout.label(text="正值向后偏移，负值向前偏移")
+    def update_modal_offset(self, context, mouse_x):
+        delta = int(round((mouse_x - self._start_mouse_x) / 12.0))
+        self.offset = max(-64, min(64, self._initial_offset + delta))
+        obj, settings, _ps, _wd = get_widget_edit_context(context)
+        if settings is None or not (0 <= self.point_index < len(settings.point_settings)):
+            return
+        settings.point_settings[self.point_index].bridge_offset = self.offset
+        clear_pipe_mesh_cache()
+        refresh_pipe_during_widget_edit(context, min_interval=0.0)
+        redraw_view3d(context, refresh_pipe=False)
+
+    def modal(self, context, event):
+        if event.type == 'MOUSEMOVE':
+            self.update_modal_offset(context, int(getattr(event, 'mouse_region_x', self._start_mouse_x)))
+            context.area.header_text_set(
+                f"上下桥接错位：{self.offset:+d} | 左键确认 | 右键取消"
+            )
+            return {'RUNNING_MODAL'}
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            self._confirmed = True
+            context.area.header_text_set(None)
+            redraw_view3d(context, refresh_pipe=False)
+            return {'FINISHED'}
+        if event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
+            obj, settings, _ps, _wd = get_widget_edit_context(context)
+            if settings is not None and 0 <= self.point_index < len(settings.point_settings):
+                settings.point_settings[self.point_index].bridge_offset = self._initial_offset
+                clear_pipe_mesh_cache()
+                refresh_pipe_during_widget_edit(context, min_interval=0.0)
+            if self._undo_pushed:
+                pop_widget_undo(context)
+            context.area.header_text_set(None)
+            redraw_view3d(context, refresh_pipe=False)
+            return {'CANCELLED'}
+        return {'RUNNING_MODAL'}
 
     def execute(self, context):
         obj, settings, ps, wd = get_widget_edit_context(context)
