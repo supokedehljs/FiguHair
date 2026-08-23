@@ -105,6 +105,7 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
 
         box = plugin_controls.box()
         box.label(text="默认设置", icon='MESH_CIRCLE')
+        box.prop(settings, "shared_hair_material", text="材质选择", icon='MATERIAL')
         box.prop(settings, "roll_mode", text="滚转算法")
         box.prop(settings, "smooth_shading", text="平滑着色")
         row = box.row(align=True)

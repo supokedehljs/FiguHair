@@ -15,6 +15,21 @@ def update_plugin_enabled(self, context):
         pass
 
 
+def apply_shared_hair_material(material):
+    for obj in bpy.data.objects:
+        if obj.type != 'MESH' or not (
+            obj.get("hair_pipe_source_curve") or obj.get("hair_pipe_tail_source_curve")
+        ):
+            continue
+        obj.data.materials.clear()
+        if material is not None:
+            obj.data.materials.append(material)
+
+
+def update_shared_hair_material(self, context):
+    apply_shared_hair_material(self.shared_hair_material)
+
+
 def update_subdivision_modifier_settings(self, context):
     owner = getattr(self, "id_data", None)
     if owner is None or getattr(owner, "type", None) != 'CURVE':
@@ -126,6 +141,12 @@ class HairPipeSettings(PropertyGroup):
         description="开启时锁定头发网格并使用 FiguHair 编辑；关闭时允许直接选择头发网格",
         default=True,
         update=update_plugin_enabled,
+    )
+    shared_hair_material: PointerProperty(
+        name="材质选择",
+        description="为所有 FiguHair 头发网格使用同一个材质",
+        type=bpy.types.Material,
+        update=update_shared_hair_material,
     )
     default_radius: FloatProperty(
         name="Default Radius",
