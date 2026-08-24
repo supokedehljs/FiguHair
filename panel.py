@@ -85,6 +85,9 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         group_box = layout.box()
         group_box.label(text="头发分组", icon='OUTLINER_COLLECTION')
         group_box.prop(context.scene, "hair_pipe_group_color_mode", text="分组颜色显示", toggle=True)
+        group_box.operator("hair_pipe.create_group_from_selected", text="选中头发添加到新组", icon='ADD')
+        group_box.operator("hair_pipe.move_selected_to_last_group", text="转移到最后选组", icon='FORWARD')
+        group_box.operator("hair_pipe.randomize_selected_group_color", text="随机当前组颜色", icon='FILE_REFRESH')
         group_box.operator("hair_pipe.sync_parent_collections", text="爸爸去哪了", icon='FILE_PARENT')
 
         if curve_obj is None:

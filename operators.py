@@ -3,6 +3,8 @@ import gpu
 import math
 import json
 import time
+import random
+import colorsys
 from gpu_extras.batch import batch_for_shader
 from pathlib import Path
 from mathutils import Matrix, Vector
@@ -5195,8 +5197,23 @@ class HAIRPIPE_OT_merge_hair_for_export(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def collection_group_color(collection):
+    stored = collection.get("hair_pipe_group_color")
+    if stored is not None and len(stored) >= 3:
+        return (float(stored[0]), float(stored[1]), float(stored[2]), 1.0)
+    # Generate once and save on the Collection. Refreshing the mode never
+    # changes existing group colors.
+    hue = random.random()
+    saturation = random.uniform(0.58, 0.82)
+    value = random.uniform(0.78, 1.0)
+    red, green, blue = colorsys.hsv_to_rgb(hue, saturation, value)
+    color = (red, green, blue, 1.0)
+    collection["hair_pipe_group_color"] = color
+    return color
+
+
 def apply_group_color_mode(scene, enabled):
-    """Use temporary viewport materials so only FiguHair meshes change color."""
+    """Color every mesh by its first Collection while the mode is enabled."""
     palette = (
         (0.95, 0.25, 0.25, 1.0), (0.25, 0.55, 1.0, 1.0),
         (0.25, 0.85, 0.45, 1.0), (1.0, 0.65, 0.15, 1.0),
@@ -5204,16 +5221,10 @@ def apply_group_color_mode(scene, enabled):
         (1.0, 0.35, 0.7, 1.0), (0.65, 0.8, 0.2, 1.0),
     )
     group_indices = {}
-    temp_materials = []
     for obj in bpy.data.objects:
-        if not _is_hair_pipe_mesh_obj(obj):
+        if obj.type != 'MESH':
             continue
-        source_curve = get_pipe_source_curve(obj) or get_tail_source_curve(obj)
-        collection = (
-            source_curve.users_collection[0]
-            if source_curve is not None and source_curve.users_collection
-            else (obj.users_collection[0] if obj.users_collection else scene.collection)
-        )
+        collection = obj.users_collection[0] if obj.users_collection else scene.collection
         group_indices.setdefault(collection.name, len(group_indices))
         state_key = "hair_pipe_group_color_materials"
         if enabled:
@@ -5227,7 +5238,7 @@ def apply_group_color_mode(scene, enabled):
             if material is None:
                 material = bpy.data.materials.new(material_name)
                 material["hair_pipe_group_color_temp"] = True
-            material.diffuse_color = palette[group_indices[collection.name] % len(palette)]
+            material.diffuse_color = collection_group_color(collection)
             obj.data.materials.clear()
             obj.data.materials.append(material)
         elif state_key in obj:
@@ -5271,6 +5282,115 @@ def apply_group_color_mode(scene, enabled):
                 bpy.data.materials.remove(material)
 
 
+def selected_hair_curves(context):
+    curves = []
+    for obj in context.selected_objects:
+        curve = obj if obj.type == 'CURVE' and obj.get("hair_pipe_base_name") else (
+            get_pipe_source_curve(obj) or get_tail_source_curve(obj)
+        )
+        if curve is not None and curve not in curves:
+            curves.append(curve)
+    return curves
+
+
+def selected_group_objects(context):
+    return [obj for obj in context.selected_objects if obj.type not in {'CAMERA', 'LIGHT'}]
+
+
+def object_collection(obj, scene):
+    return obj.users_collection[0] if obj.users_collection else scene.collection
+
+
+class HAIRPIPE_OT_create_group_from_selected(bpy.types.Operator):
+    bl_idname = "hair_pipe.create_group_from_selected"
+    bl_label = "选中头发添加到新组"
+    bl_description = "为选中的头发创建一个新的 Collection 并放入其中"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        objects = selected_group_objects(context)
+        if not objects:
+            self.report({'WARNING'}, "请先选中至少一个物体或头发")
+            return {'CANCELLED'}
+        index = 1
+        while bpy.data.collections.get(f"头发组 {index}") is not None:
+            index += 1
+        collection = bpy.data.collections.new(f"头发组 {index}")
+        context.scene.collection.children.link(collection)
+        for obj in objects:
+            members = hair_family_objects(obj) if obj.type == 'CURVE' and obj.get("hair_pipe_base_name") else (obj,)
+            for member in members:
+                if collection not in member.users_collection:
+                    collection.objects.link(member)
+                for old_collection in list(member.users_collection):
+                    if old_collection != collection:
+                        old_collection.objects.unlink(member)
+        self.report({'INFO'}, f"已创建 {collection.name}，加入 {len(objects)} 个对象")
+        if context.scene.hair_pipe_group_color_mode:
+            apply_group_color_mode(context.scene, True)
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_move_selected_to_last_group(bpy.types.Operator):
+    bl_idname = "hair_pipe.move_selected_to_last_group"
+    bl_label = "转移到最后选组"
+    bl_description = "将选中的头发移动到最后选中头发所在的 Collection"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        objects = selected_group_objects(context)
+        if len(objects) < 2:
+            self.report({'WARNING'}, "请至少选中两个对象，并让最后选中的对象作为目标组")
+            return {'CANCELLED'}
+        active = context.active_object if context.active_object in objects else objects[-1]
+        target = object_collection(active, context.scene)
+        moved = 0
+        for obj in objects:
+            if obj == active:
+                continue
+            members = hair_family_objects(obj) if obj.type == 'CURVE' and obj.get("hair_pipe_base_name") else (obj,)
+            for member in members:
+                if target not in member.users_collection:
+                    target.objects.link(member)
+                for old_collection in list(member.users_collection):
+                    if old_collection != target:
+                        old_collection.objects.unlink(member)
+            moved += 1
+        self.report({'INFO'}, f"已将 {moved} 个对象转移到 {target.name}")
+        if context.scene.hair_pipe_group_color_mode:
+            apply_group_color_mode(context.scene, True)
+        return {'FINISHED'}
+
+
+def hair_family_objects(curve):
+    return tuple(obj for obj in (
+        curve, get_pipe_object_for_curve(curve), get_tail_object_for_curve(curve)
+    ) if obj is not None)
+
+
+
+class HAIRPIPE_OT_randomize_selected_group_color(bpy.types.Operator):
+    bl_idname = "hair_pipe.randomize_selected_group_color"
+    bl_label = "随机当前组颜色"
+    bl_description = "随机更换当前选中对象所在 Collection 的颜色"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        objects = selected_group_objects(context)
+        if not objects:
+            self.report({'WARNING'}, "请先选中一个物体或头发")
+            return {'CANCELLED'}
+        collection = object_collection(objects[-1], context.scene)
+        hue = random.random()
+        red, green, blue = colorsys.hsv_to_rgb(hue, 0.7, 0.95)
+        collection["hair_pipe_group_color"] = (red, green, blue, 1.0)
+        if context.scene.hair_pipe_group_color_mode:
+            apply_group_color_mode(context.scene, True)
+        self.report({'INFO'}, f"已更新 {collection.name} 的颜色")
+        return {'FINISHED'}
+
+
+
 class HAIRPIPE_OT_sync_parent_collections(bpy.types.Operator):
     bl_idname = "hair_pipe.sync_parent_collections"
     bl_label = "爸爸去哪了"
@@ -5293,6 +5413,8 @@ class HAIRPIPE_OT_sync_parent_collections(bpy.types.Operator):
                         collection.objects.unlink(mesh)
                 moved += 1
         self.report({'INFO'}, f"已整理 {moved} 个头发网格")
+        if context.scene.hair_pipe_group_color_mode:
+            apply_group_color_mode(context.scene, True)
         return {'FINISHED'}
 
 
@@ -5835,6 +5957,9 @@ class HAIRPIPE_WST_draw_hair_curve(bpy.types.WorkSpaceTool):
 
 
 classes = (
+    HAIRPIPE_OT_create_group_from_selected,
+    HAIRPIPE_OT_move_selected_to_last_group,
+    HAIRPIPE_OT_randomize_selected_group_color,
     HAIRPIPE_OT_sync_parent_collections,
     HAIRPIPE_OT_cross_section_spread,
     HAIRPIPE_OT_draw_hair_curve,

@@ -1,6 +1,6 @@
 import json
-
 import bpy
+import blf
 import gpu
 from gpu_extras.batch import batch_for_shader
 from bpy.props import EnumProperty
@@ -91,6 +91,14 @@ def restore_ordinary_object_materials(obj):
         obj.data.materials.append(bpy.data.materials.get(name) if name else None)
 
 
+def current_group_material(obj):
+    scene = getattr(bpy.context, "scene", None)
+    if scene is None or obj.type != 'MESH' or not scene.hair_pipe_group_color_mode:
+        return None
+    collection = obj.users_collection[0] if obj.users_collection else scene.collection
+    return bpy.data.materials.get("FiguHair Group Color " + collection.name)
+
+
 def set_preview_style_object(obj, hidden):
     if obj is None or obj.type in {'CAMERA', 'LIGHT'}:
         return
@@ -108,7 +116,12 @@ def set_preview_style_object(obj, hidden):
             obj.data.materials.append(display_material_for_object(obj))
     else:
         obj.color = (obj.color[0], obj.color[1], obj.color[2], 1.0)
-        restore_ordinary_object_materials(obj)
+        material = current_group_material(obj)
+        if obj.type == 'MESH' and material is not None:
+            obj.data.materials.clear()
+            obj.data.materials.append(material)
+        else:
+            restore_ordinary_object_materials(obj)
 
 
 def set_preview_style(curve, hidden):
@@ -292,6 +305,7 @@ def enter_display_mode(context):
     # preview so entering the mode cannot overwrite pre-existing hidden hairs.
     if not scene.hair_pipe_group_color_mode:
         scene.hair_pipe_group_color_mode = True
+    apply_group_color_mode(scene, True)
     for curve in iter_hair_curves():
         set_preview_style(curve, hidden_states.get(curve.name, False))
     for obj_name, saved in ordinary_states.items():
@@ -349,13 +363,19 @@ def exit_display_mode(context):
         obj.color = tuple(saved.get("color", tuple(obj.color)))
         if hasattr(obj, "show_transparent"):
             obj.show_transparent = bool(saved.get("show_transparent", False))
-        obj.hide_viewport = False
+        if obj.type == 'MESH' and "materials" in saved:
+            obj.data.materials.clear()
+            for name in saved["materials"]:
+                obj.data.materials.append(bpy.data.materials.get(name) if name else None)
+        obj.hide_viewport = bool(saved.get("hide_viewport", False))
         obj.hide_set(final_hidden)
         if "hair_pipe_display_hidden" in obj:
             del obj["hair_pipe_display_hidden"]
 
     scene["hair_pipe_display_mode_active"] = False
-    if not bool(state.get("group_color", False)) and scene.hair_pipe_group_color_mode:
+    # V mode always owns the group-color preview switch. Leaving V restores
+    # normal materials and leaves the sidebar toggle visibly disabled.
+    if scene.hair_pipe_group_color_mode:
         scene.hair_pipe_group_color_mode = False
     if _STATE_KEY in scene:
         del scene[_STATE_KEY]
@@ -373,6 +393,36 @@ def exit_display_mode(context):
     active = bpy.data.objects.get(state.get("active", ""))
     if active is not None and context.view_layer.objects.get(active.name) is not None:
         context.view_layer.objects.active = active
+
+
+def draw_display_help():
+    context = bpy.context
+    scene = getattr(context, "scene", None)
+    if scene is None or not scene.get("hair_pipe_display_mode_active", False):
+        return
+    region = getattr(context, "region", None)
+    if region is None:
+        return
+    font_id = 0
+    blf.size(font_id, 20)
+    blf.color(font_id, 0.88, 0.88, 0.92, 0.95)
+    lines = (
+        "显示编辑模式",
+        "T  隐藏鼠标下对象",
+        "F  显示鼠标下对象",
+        "R  切换头发组",
+        "H  隐藏全部",
+        "Alt+H  显示全部",
+        "V  退出模式",
+    )
+    x_margin = 90.0
+    y_margin = 85.0
+    y = y_margin
+    for line in reversed(lines):
+        width, height = blf.dimensions(font_id, line)
+        blf.position(font_id, x_margin, y, 0)
+        blf.draw(font_id, line)
+        y += height + 4.0
 
 
 def draw_mode_border():
@@ -414,6 +464,7 @@ def ensure_border_handler():
         _border_draw_handle = bpy.types.SpaceView3D.draw_handler_add(
             draw_mode_border, (), 'WINDOW', 'POST_PIXEL'
         )
+        bpy.types.SpaceView3D.draw_handler_add(draw_display_help, (), 'WINDOW', 'POST_PIXEL')
 
 
 def remove_border_handler():
