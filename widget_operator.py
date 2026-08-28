@@ -1111,10 +1111,42 @@ def draw_transition_point_markers(context, obj, settings):
     gpu.state.blend_set('NONE')
 
 
-def draw_active_pipe_cross_section_ring(context, ps):
+def get_selected_curve_highlight_targets(context, active_obj):
+    targets = []
+    for selected_obj in context.selected_objects:
+        if selected_obj.type != 'CURVE' or not hasattr(selected_obj, 'hair_pipe_settings'):
+            continue
+        settings = selected_obj.hair_pipe_settings
+        if not settings.plugin_enabled or not is_curve_edit_mode(selected_obj):
+            continue
+        point_idx = get_curve_highlight_point_index(selected_obj)
+        if point_idx >= 0:
+            targets.append((selected_obj, point_idx))
+    if active_obj is not None and active_obj.type == 'CURVE' and all(
+        target[0] != active_obj for target in targets
+    ):
+        point_idx = get_curve_highlight_point_index(active_obj)
+        if point_idx >= 0:
+            targets.insert(0, (active_obj, point_idx))
+    return targets
+
+
+def get_curve_highlight_point_index(obj):
+    settings = getattr(obj, 'hair_pipe_settings', None)
+    if settings is None or not settings.point_settings:
+        return -1
+    selected = get_selected_curve_point_indices(obj) if is_curve_edit_mode(obj) else []
+    if len(selected) == 1 and 0 <= selected[0] < len(settings.point_settings):
+        obj['hair_pipe_last_highlight_point'] = int(selected[0])
+        return selected[0]
+    stored = int(obj.get('hair_pipe_last_highlight_point', settings.active_point_index))
+    return max(0, min(stored, len(settings.point_settings) - 1))
+
+
+def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=None):
     region = context.region
     region_data = context.region_data
-    obj = context.active_object
+    obj = curve_obj or context.active_object
     if region is None or region_data is None or obj is None or obj.type != 'CURVE':
         return
     if len(ps.cross_section_verts) < 3:
@@ -1131,10 +1163,8 @@ def draw_active_pipe_cross_section_ring(context, ps):
     if segments < 3 or len(mesh_verts) < segments:
         return
 
-    selected_curve_indices = get_selected_curve_point_indices(obj) if is_curve_edit_mode(obj) else []
-    active_idx = obj.hair_pipe_settings.active_point_index
-    if active_idx not in selected_curve_indices:
-        selected_curve_indices.append(active_idx)
+    active_idx = point_idx if point_idx is not None else get_curve_highlight_point_index(obj)
+    selected_curve_indices = [active_idx] if active_idx >= 0 else []
 
     control_positions = []
     for spline_data in get_curve_points_data(obj):
@@ -1611,7 +1641,12 @@ def draw_widget_callback():
         return
 
     draw_curve_start_marker(context, obj)
-    draw_active_pipe_cross_section_ring(context, ps)
+    for section_obj, highlight_idx in get_selected_curve_highlight_targets(context, obj):
+        section_settings = section_obj.hair_pipe_settings
+        if 0 <= highlight_idx < len(section_settings.point_settings):
+            draw_active_pipe_cross_section_ring(
+                context, section_settings.point_settings[highlight_idx], section_obj, highlight_idx,
+            )
 
     cx = wd.widget_center_x
     cy = wd.widget_center_y
