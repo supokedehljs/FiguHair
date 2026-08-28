@@ -3082,6 +3082,21 @@ def configure_pipe_object(pipe_obj, curve_obj):
     pipe_obj.select_set(False)
 
 
+def ensure_selected_curve_visible(curve_obj):
+    if curve_obj is None or curve_obj.type != 'CURVE':
+        return
+    # The generated mesh redirects selection to this curve. Keep the source
+    # curve visible so Blender can draw its normal orange selection highlight.
+    if curve_obj.get("hair_pipe_widget_hide_curve_overlay", False):
+        return
+    curve_obj.hide_viewport = False
+    curve_obj.hide_set(False)
+    curve_obj.show_wire = True
+    curve_obj.show_in_front = False
+    if hasattr(curve_obj.data, "show_handles") and is_curve_edit_mode(curve_obj):
+        curve_obj.data.show_handles = True
+
+
 def redirect_pipe_selection(context, pipe_obj=None):
     pipe_obj = pipe_obj or context.active_object
     active_curve = get_pipe_source_curve(pipe_obj)
@@ -3120,6 +3135,7 @@ def redirect_pipe_selection(context, pipe_obj=None):
     for curve in selected_curves:
         curve.hide_set(False)
         curve.select_set(True)
+        ensure_selected_curve_visible(curve)
     context.view_layer.objects.active = active_curve
     return True
 

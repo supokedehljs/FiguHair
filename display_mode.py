@@ -435,6 +435,14 @@ def draw_mode_border():
     if scene is not None and scene.get("hair_pipe_display_mode_active", False):
         color = (0.62, 0.18, 1.0, 1.0)
     elif wd is not None and wd.is_active:
+        try:
+            if not (
+                wd.bound_area_pointer == str(context.area.as_pointer())
+                and wd.bound_region_pointer == str(region.as_pointer())
+            ):
+                return
+        except (AttributeError, ReferenceError):
+            return
         color = (1.0, 0.32, 0.03, 1.0)
     else:
         return

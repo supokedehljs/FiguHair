@@ -147,6 +147,8 @@ class HairPipeWidgetSettings(PropertyGroup):
     lasso_points: bpy.props.StringProperty(default="")
     region_offset_x: IntProperty(default=0)
     region_offset_y: IntProperty(default=0)
+    bound_area_pointer: bpy.props.StringProperty(default="")
+    bound_region_pointer: bpy.props.StringProperty(default="")
     hold_key_mode: BoolProperty(default=False)
     add_button_x0: FloatProperty(default=0.0)
     add_button_y0: FloatProperty(default=0.0)
@@ -1541,11 +1543,32 @@ def fit_widget_scale_to_cross_section(wd, verts, half, alignment_angle, flip_h):
     wd.widget_scale_factor = max(8.0, min(50000.0, half * 0.76 / max_extent))
 
 
-def draw_widget_callback(): 
+def context_matches_widget_view(context, wd):
+    area = getattr(context, 'area', None)
+    region = getattr(context, 'region', None)
+    if area is None or region is None or area.type != 'VIEW_3D' or region.type != 'WINDOW':
+        return False
+    try:
+        return (
+            wd.bound_area_pointer == str(area.as_pointer())
+            and wd.bound_region_pointer == str(region.as_pointer())
+        )
+    except ReferenceError:
+        return False
+
+
+def draw_widget_callback():
     """Draw the cross-section widget with thumbnail strip at top."""
     try:
         context = bpy.context
     except Exception:
+        return
+
+    wm = context.window_manager
+    if not hasattr(wm, 'hair_pipe_widget'):
+        return
+    wd = wm.hair_pipe_widget
+    if not wd.is_active or not context_matches_widget_view(context, wd):
         return
 
     obj = context.active_object
@@ -1562,12 +1585,6 @@ def draw_widget_callback():
     draw_transition_point_markers(context, obj, settings)
     draw_uncontrolled_roll_markers(context, obj)
 
-    wm = context.window_manager
-    if not hasattr(wm, 'hair_pipe_widget'):
-        return
-    wd = wm.hair_pipe_widget
-    if not wd.is_active:
-        return
     if settings.active_point_index >= len(settings.point_settings):
         return
 
@@ -1716,6 +1733,14 @@ def remove_draw_handler():
 
 
 def get_view3d_window_region(context):
+    current_area = getattr(context, 'area', None)
+    current_region = getattr(context, 'region', None)
+    if current_area is not None and current_area.type == 'VIEW_3D':
+        if current_region is not None and current_region.type == 'WINDOW':
+            return current_area, current_region
+        for region in current_area.regions:
+            if region.type == 'WINDOW':
+                return current_area, region
     for area in context.screen.areas:
         if area.type == 'VIEW_3D':
             for region in area.regions:
@@ -1889,6 +1914,8 @@ def setup_widget(context):
 
     wd.region_offset_x = region.x
     wd.region_offset_y = region.y
+    wd.bound_area_pointer = str(area.as_pointer())
+    wd.bound_region_pointer = str(region.as_pointer())
     settings = obj.hair_pipe_settings
     addon_entry = context.preferences.addons.get("hair_curve_pipe")
     widget_layout = addon_entry.preferences if addon_entry is not None else settings
