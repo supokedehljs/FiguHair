@@ -7,7 +7,7 @@ import random
 import colorsys
 from gpu_extras.batch import batch_for_shader
 from pathlib import Path
-from mathutils import Matrix, Vector
+from mathutils import Matrix, Vector, Quaternion
 from bpy.props import IntProperty, FloatProperty, EnumProperty, BoolProperty, StringProperty
 from bpy_extras import view3d_utils
 
@@ -554,6 +554,46 @@ def get_effective_point_setting(point_settings, idx, settings):
     return point_settings[idx]
 
 
+def _normalized_quat(value):
+    """Coerce a property quaternion into a valid normalized mathutils Quaternion."""
+    try:
+        q = Quaternion(tuple(value))
+    except (TypeError, ValueError):
+        return Quaternion()
+    if q.magnitude < 1e-8:
+        return Quaternion()
+    return q.normalized()
+
+
+def get_effective_section_tilt(point_settings, idx, settings):
+    """Per-control-point 3D tilt, resolving transition points by slerp."""
+    if idx < 0 or idx >= len(point_settings):
+        return Quaternion()
+    prev_idx, next_idx = get_transition_source_indices(point_settings, idx)
+    if prev_idx is None or next_idx is None or prev_idx == next_idx:
+        return _normalized_quat(point_settings[idx].section_tilt)
+    prev_q = _normalized_quat(point_settings[prev_idx].section_tilt)
+    next_q = _normalized_quat(point_settings[next_idx].section_tilt)
+    t = (idx - prev_idx) / max(1, next_idx - prev_idx)
+    return prev_q.slerp(next_q, t)
+
+
+def _apply_section_tilt(normal, binormal, tangent, tilt_quat):
+    """Rotate the cross-section frame by the local-space tilt quaternion.
+
+    The tilt is stored in the frame's local space: offsets live in the
+    (normal, binormal) plane. Applying the tilt keeps the section anchored at
+    its curve point but lets the plane tilt arbitrarily in 3D. Only the two
+    plane axes need to be transformed.
+    """
+    R = tilt_quat.to_matrix().to_3x3()
+    c0 = R.col[0]
+    c1 = R.col[1]
+    new_binormal = binormal * c0.x + normal * c0.y + tangent * c0.z
+    new_normal = binormal * c1.x + normal * c1.y + tangent * c1.z
+    return new_normal.normalized(), new_binormal.normalized()
+
+
 def get_cross_section_sample(point_setting, point=None, vert_idx=0):
     verts = point_setting.cross_section_verts
     if len(verts) == 0:
@@ -1062,7 +1102,7 @@ def _get_start_roll_normal(curve_obj, start_tangent):
 
 def build_minimal_twist_rings(
     ring_specs, is_cyclic=False, start_normal=None, curve_obj=None, spline_index=0,
-    roll_mode='START_FIXED',
+    roll_mode='START_FIXED', ring_tilts=None,
 ):
     if not ring_specs:
         return []
@@ -1078,7 +1118,7 @@ def build_minimal_twist_rings(
     if curve_obj is not None:
         _write_roll_diagnostic(curve_obj, spline_index, ring_specs, frames, is_cyclic)
 
-    for (center, _raw_tangent, offsets), (_tangent, normal, binormal) in zip(ring_specs, frames):
+    for ring_idx, ((center, _raw_tangent, offsets), (_tangent, normal, binormal)) in enumerate(zip(ring_specs, frames)):
         tangent = _tangent
 
 
@@ -1087,6 +1127,10 @@ def build_minimal_twist_rings(
         else:
             normal.normalize()
             binormal = tangent.cross(normal).normalized()
+        if ring_tilts is not None and ring_idx < len(ring_tilts):
+            tilt = _normalized_quat(ring_tilts[ring_idx])
+            if abs(tilt.angle) > 1e-6:
+                normal, binormal = _apply_section_tilt(normal, binormal, tangent, tilt)
         if offsets:
             rings.append(make_ring_from_frame(center, normal, binormal, offsets))
         else:
@@ -1640,6 +1684,11 @@ def generate_pipe_mesh(curve_obj, settings):
             continue
 
         ring_specs = []
+        ring_tilts = []
+        eff_tilts = [
+            get_effective_section_tilt(point_settings, global_point_idx + i, settings)
+            for i in range(num_points)
+        ]
         if spline_data['type'] == 'BEZIER':
             seg_count = num_points if is_cyclic else num_points - 1
 
@@ -1701,6 +1750,7 @@ def generate_pipe_mesh(curve_obj, settings):
                         settings.transition_mode, settings.transition_strength
                     )
                     ring_specs.append((pos, tan, interp))
+                    ring_tilts.append(eff_tilts[idx0].slerp(eff_tilts[idx1], shape_t))
         elif spline_data['type'] == 'NURBS':
             seg_count = num_points if is_cyclic else num_points - 1
             seg_lengths = []
@@ -1737,6 +1787,7 @@ def generate_pipe_mesh(curve_obj, settings):
                         settings.transition_mode, settings.transition_strength,
                     )
                     ring_specs.append((pos, tan, interp))
+                    ring_tilts.append(eff_tilts[idx0].slerp(eff_tilts[idx1], t))
         elif spline_data['type'] == 'POLY':
             seg_count = num_points if is_cyclic else num_points - 1
 
@@ -1772,6 +1823,7 @@ def generate_pipe_mesh(curve_obj, settings):
                         settings.transition_mode, settings.transition_strength
                     )
                     ring_specs.append((pos, tan, interp))
+                    ring_tilts.append(eff_tilts[idx0].slerp(eff_tilts[idx1], t))
         if settings.strong_smoothing:
             ring_specs = smooth_ring_offsets(
                 ring_specs,
@@ -1785,7 +1837,7 @@ def generate_pipe_mesh(curve_obj, settings):
             start_normal = _get_start_roll_normal(curve_obj, safe_normalized(ring_specs[0][1]))
         rings = build_minimal_twist_rings(
             ring_specs, is_cyclic, start_normal, curve_obj, spline_index,
-            settings.roll_mode,
+            settings.roll_mode, ring_tilts,
         )
         global_point_idx += num_points
         if not rings:
@@ -1862,6 +1914,7 @@ def _point_setting_to_data(point_setting):
     return {
         "scale": point_setting.scale,
         "rotation": point_setting.rotation,
+        "section_tilt": list(point_setting.section_tilt),
         "use_transition": bool(getattr(point_setting, "use_transition", False)),
         "active_vert_index": point_setting.active_vert_index,
         "verts": [
@@ -1887,6 +1940,7 @@ def _default_point_setting_data(settings):
     return {
         "scale": 1.0,
         "rotation": 0.0,
+        "section_tilt": [1.0, 0.0, 0.0, 0.0],
         "use_transition": False,
         "active_vert_index": 0,
         "verts": verts,
@@ -1919,6 +1973,11 @@ def _interpolate_point_setting_data(left_data, right_data, t):
     return {
         "scale": left_data.get("scale", 1.0) * (1.0 - t) + right_data.get("scale", 1.0) * t,
         "rotation": lerp_angle(left_data.get("rotation", 0.0), right_data.get("rotation", 0.0), t),
+        "section_tilt": tuple(
+            _normalized_quat(left_data.get("section_tilt")).slerp(
+                _normalized_quat(right_data.get("section_tilt")), t
+            )
+        ),
         "use_transition": False,
         "active_vert_index": 0,
         "verts": verts,
@@ -1931,6 +1990,7 @@ def _clone_point_setting_data(data):
     return {
         "scale": data.get("scale", 1.0),
         "rotation": data.get("rotation", 0.0),
+        "section_tilt": list(data.get("section_tilt", [1.0, 0.0, 0.0, 0.0])),
         "use_transition": bool(data.get("use_transition", False)),
         "active_vert_index": data.get("active_vert_index", 0),
         "verts": [dict(vert) for vert in data.get("verts", [])],
@@ -1944,6 +2004,7 @@ def _apply_point_setting_data(point_setting, data, settings):
     point_setting.cross_section_verts.clear()
     point_setting.scale = data.get("scale", 1.0)
     point_setting.rotation = data.get("rotation", 0.0)
+    point_setting.section_tilt = tuple(_normalized_quat(data.get("section_tilt")))
     point_setting.use_transition = bool(data.get("use_transition", False))
     for vert_data in verts:
         vert = point_setting.cross_section_verts.add()
@@ -3091,8 +3152,12 @@ def ensure_selected_curve_visible(curve_obj):
         return
     curve_obj.hide_viewport = False
     curve_obj.hide_set(False)
+    # Keep the source spline visible above the generated tube. The spline sits
+    # inside the preview mesh, so depth testing otherwise hides Blender's
+    # orange selection highlight even though the curve is selected.
+    curve_obj.display_type = 'WIRE'
     curve_obj.show_wire = True
-    curve_obj.show_in_front = False
+    curve_obj.show_in_front = True
     if hasattr(curve_obj.data, "show_handles") and is_curve_edit_mode(curve_obj):
         curve_obj.data.show_handles = True
 
@@ -3238,6 +3303,10 @@ def apply_edge_flow_to_target_indices(curve_obj, settings, target_indices, mode,
         ps.scale = ps.scale * (1.0 - blend) + (start_ps.scale * (1.0 - t) + end_ps.scale * t) * blend
         target_rot = lerp_angle(start_ps.rotation, end_ps.rotation, t)
         ps.rotation = ps.rotation * (1.0 - blend) + target_rot * blend
+        target_tilt = _normalized_quat(start_ps.section_tilt).slerp(
+            _normalized_quat(end_ps.section_tilt), t
+        )
+        ps.section_tilt = tuple(_normalized_quat(ps.section_tilt).slerp(target_tilt, blend))
 
         start_curve_point = get_curve_point_by_global_index(curve_obj, start_idx)
         end_curve_point = get_curve_point_by_global_index(curve_obj, end_idx)
@@ -3693,6 +3762,7 @@ def make_hair_curve_from_tube_mesh(context, mesh_obj):
             ps.cross_section_verts.clear()
             ps.rotation = 0.0
             ps.scale = 1.0
+            ps.section_tilt = (1.0, 0.0, 0.0, 0.0)
             for offset_x, offset_y in raw_offsets:
                 v = ps.cross_section_verts.add()
                 v.offset_x = offset_x
@@ -3985,6 +4055,7 @@ class HAIRPIPE_OT_reset_cross_section(bpy.types.Operator):
         init_cross_section_circle(ps, settings.default_radius, settings.default_segments)
         ps.scale = 1.0
         ps.rotation = 0.0
+        ps.section_tilt = (1.0, 0.0, 0.0, 0.0)
         return {'FINISHED'}
 
 
@@ -4005,6 +4076,7 @@ class HAIRPIPE_OT_reset_all_cross_sections(bpy.types.Operator):
             init_cross_section_circle(ps, settings.default_radius, settings.default_segments)
             ps.scale = 1.0
             ps.rotation = 0.0
+            ps.section_tilt = (1.0, 0.0, 0.0, 0.0)
         return {'FINISHED'}
 
 
@@ -4113,6 +4185,7 @@ def copy_point_cross_section(src, dst, rotation_offset=0.0):
     dst.active_vert_index = min(src.active_vert_index, max(0, len(dst.cross_section_verts) - 1))
     dst.scale = src.scale
     dst.rotation = src.rotation
+    dst.section_tilt = tuple(getattr(src, 'section_tilt', (1.0, 0.0, 0.0, 0.0)))
 
 
 _HAIRPIPE_CROSS_SECTION_CLIPBOARD = None
@@ -4148,6 +4221,7 @@ class HAIRPIPE_OT_copy_cross_section(bpy.types.Operator):
             ],
             "scale": src.scale,
             "rotation": src.rotation,
+            "section_tilt": list(src.section_tilt),
             "active_vert_index": src.active_vert_index,
         }
         self.report({'INFO'}, "已复制横截面")
@@ -4211,6 +4285,7 @@ class HAIRPIPE_OT_paste_cross_section(bpy.types.Operator):
             src.cross_section_verts.append(v)
         src.scale = _HAIRPIPE_CROSS_SECTION_CLIPBOARD["scale"]
         src.rotation = _HAIRPIPE_CROSS_SECTION_CLIPBOARD["rotation"]
+        src.section_tilt = tuple(_HAIRPIPE_CROSS_SECTION_CLIPBOARD.get("section_tilt", (1.0, 0.0, 0.0, 0.0)))
         src.active_vert_index = _HAIRPIPE_CROSS_SECTION_CLIPBOARD["active_vert_index"]
 
         for idx in target_indices:
@@ -5054,6 +5129,7 @@ class HAIRPIPE_OT_duplicate_hair(bpy.types.Operator):
             dst_ps = dst_s.point_settings.add()
             dst_ps.scale             = src_ps.scale
             dst_ps.rotation          = src_ps.rotation
+            dst_ps.section_tilt      = tuple(src_ps.section_tilt)
             dst_ps.active_vert_index = src_ps.active_vert_index
             dst_ps.cross_section_verts.clear()
             for sv in src_ps.cross_section_verts:

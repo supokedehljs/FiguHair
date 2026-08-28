@@ -92,6 +92,14 @@ class HairPipePointSettings(PropertyGroup):
         min=0.001,
         max=100.0,
     )
+    section_tilt: FloatVectorProperty(
+        name="截面 3D 倾斜",
+        description="横截面相对曲线框架的 3D 姿态（四元数，横截面局部空间）。Ctrl+R 以当前视图方向为轴、以当前曲线点为轴心任意旋转",
+        default=(1.0, 0.0, 0.0, 0.0),
+        size=4,
+        subtype='QUATERNION',
+        precision=4,
+    )
     use_transition: BoolProperty(
         name="横截面过渡模式",
         description="This point is automatically interpolated from neighboring editable cross-sections and cannot be edited directly",

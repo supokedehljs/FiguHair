@@ -8,7 +8,7 @@ from gpu_extras.batch import batch_for_shader
 from bpy_extras import view3d_utils
 from bpy.props import IntProperty, FloatProperty, BoolProperty
 from bpy.types import PropertyGroup
-from mathutils import Vector
+from mathutils import Vector, Matrix, Quaternion
 from .operators import (
     generate_pipe_mesh,
     get_curve_points_data,
@@ -95,6 +95,7 @@ def get_cached_pipe_mesh(obj):
             len(point_setting.cross_section_verts),
             point_setting.scale,
             point_setting.rotation,
+            tuple(point_setting.section_tilt),
             getattr(point_setting, 'bridge_offset', 0),
         ))
         signature.extend(
@@ -263,6 +264,17 @@ class HairPipeWidgetSettings(PropertyGroup):
     corr_rot_drag_start_x: FloatProperty(default=0.0)
     corr_rot_drag_start_angle: FloatProperty(default=0.0)
     corr_rot_drag_start_val: FloatProperty(default=0.0)
+    tilt_button_x0: FloatProperty(default=0.0)
+    tilt_button_y0: FloatProperty(default=0.0)
+    tilt_button_x1: FloatProperty(default=0.0)
+    tilt_button_y1: FloatProperty(default=0.0)
+    view_rot_active: bpy.props.BoolProperty(default=False)
+    view_rot_start_x: FloatProperty(default=0.0)
+    view_rot_start_y: FloatProperty(default=0.0)
+    view_rot_start_angle: FloatProperty(default=0.0)
+    view_rot_pivot_x: FloatProperty(default=0.0)
+    view_rot_pivot_y: FloatProperty(default=0.0)
+    view_rot_start_quat: bpy.props.StringProperty(default="")
     undo_stack: bpy.props.StringProperty(default="[]")
 
 
@@ -1705,12 +1717,26 @@ def draw_widget_callback():
     wd.flip_button_x0 = wd.flip_button_y0 = wd.flip_button_x1 = wd.flip_button_y1 = 0.0
     wd.idx_button_x0 = wd.idx_button_y0 = wd.idx_button_x1 = wd.idx_button_y1 = 0.0
     wd.corr_rot_x0 = wd.corr_rot_y0 = wd.corr_rot_x1 = wd.corr_rot_y1 = 0.0
+    wd.tilt_button_x0 = wd.tilt_button_y0 = wd.tilt_button_x1 = wd.tilt_button_y1 = 0.0
+
+    tilt_btn_w = 140
+    tilt_btn_h = 30
+    tilt_btn_x0 = cx - tilt_btn_w * 0.5
+    tilt_btn_x1 = cx + tilt_btn_w * 0.5
+    tilt_btn_y1 = cy - half - 8.0
+    tilt_btn_y0 = tilt_btn_y1 - tilt_btn_h
+    wd.tilt_button_x0 = tilt_btn_x0
+    wd.tilt_button_y0 = tilt_btn_y0
+    wd.tilt_button_x1 = tilt_btn_x1
+    wd.tilt_button_y1 = tilt_btn_y1
+    draw_widget_button(shader, tilt_btn_x0, tilt_btn_y0, tilt_btn_x1, tilt_btn_y1, active=wd.view_rot_active)
+    draw_centered_label(0, "倾斜 (右键)", tilt_btn_x0, tilt_btn_y0, tilt_btn_x1, tilt_btn_y1)
 
     font_id = 0
     blf.size(font_id, 13)
     blf.color(font_id, 0.7, 0.8, 0.9, 0.7)
     blf.position(font_id, 18.0, 24.0, 0)
-    blf.draw(font_id, "滚轮切换截面 | 中键插入点 | 右键拖拽框选 | S 缩放点 | Alt+S 缩放显示区域")
+    blf.draw(font_id, "滚轮切换截面 | 中键插入点 | 右键拖拽框选 | S 缩放点 | Ctrl+T 滚转 | 倾斜按钮 / Ctrl+R 视图轴任意旋转")
 
     gpu.state.line_width_set(1.0)
     gpu.state.point_size_set(1.0)
@@ -2049,6 +2075,7 @@ def serialize_cross_section_undo_state(obj):
         state["points"].append({
             "scale": ps.scale,
             "rotation": ps.rotation,
+            "section_tilt": list(ps.section_tilt),
             "bridge_offset": getattr(ps, "bridge_offset", 0),
             "active_vert_index": ps.active_vert_index,
             "use_transition": getattr(ps, "use_transition", False),
@@ -2077,6 +2104,10 @@ def restore_cross_section_undo_state(obj, state):
             v.is_ghost = is_ghost
         ps.scale = point_state.get("scale", ps.scale)
         ps.rotation = point_state.get("rotation", ps.rotation)
+        try:
+            ps.section_tilt = tuple(Quaternion(tuple(point_state.get("section_tilt", (1.0, 0.0, 0.0, 0.0)))))
+        except (TypeError, ValueError):
+            pass
         ps.bridge_offset = point_state.get("bridge_offset", getattr(ps, "bridge_offset", 0))
         ps.active_vert_index = min(point_state.get("active_vert_index", ps.active_vert_index), max(0, len(verts) - 1))
         ps.use_transition = point_state.get("use_transition", getattr(ps, "use_transition", False))
@@ -2215,6 +2246,7 @@ def copy_cross_section_shape(source_ps, target_ps):
         target_vert.is_ghost = getattr(source_vert, 'is_ghost', False)
     target_ps.scale = source_ps.scale
     target_ps.rotation = source_ps.rotation
+    target_ps.section_tilt = tuple(source_ps.section_tilt)
     target_ps.active_vert_index = min(source_ps.active_vert_index, len(target_verts) - 1)
     update_ghost_vertices(target_ps)
 
@@ -2271,6 +2303,60 @@ def get_active_curve_point_world_position(context):
     if hasattr(point, 'co') and len(point.co) == 4:
         return obj.matrix_world @ Vector(point.co[:3])
     return obj.matrix_world @ point.co
+
+
+def get_active_curve_point_screen_position(context):
+    obj = context.active_object
+    if obj is None or obj.type != 'CURVE':
+        return None
+    _area, region = get_view3d_window_region(context)
+    if region is None:
+        return None
+    region_data = getattr(region, 'region_data', None)
+    if region_data is None:
+        return None
+    world_pos = get_active_curve_point_world_position(context)
+    if world_pos is None:
+        return None
+    screen_pos = view3d_utils.location_3d_to_region_2d(region, region_data, world_pos)
+    if screen_pos is None:
+        return None
+    return screen_pos.x, screen_pos.y
+
+
+def get_active_curve_point_rotation_basis(context):
+    """Return world frame (tangent, normal, binormal) at the active curve point.
+
+    The tilt quaternion lives in this frame's local space, so it is used to
+    convert the view rotation axis into frame-local coordinates for Ctrl+R.
+    """
+    obj = context.active_object
+    if obj is None or obj.type != 'CURVE':
+        return None
+    frame = get_active_curve_minimal_twist_frame(context)
+    if frame is None:
+        tangent = get_active_curve_tangent(context)
+        normal, binormal = get_cross_section_frame(tangent)
+    else:
+        normal, binormal = frame
+        tangent = normal.cross(binormal).normalized()
+    return tangent, normal, binormal
+
+
+def start_view_rot_gesture(context, wd, ps, mx, my):
+    """Begin a view-axis tilt gesture (Ctrl+R or the 倾斜 button)."""
+    pivot = get_active_curve_point_screen_position(context)
+    if pivot is None:
+        return False
+    push_widget_undo(context, "任意旋转横截面")
+    wd.view_rot_active = True
+    wd.view_rot_pivot_x, wd.view_rot_pivot_y = pivot
+    wd.view_rot_start_x = mx
+    wd.view_rot_start_y = my
+    wd.view_rot_start_angle = math.atan2(my - pivot[1], mx - pivot[0])
+    wd.view_rot_start_quat = json.dumps(list(ps.section_tilt))
+    redraw_view3d(context)
+    return True
 
 
 def get_active_curve_tangent(context):
@@ -3022,7 +3108,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     inside_preview_button = is_inside_rect(mx, my, wd.rotate_button_x0, wd.rotate_button_y0, wd.rotate_button_x1, wd.rotate_button_y1)
     inside_flip_button = is_inside_rect(mx, my, wd.flip_button_x0, wd.flip_button_y0, wd.flip_button_x1, wd.flip_button_y1)
     inside_idx_button = is_inside_rect(mx, my, wd.idx_button_x0, wd.idx_button_y0, wd.idx_button_x1, wd.idx_button_y1)
-    inside_controls = inside_add_button or inside_remove_button or inside_toggle_button or inside_preview_button or inside_flip_button or inside_idx_button
+    inside_tilt_button = is_inside_rect(mx, my, wd.tilt_button_x0, wd.tilt_button_y0, wd.tilt_button_x1, wd.tilt_button_y1)
+    inside_controls = inside_add_button or inside_remove_button or inside_toggle_button or inside_preview_button or inside_flip_button or inside_idx_button or inside_tilt_button
     inside_corr_rot = is_inside_rect(mx, my, wd.corr_rot_x0, wd.corr_rot_y0, wd.corr_rot_x1, wd.corr_rot_y1)
     drag_threshold = 4.0
 
@@ -3049,7 +3136,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         set_widget_solo_state(context, wd, not wd.solo_hold_active)
         return {'RUNNING_MODAL'}
 
-    if event.type == 'T' and event.value == 'PRESS' and event.ctrl:
+    if event.type == 'T' and event.value == 'PRESS' and event.ctrl and not wd.corr_rot_dragging:
         push_widget_undo(context, "旋转修正横截面编辑器")
         wd.corr_rot_dragging = True
         wd.corr_rot_drag_start_angle = math.atan2(my - view_cy, mx - view_cx)
@@ -3071,6 +3158,49 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         if event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
             settings.widget_correct_rotation = wd.corr_rot_drag_start_val
             wd.corr_rot_dragging = False
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        return {'RUNNING_MODAL'}
+
+    if event.type == 'R' and event.value == 'PRESS' and event.ctrl and not wd.view_rot_active:
+        start_view_rot_gesture(context, wd, ps, mx, my)
+        return {'RUNNING_MODAL'}
+
+    if wd.view_rot_active:
+        if event.type == 'MOUSEMOVE':
+            pivot_x, pivot_y = wd.view_rot_pivot_x, wd.view_rot_pivot_y
+            current_angle = math.atan2(my - pivot_y, mx - pivot_x)
+            delta_angle = current_angle - wd.view_rot_start_angle
+            try:
+                start_quat = Quaternion(json.loads(wd.view_rot_start_quat))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                start_quat = Quaternion()
+            basis = get_active_curve_point_rotation_basis(context)
+            _view_area, view_region = get_view3d_window_region(context)
+            region_data = getattr(view_region, 'region_data', None) if view_region is not None else None
+            if basis is not None and region_data is not None:
+                tangent, normal, binormal = basis
+                view_axis_world = region_data.view_rotation @ Vector((0.0, 0.0, 1.0))
+                basis_mat = Matrix((binormal, normal, tangent)).to_3x3()
+                view_axis_local = basis_mat @ view_axis_world
+                if view_axis_local.length > 1e-8:
+                    view_axis_local.normalize()
+                    delta_quat = Quaternion(view_axis_local, delta_angle)
+                    ps.section_tilt = tuple((delta_quat @ start_quat).normalized())
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            wd.view_rot_active = False
+            sync_active_cross_section_to_selected_points(context)
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
+        if event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
+            try:
+                start_quat = Quaternion(json.loads(wd.view_rot_start_quat))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                start_quat = Quaternion()
+            ps.section_tilt = tuple(start_quat)
+            wd.view_rot_active = False
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         return {'RUNNING_MODAL'}
@@ -3495,6 +3625,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             wd.corr_rot_drag_start_val = settings.widget_correct_rotation
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
+        if inside_tilt_button:
+            redraw_view3d(context)
+            return {'RUNNING_MODAL'}
 
         if not inside_widget:
             point_idx, ring_idx = find_nearest_pipe_control_vertex(context, mx, my)
@@ -3573,7 +3706,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
-    if event.type == 'R' and event.value == 'PRESS':
+    if event.type == 'R' and event.value == 'PRESS' and not event.ctrl:
         sel = get_selected_widget_verts(wd)
         sel = {vi for vi in sel if 0 <= vi < len(verts) and not getattr(verts[vi], 'is_ghost', False)}
         if sel:
@@ -3623,6 +3756,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     if event.type == 'RIGHTMOUSE' and event.value == 'PRESS':
         if event.alt or event.ctrl or event.shift or event.oskey:
             return {'PASS_THROUGH'}
+        if inside_tilt_button and not wd.view_rot_active:
+            start_view_rot_gesture(context, wd, ps, mx, my)
+            return {'RUNNING_MODAL'}
         target_point_index = settings.active_point_index
         wd.context_menu_point_index = target_point_index
         if inside_widget:
@@ -3644,6 +3780,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         wd.left_drag_pending = False
         wd.left_drag_active = False
         wd.left_drag_vert_index = -1
+        wd.view_rot_active = False
         operator._finish(context)
         return {'FINISHED'}
 
