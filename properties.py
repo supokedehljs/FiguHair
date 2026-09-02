@@ -2,7 +2,7 @@ import bpy
 import math
 from bpy.props import (
     FloatProperty, IntProperty, CollectionProperty,
-    FloatVectorProperty, BoolProperty, PointerProperty, EnumProperty
+    FloatVectorProperty, BoolProperty, PointerProperty, EnumProperty, StringProperty
 )
 from bpy.types import PropertyGroup
 
@@ -17,9 +17,7 @@ def update_plugin_enabled(self, context):
 
 def apply_shared_hair_material(material):
     for obj in bpy.data.objects:
-        if obj.type != 'MESH' or not (
-            obj.get("hair_pipe_source_curve") or obj.get("hair_pipe_tail_source_curve")
-        ):
+        if obj.type != 'MESH' or not obj.get("hair_pipe_source_curve"):
             continue
         obj.data.materials.clear()
         if material is not None:
@@ -91,14 +89,6 @@ class HairPipePointSettings(PropertyGroup):
         default=1.0,
         min=0.001,
         max=100.0,
-    )
-    section_tilt: FloatVectorProperty(
-        name="截面 3D 倾斜",
-        description="横截面相对曲线框架的 3D 姿态（四元数，横截面局部空间）。Ctrl+R 以当前视图方向为轴、以当前曲线点为轴心任意旋转",
-        default=(1.0, 0.0, 0.0, 0.0),
-        size=4,
-        subtype='QUATERNION',
-        precision=4,
     )
     use_transition: BoolProperty(
         name="横截面过渡模式",
@@ -211,17 +201,11 @@ class HairPipeSettings(PropertyGroup):
         min=1,
         max=12,
     )
-    roll_mode: EnumProperty(
+    roll_mode: StringProperty(
         name="Roll Mode",
-        description="How generated cross-section frames respond when curve points move",
-        items=(
-            ('START_FIXED', "START 绝对锁定", "Keep every ring orientation fixed from START; only moving START can rotate the hair, but rings may not stay perpendicular to sharp bends"),
-            ('HYBRID_STABLE', "前向独立锁定", "Each section uses only its own position and the following section for direction; moving a point cannot rotate the next section"),
-            ('START_PROJECTED', "START 投影", "Project a persistent START direction onto every tangent; follows bends without accumulated roll, but nearby rings can rotate when their tangent changes"),
-            ('PARALLEL_TRANSPORT', "最小扭转", "Transport the START frame along the curve; natural but later points can change downstream roll"),
-            ('WORLD_UP', "世界向上", "Use a fixed world-up reference for every cross-section"),
-        ),
+        description="START 绝对锁定",
         default='START_FIXED',
+        options={'HIDDEN'},
     )
     edge_flow_mode: EnumProperty(
         name="Edge Flow Mode",
@@ -343,18 +327,6 @@ class HairPipeSettings(PropertyGroup):
         max=1.0,
         precision=2,
     )
-    custom_profile_data: bpy.props.StringProperty(
-        name="自定义横截面数据",
-        default="",
-    )
-    custom_profile_name: bpy.props.StringProperty(
-        name="自定义横截面名称",
-        default="椭圆",
-    )
-    use_custom_profile: BoolProperty(
-        name="使用自定义横截面",
-        default=False,
-    )
     widget_area_scale: FloatProperty(
         name="大小",
         description="横截面编辑器显示区域的整体大小",
@@ -365,30 +337,15 @@ class HairPipeSettings(PropertyGroup):
     )
 
 
-def update_group_color_mode(self, context):
-    try:
-        from .operators import apply_group_color_mode
-        apply_group_color_mode(context.scene, bool(self.hair_pipe_group_color_mode))
-    except (ImportError, AttributeError, RuntimeError):
-        pass
-
-
 def register():
     bpy.utils.register_class(HairPipeCrossSectionVertex)
     bpy.utils.register_class(HairPipePointSettings)
     bpy.utils.register_class(HairPipeSettings)
     bpy.types.Object.hair_pipe_settings = PointerProperty(type=HairPipeSettings)
-    bpy.types.Scene.hair_pipe_group_color_mode = BoolProperty(
-        name="分组颜色显示",
-        description="仅让 FiguHair 头发按所属 Collection 显示颜色",
-        default=False,
-        update=update_group_color_mode,
-    )
 
 
 def unregister():
     del bpy.types.Object.hair_pipe_settings
-    del bpy.types.Scene.hair_pipe_group_color_mode
     bpy.utils.unregister_class(HairPipeSettings)
     bpy.utils.unregister_class(HairPipePointSettings)
     bpy.utils.unregister_class(HairPipeCrossSectionVertex)

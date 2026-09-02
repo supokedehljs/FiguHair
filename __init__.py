@@ -8,7 +8,7 @@ bl_info = {
     "category": "Add Curve",
 }
 
-from . import operators, panel, properties, handler, widget_operator, preferences, display_mode
+from . import operators, panel, properties, handler, widget_operator, preferences
 
 
 def register():
@@ -17,14 +17,12 @@ def register():
     widget_operator.register()
     operators.register()
     panel.register()
-    display_mode.register()
     handler.register_handler()
 
 
 def unregister():
     preferences.unregister()
     handler.unregister_handler()
-    display_mode.unregister()
     panel.unregister()
     operators.unregister()
     widget_operator.unregister()

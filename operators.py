@@ -7,7 +7,7 @@ import random
 import colorsys
 from gpu_extras.batch import batch_for_shader
 from pathlib import Path
-from mathutils import Matrix, Vector, Quaternion
+from mathutils import Matrix, Vector
 from bpy.props import IntProperty, FloatProperty, EnumProperty, BoolProperty, StringProperty
 from bpy_extras import view3d_utils
 
@@ -554,46 +554,6 @@ def get_effective_point_setting(point_settings, idx, settings):
     return point_settings[idx]
 
 
-def _normalized_quat(value):
-    """Coerce a property quaternion into a valid normalized mathutils Quaternion."""
-    try:
-        q = Quaternion(tuple(value))
-    except (TypeError, ValueError):
-        return Quaternion()
-    if q.magnitude < 1e-8:
-        return Quaternion()
-    return q.normalized()
-
-
-def get_effective_section_tilt(point_settings, idx, settings):
-    """Per-control-point 3D tilt, resolving transition points by slerp."""
-    if idx < 0 or idx >= len(point_settings):
-        return Quaternion()
-    prev_idx, next_idx = get_transition_source_indices(point_settings, idx)
-    if prev_idx is None or next_idx is None or prev_idx == next_idx:
-        return _normalized_quat(point_settings[idx].section_tilt)
-    prev_q = _normalized_quat(point_settings[prev_idx].section_tilt)
-    next_q = _normalized_quat(point_settings[next_idx].section_tilt)
-    t = (idx - prev_idx) / max(1, next_idx - prev_idx)
-    return prev_q.slerp(next_q, t)
-
-
-def _apply_section_tilt(normal, binormal, tangent, tilt_quat):
-    """Rotate the cross-section frame by the local-space tilt quaternion.
-
-    The tilt is stored in the frame's local space: offsets live in the
-    (normal, binormal) plane. Applying the tilt keeps the section anchored at
-    its curve point but lets the plane tilt arbitrarily in 3D. Only the two
-    plane axes need to be transformed.
-    """
-    R = tilt_quat.to_matrix().to_3x3()
-    c0 = R.col[0]
-    c1 = R.col[1]
-    new_binormal = binormal * c0.x + normal * c0.y + tangent * c0.z
-    new_normal = binormal * c1.x + normal * c1.y + tangent * c1.z
-    return new_normal.normalized(), new_binormal.normalized()
-
-
 def get_cross_section_sample(point_setting, point=None, vert_idx=0):
     verts = point_setting.cross_section_verts
     if len(verts) == 0:
@@ -969,7 +929,7 @@ def _minimal_twist_frames_from_tangents(raw_tangents, is_cyclic=False, start_nor
     return frames
 
 
-def _forward_independent_tangents(centers, fallback_tangents):
+def _removed_forward_independent_tangents(centers, fallback_tangents):
     count = len(centers)
     if count < 2:
         return [safe_normalized(tangent) for tangent in fallback_tangents]
@@ -987,7 +947,7 @@ def _forward_independent_tangents(centers, fallback_tangents):
     return tangents
 
 
-def _hybrid_stable_frames(raw_tangents, start_normal):
+def _removed_hybrid_stable_frames(raw_tangents, start_normal):
     if not raw_tangents:
         return []
 
@@ -1047,16 +1007,6 @@ def _endpoint_driven_frames(centers, raw_tangents, is_cyclic=False, start_normal
     else:
         anchor_binormal.normalize()
 
-    if roll_mode == 'PARALLEL_TRANSPORT':
-        return _minimal_twist_frames_from_tangents(raw_tangents, False, anchor_normal)
-    if roll_mode == 'HYBRID_STABLE':
-        independent_tangents = _forward_independent_tangents(centers, raw_tangents)
-        return _hybrid_stable_frames(independent_tangents, anchor_normal)
-
-    if roll_mode == 'WORLD_UP':
-        anchor_normal = Vector((0.0, 0.0, 1.0))
-        anchor_binormal = Vector((0.0, 1.0, 0.0))
-
     frames = []
     for raw_tangent in raw_tangents:
         tangent = safe_normalized(raw_tangent, first_tangent)
@@ -1102,7 +1052,7 @@ def _get_start_roll_normal(curve_obj, start_tangent):
 
 def build_minimal_twist_rings(
     ring_specs, is_cyclic=False, start_normal=None, curve_obj=None, spline_index=0,
-    roll_mode='START_FIXED', ring_tilts=None,
+    roll_mode='START_FIXED',
 ):
     if not ring_specs:
         return []
@@ -1113,12 +1063,12 @@ def build_minimal_twist_rings(
         [raw_tangent for _center, raw_tangent, _offsets in ring_specs],
         is_cyclic,
         start_normal,
-        roll_mode,
+        'START_FIXED',
     )
     if curve_obj is not None:
         _write_roll_diagnostic(curve_obj, spline_index, ring_specs, frames, is_cyclic)
 
-    for ring_idx, ((center, _raw_tangent, offsets), (_tangent, normal, binormal)) in enumerate(zip(ring_specs, frames)):
+    for (center, _raw_tangent, offsets), (_tangent, normal, binormal) in zip(ring_specs, frames):
         tangent = _tangent
 
 
@@ -1127,10 +1077,6 @@ def build_minimal_twist_rings(
         else:
             normal.normalize()
             binormal = tangent.cross(normal).normalized()
-        if ring_tilts is not None and ring_idx < len(ring_tilts):
-            tilt = _normalized_quat(ring_tilts[ring_idx])
-            if abs(tilt.angle) > 1e-6:
-                normal, binormal = _apply_section_tilt(normal, binormal, tangent, tilt)
         if offsets:
             rings.append(make_ring_from_frame(center, normal, binormal, offsets))
         else:
@@ -1684,11 +1630,6 @@ def generate_pipe_mesh(curve_obj, settings):
             continue
 
         ring_specs = []
-        ring_tilts = []
-        eff_tilts = [
-            get_effective_section_tilt(point_settings, global_point_idx + i, settings)
-            for i in range(num_points)
-        ]
         if spline_data['type'] == 'BEZIER':
             seg_count = num_points if is_cyclic else num_points - 1
 
@@ -1750,7 +1691,6 @@ def generate_pipe_mesh(curve_obj, settings):
                         settings.transition_mode, settings.transition_strength
                     )
                     ring_specs.append((pos, tan, interp))
-                    ring_tilts.append(eff_tilts[idx0].slerp(eff_tilts[idx1], shape_t))
         elif spline_data['type'] == 'NURBS':
             seg_count = num_points if is_cyclic else num_points - 1
             seg_lengths = []
@@ -1787,7 +1727,6 @@ def generate_pipe_mesh(curve_obj, settings):
                         settings.transition_mode, settings.transition_strength,
                     )
                     ring_specs.append((pos, tan, interp))
-                    ring_tilts.append(eff_tilts[idx0].slerp(eff_tilts[idx1], t))
         elif spline_data['type'] == 'POLY':
             seg_count = num_points if is_cyclic else num_points - 1
 
@@ -1823,7 +1762,6 @@ def generate_pipe_mesh(curve_obj, settings):
                         settings.transition_mode, settings.transition_strength
                     )
                     ring_specs.append((pos, tan, interp))
-                    ring_tilts.append(eff_tilts[idx0].slerp(eff_tilts[idx1], t))
         if settings.strong_smoothing:
             ring_specs = smooth_ring_offsets(
                 ring_specs,
@@ -1837,7 +1775,7 @@ def generate_pipe_mesh(curve_obj, settings):
             start_normal = _get_start_roll_normal(curve_obj, safe_normalized(ring_specs[0][1]))
         rings = build_minimal_twist_rings(
             ring_specs, is_cyclic, start_normal, curve_obj, spline_index,
-            settings.roll_mode, ring_tilts,
+            'START_FIXED',
         )
         global_point_idx += num_points
         if not rings:
@@ -1914,7 +1852,6 @@ def _point_setting_to_data(point_setting):
     return {
         "scale": point_setting.scale,
         "rotation": point_setting.rotation,
-        "section_tilt": list(point_setting.section_tilt),
         "use_transition": bool(getattr(point_setting, "use_transition", False)),
         "active_vert_index": point_setting.active_vert_index,
         "verts": [
@@ -1940,7 +1877,6 @@ def _default_point_setting_data(settings):
     return {
         "scale": 1.0,
         "rotation": 0.0,
-        "section_tilt": [1.0, 0.0, 0.0, 0.0],
         "use_transition": False,
         "active_vert_index": 0,
         "verts": verts,
@@ -1973,11 +1909,6 @@ def _interpolate_point_setting_data(left_data, right_data, t):
     return {
         "scale": left_data.get("scale", 1.0) * (1.0 - t) + right_data.get("scale", 1.0) * t,
         "rotation": lerp_angle(left_data.get("rotation", 0.0), right_data.get("rotation", 0.0), t),
-        "section_tilt": tuple(
-            _normalized_quat(left_data.get("section_tilt")).slerp(
-                _normalized_quat(right_data.get("section_tilt")), t
-            )
-        ),
         "use_transition": False,
         "active_vert_index": 0,
         "verts": verts,
@@ -1990,7 +1921,6 @@ def _clone_point_setting_data(data):
     return {
         "scale": data.get("scale", 1.0),
         "rotation": data.get("rotation", 0.0),
-        "section_tilt": list(data.get("section_tilt", [1.0, 0.0, 0.0, 0.0])),
         "use_transition": bool(data.get("use_transition", False)),
         "active_vert_index": data.get("active_vert_index", 0),
         "verts": [dict(vert) for vert in data.get("verts", [])],
@@ -2004,7 +1934,6 @@ def _apply_point_setting_data(point_setting, data, settings):
     point_setting.cross_section_verts.clear()
     point_setting.scale = data.get("scale", 1.0)
     point_setting.rotation = data.get("rotation", 0.0)
-    point_setting.section_tilt = tuple(_normalized_quat(data.get("section_tilt")))
     point_setting.use_transition = bool(data.get("use_transition", False))
     for vert_data in verts:
         vert = point_setting.cross_section_verts.add()
@@ -2205,33 +2134,6 @@ def get_curve_from_figuhair_root(root_obj):
         if child.type == 'CURVE' and hasattr(child, 'hair_pipe_settings'):
             return child
     return None
-
-
-def set_figuhair_group_visibility(root_obj, visible):
-    if root_obj is None or root_obj.type != 'EMPTY':
-        return
-    root_obj.hide_set(not visible)
-    root_obj.hide_viewport = not visible
-
-
-def select_figuhair_group(context, curve_obj, extend=False):
-    root_obj = get_figuhair_root(curve_obj)
-    if root_obj is None:
-        return False
-    family = [
-        root_obj,
-        curve_obj,
-        get_pipe_object_for_curve(curve_obj),
-        get_tail_object_for_curve(curve_obj),
-    ]
-    if not extend:
-        for obj in context.selected_objects:
-            obj.select_set(False)
-    for obj in family:
-        if obj is not None:
-            obj.select_set(True)
-    context.view_layer.objects.active = root_obj
-    return True
 
 
 def get_figuhair_root(curve_obj):
@@ -3152,14 +3054,45 @@ def ensure_selected_curve_visible(curve_obj):
         return
     curve_obj.hide_viewport = False
     curve_obj.hide_set(False)
-    # Keep the source spline visible above the generated tube. The spline sits
-    # inside the preview mesh, so depth testing otherwise hides Blender's
-    # orange selection highlight even though the curve is selected.
+    # Keep the source spline above the generated tube so Blender can draw its
+    # orange selection highlight instead of hiding it behind the mesh.
     curve_obj.display_type = 'WIRE'
     curve_obj.show_wire = True
     curve_obj.show_in_front = True
     if hasattr(curve_obj.data, "show_handles") and is_curve_edit_mode(curve_obj):
         curve_obj.data.show_handles = True
+
+
+def sync_selected_curve_visibility(context):
+    selected_names = {obj.name for obj in context.selected_objects}
+    for curve_obj in bpy.data.objects:
+        if curve_obj.type != 'CURVE' or not hasattr(curve_obj, 'hair_pipe_settings'):
+            continue
+        if curve_obj.get("hair_pipe_widget_hide_curve_overlay", False):
+            continue
+        if curve_obj.name in selected_names:
+            ensure_selected_curve_visible(curve_obj)
+        elif curve_obj.show_in_front:
+            curve_obj.show_in_front = False
+
+
+def sync_selected_curve_visibility(context):
+    selected_names = {
+        obj.name for obj in getattr(context, 'selected_objects', [])
+        if obj.type == 'CURVE' and hasattr(obj, 'hair_pipe_settings')
+    }
+    for curve_obj in bpy.data.objects:
+        if curve_obj.type != 'CURVE' or not hasattr(curve_obj, 'hair_pipe_settings'):
+            continue
+        if curve_obj.get("hair_pipe_widget_hide_curve_overlay", False):
+            continue
+        is_selected = curve_obj.name in selected_names
+        curve_obj.show_in_front = is_selected
+        if is_selected:
+            curve_obj.hide_viewport = False
+            curve_obj.hide_set(False)
+            curve_obj.display_type = 'WIRE'
+            curve_obj.show_wire = True
 
 
 def redirect_pipe_selection(context, pipe_obj=None):
@@ -3200,7 +3133,7 @@ def redirect_pipe_selection(context, pipe_obj=None):
     for curve in selected_curves:
         curve.hide_set(False)
         curve.select_set(True)
-        ensure_selected_curve_visible(curve)
+    sync_selected_curve_visibility(context)
     context.view_layer.objects.active = active_curve
     return True
 
@@ -3303,10 +3236,6 @@ def apply_edge_flow_to_target_indices(curve_obj, settings, target_indices, mode,
         ps.scale = ps.scale * (1.0 - blend) + (start_ps.scale * (1.0 - t) + end_ps.scale * t) * blend
         target_rot = lerp_angle(start_ps.rotation, end_ps.rotation, t)
         ps.rotation = ps.rotation * (1.0 - blend) + target_rot * blend
-        target_tilt = _normalized_quat(start_ps.section_tilt).slerp(
-            _normalized_quat(end_ps.section_tilt), t
-        )
-        ps.section_tilt = tuple(_normalized_quat(ps.section_tilt).slerp(target_tilt, blend))
 
         start_curve_point = get_curve_point_by_global_index(curve_obj, start_idx)
         end_curve_point = get_curve_point_by_global_index(curve_obj, end_idx)
@@ -3762,7 +3691,6 @@ def make_hair_curve_from_tube_mesh(context, mesh_obj):
             ps.cross_section_verts.clear()
             ps.rotation = 0.0
             ps.scale = 1.0
-            ps.section_tilt = (1.0, 0.0, 0.0, 0.0)
             for offset_x, offset_y in raw_offsets:
                 v = ps.cross_section_verts.add()
                 v.offset_x = offset_x
@@ -3885,10 +3813,6 @@ class HAIRPIPE_OT_generate_pipe(bpy.types.Operator):
             for poly in mesh.polygons:
                 poly.use_smooth = True
         configure_pipe_object(pipe_obj, curve_obj)
-        tail_obj = get_tail_object_for_curve(curve_obj)
-        if tail_obj is not None:
-            update_tail_mesh_for_curve(curve_obj, settings, verts)
-            ensure_tail_modifier_stack(pipe_obj, tail_obj, settings)
         self.report({'INFO'}, f"Generated pipe with {len(verts)} vertices")
         return {'FINISHED'}
 
@@ -4055,7 +3979,6 @@ class HAIRPIPE_OT_reset_cross_section(bpy.types.Operator):
         init_cross_section_circle(ps, settings.default_radius, settings.default_segments)
         ps.scale = 1.0
         ps.rotation = 0.0
-        ps.section_tilt = (1.0, 0.0, 0.0, 0.0)
         return {'FINISHED'}
 
 
@@ -4076,7 +3999,6 @@ class HAIRPIPE_OT_reset_all_cross_sections(bpy.types.Operator):
             init_cross_section_circle(ps, settings.default_radius, settings.default_segments)
             ps.scale = 1.0
             ps.rotation = 0.0
-            ps.section_tilt = (1.0, 0.0, 0.0, 0.0)
         return {'FINISHED'}
 
 
@@ -4185,7 +4107,6 @@ def copy_point_cross_section(src, dst, rotation_offset=0.0):
     dst.active_vert_index = min(src.active_vert_index, max(0, len(dst.cross_section_verts) - 1))
     dst.scale = src.scale
     dst.rotation = src.rotation
-    dst.section_tilt = tuple(getattr(src, 'section_tilt', (1.0, 0.0, 0.0, 0.0)))
 
 
 _HAIRPIPE_CROSS_SECTION_CLIPBOARD = None
@@ -4221,7 +4142,6 @@ class HAIRPIPE_OT_copy_cross_section(bpy.types.Operator):
             ],
             "scale": src.scale,
             "rotation": src.rotation,
-            "section_tilt": list(src.section_tilt),
             "active_vert_index": src.active_vert_index,
         }
         self.report({'INFO'}, "已复制横截面")
@@ -4285,7 +4205,6 @@ class HAIRPIPE_OT_paste_cross_section(bpy.types.Operator):
             src.cross_section_verts.append(v)
         src.scale = _HAIRPIPE_CROSS_SECTION_CLIPBOARD["scale"]
         src.rotation = _HAIRPIPE_CROSS_SECTION_CLIPBOARD["rotation"]
-        src.section_tilt = tuple(_HAIRPIPE_CROSS_SECTION_CLIPBOARD.get("section_tilt", (1.0, 0.0, 0.0, 0.0)))
         src.active_vert_index = _HAIRPIPE_CROSS_SECTION_CLIPBOARD["active_vert_index"]
 
         for idx in target_indices:
@@ -5129,7 +5048,6 @@ class HAIRPIPE_OT_duplicate_hair(bpy.types.Operator):
             dst_ps = dst_s.point_settings.add()
             dst_ps.scale             = src_ps.scale
             dst_ps.rotation          = src_ps.rotation
-            dst_ps.section_tilt      = tuple(src_ps.section_tilt)
             dst_ps.active_vert_index = src_ps.active_vert_index
             dst_ps.cross_section_verts.clear()
             for sv in src_ps.cross_section_verts:
@@ -5286,227 +5204,6 @@ class HAIRPIPE_OT_merge_hair_for_export(bpy.types.Operator):
         context.view_layer.objects.active = merged_obj
 
         self.report({'INFO'}, f"\u5df2\u5408\u5e76 {len(pipe_objs)} \u4e2a\u5934\u53d1\u7f51\u683c\u4e3a: {merged_obj.name}")
-        return {'FINISHED'}
-
-
-def collection_group_color(collection):
-    stored = collection.get("hair_pipe_group_color")
-    if stored is not None and len(stored) >= 3:
-        return (float(stored[0]), float(stored[1]), float(stored[2]), 1.0)
-    # Generate once and save on the Collection. Refreshing the mode never
-    # changes existing group colors.
-    hue = random.random()
-    saturation = random.uniform(0.58, 0.82)
-    value = random.uniform(0.78, 1.0)
-    red, green, blue = colorsys.hsv_to_rgb(hue, saturation, value)
-    color = (red, green, blue, 1.0)
-    collection["hair_pipe_group_color"] = color
-    return color
-
-
-def apply_group_color_mode(scene, enabled):
-    """Color every mesh by its first Collection while the mode is enabled."""
-    palette = (
-        (0.95, 0.25, 0.25, 1.0), (0.25, 0.55, 1.0, 1.0),
-        (0.25, 0.85, 0.45, 1.0), (1.0, 0.65, 0.15, 1.0),
-        (0.75, 0.35, 1.0, 1.0), (0.1, 0.8, 0.8, 1.0),
-        (1.0, 0.35, 0.7, 1.0), (0.65, 0.8, 0.2, 1.0),
-    )
-    group_indices = {}
-    for obj in bpy.data.objects:
-        if obj.type != 'MESH':
-            continue
-        collection = obj.users_collection[0] if obj.users_collection else scene.collection
-        group_indices.setdefault(collection.name, len(group_indices))
-        state_key = "hair_pipe_group_color_materials"
-        if enabled:
-            if state_key not in obj:
-                obj[state_key] = json.dumps([
-                    material.name if material is not None else None
-                    for material in obj.data.materials
-                ])
-            material_name = "FiguHair Group Color " + collection.name
-            material = bpy.data.materials.get(material_name)
-            if material is None:
-                material = bpy.data.materials.new(material_name)
-                material["hair_pipe_group_color_temp"] = True
-            material.diffuse_color = collection_group_color(collection)
-            obj.data.materials.clear()
-            obj.data.materials.append(material)
-        elif state_key in obj:
-            try:
-                original_names = json.loads(obj[state_key])
-            except (TypeError, ValueError, json.JSONDecodeError):
-                original_names = []
-            obj.data.materials.clear()
-            for name in original_names:
-                obj.data.materials.append(bpy.data.materials.get(name) if name else None)
-            del obj[state_key]
-
-    screen = getattr(bpy.context, "screen", None)
-    if screen is not None:
-        if enabled and "hair_pipe_group_color_shading" not in scene:
-            scene["hair_pipe_group_color_shading"] = json.dumps([
-                area.spaces.active.shading.color_type
-                for area in screen.areas if area.type == 'VIEW_3D'
-            ])
-        saved_modes = []
-        if not enabled:
-            try:
-                saved_modes = json.loads(scene.get("hair_pipe_group_color_shading", "[]"))
-            except (TypeError, ValueError, json.JSONDecodeError):
-                saved_modes = []
-        view_index = 0
-        for area in screen.areas:
-            if area.type != 'VIEW_3D':
-                continue
-            area.spaces.active.shading.color_type = 'MATERIAL' if enabled else (
-                saved_modes[view_index] if view_index < len(saved_modes) else 'MATERIAL'
-            )
-            view_index += 1
-            area.tag_redraw()
-        if not enabled and "hair_pipe_group_color_shading" in scene:
-            del scene["hair_pipe_group_color_shading"]
-
-    if not enabled:
-        for material in list(bpy.data.materials):
-            if material.get("hair_pipe_group_color_temp") and material.users == 0:
-                bpy.data.materials.remove(material)
-
-
-def selected_hair_curves(context):
-    curves = []
-    for obj in context.selected_objects:
-        curve = obj if obj.type == 'CURVE' and obj.get("hair_pipe_base_name") else (
-            get_pipe_source_curve(obj) or get_tail_source_curve(obj)
-        )
-        if curve is not None and curve not in curves:
-            curves.append(curve)
-    return curves
-
-
-def selected_group_objects(context):
-    return [obj for obj in context.selected_objects if obj.type not in {'CAMERA', 'LIGHT'}]
-
-
-def object_collection(obj, scene):
-    return obj.users_collection[0] if obj.users_collection else scene.collection
-
-
-class HAIRPIPE_OT_create_group_from_selected(bpy.types.Operator):
-    bl_idname = "hair_pipe.create_group_from_selected"
-    bl_label = "选中头发添加到新组"
-    bl_description = "为选中的头发创建一个新的 Collection 并放入其中"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        objects = selected_group_objects(context)
-        if not objects:
-            self.report({'WARNING'}, "请先选中至少一个物体或头发")
-            return {'CANCELLED'}
-        index = 1
-        while bpy.data.collections.get(f"头发组 {index}") is not None:
-            index += 1
-        collection = bpy.data.collections.new(f"头发组 {index}")
-        context.scene.collection.children.link(collection)
-        for obj in objects:
-            members = hair_family_objects(obj) if obj.type == 'CURVE' and obj.get("hair_pipe_base_name") else (obj,)
-            for member in members:
-                if collection not in member.users_collection:
-                    collection.objects.link(member)
-                for old_collection in list(member.users_collection):
-                    if old_collection != collection:
-                        old_collection.objects.unlink(member)
-        self.report({'INFO'}, f"已创建 {collection.name}，加入 {len(objects)} 个对象")
-        if context.scene.hair_pipe_group_color_mode:
-            apply_group_color_mode(context.scene, True)
-        return {'FINISHED'}
-
-
-class HAIRPIPE_OT_move_selected_to_last_group(bpy.types.Operator):
-    bl_idname = "hair_pipe.move_selected_to_last_group"
-    bl_label = "转移到最后选组"
-    bl_description = "将选中的头发移动到最后选中头发所在的 Collection"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        objects = selected_group_objects(context)
-        if len(objects) < 2:
-            self.report({'WARNING'}, "请至少选中两个对象，并让最后选中的对象作为目标组")
-            return {'CANCELLED'}
-        active = context.active_object if context.active_object in objects else objects[-1]
-        target = object_collection(active, context.scene)
-        moved = 0
-        for obj in objects:
-            if obj == active:
-                continue
-            members = hair_family_objects(obj) if obj.type == 'CURVE' and obj.get("hair_pipe_base_name") else (obj,)
-            for member in members:
-                if target not in member.users_collection:
-                    target.objects.link(member)
-                for old_collection in list(member.users_collection):
-                    if old_collection != target:
-                        old_collection.objects.unlink(member)
-            moved += 1
-        self.report({'INFO'}, f"已将 {moved} 个对象转移到 {target.name}")
-        if context.scene.hair_pipe_group_color_mode:
-            apply_group_color_mode(context.scene, True)
-        return {'FINISHED'}
-
-
-def hair_family_objects(curve):
-    return tuple(obj for obj in (
-        curve, get_pipe_object_for_curve(curve), get_tail_object_for_curve(curve)
-    ) if obj is not None)
-
-
-
-class HAIRPIPE_OT_randomize_selected_group_color(bpy.types.Operator):
-    bl_idname = "hair_pipe.randomize_selected_group_color"
-    bl_label = "随机当前组颜色"
-    bl_description = "随机更换当前选中对象所在 Collection 的颜色"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        objects = selected_group_objects(context)
-        if not objects:
-            self.report({'WARNING'}, "请先选中一个物体或头发")
-            return {'CANCELLED'}
-        collection = object_collection(objects[-1], context.scene)
-        hue = random.random()
-        red, green, blue = colorsys.hsv_to_rgb(hue, 0.7, 0.95)
-        collection["hair_pipe_group_color"] = (red, green, blue, 1.0)
-        if context.scene.hair_pipe_group_color_mode:
-            apply_group_color_mode(context.scene, True)
-        self.report({'INFO'}, f"已更新 {collection.name} 的颜色")
-        return {'FINISHED'}
-
-
-
-class HAIRPIPE_OT_sync_parent_collections(bpy.types.Operator):
-    bl_idname = "hair_pipe.sync_parent_collections"
-    bl_label = "爸爸去哪了"
-    bl_description = "将所有头发网格移动到其父曲线所在的 Collection"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        moved = 0
-        for curve in bpy.data.objects:
-            if curve.type != 'CURVE' or not curve.get("hair_pipe_base_name"):
-                continue
-            target = curve.users_collection[0] if curve.users_collection else context.scene.collection
-            for mesh in (get_pipe_object_for_curve(curve), get_tail_object_for_curve(curve)):
-                if mesh is None or target in mesh.users_collection and len(mesh.users_collection) == 1:
-                    continue
-                if target not in mesh.users_collection:
-                    target.objects.link(mesh)
-                for collection in list(mesh.users_collection):
-                    if collection != target:
-                        collection.objects.unlink(mesh)
-                moved += 1
-        self.report({'INFO'}, f"已整理 {moved} 个头发网格")
-        if context.scene.hair_pipe_group_color_mode:
-            apply_group_color_mode(context.scene, True)
         return {'FINISHED'}
 
 
@@ -5822,34 +5519,13 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
         if preview:
             curve_obj["hair_pipe_draw_preview"] = True
         context.collection.objects.link(curve_obj)
+        ensure_figuhair_root(curve_obj)
+        ensure_curve_defaults(curve_obj)
         sync_point_settings(curve_obj)
+        curve_obj.hair_pipe_settings.plugin_enabled = True
         curve_obj.hair_pipe_settings.pipe_resolution = 0
         curve_obj.hair_pipe_settings.default_radius = self._radius
-        source_settings = None
-        active_obj = context.active_object
-        if active_obj is not None and active_obj.type == 'CURVE' and hasattr(active_obj, 'hair_pipe_settings'):
-            source_settings = active_obj.hair_pipe_settings
-        custom_profile = None
-        if source_settings is not None and source_settings.use_custom_profile:
-            try:
-                library = json.loads(context.scene.get("figuhair_custom_profiles", "[]"))
-                selected = next(
-                    (item for item in library if item.get("name") == source_settings.custom_profile_name),
-                    None,
-                )
-                custom_profile = selected.get("points") if selected else json.loads(source_settings.custom_profile_data or "null")
-            except (TypeError, ValueError):
-                custom_profile = None
         for point_setting in curve_obj.hair_pipe_settings.point_settings:
-            if custom_profile and len(custom_profile) >= 3:
-                point_setting.cross_section_verts.clear()
-                max_extent = max(max(math.hypot(x, y), 1e-8) for x, y in custom_profile)
-                for x, y in custom_profile:
-                    vertex = point_setting.cross_section_verts.add()
-                    vertex.offset_x = x / max_extent * self._radius
-                    vertex.offset_y = y / max_extent * self._radius
-                    vertex.is_ghost = False
-            else:
                 for vertex_idx, vertex in enumerate(point_setting.cross_section_verts):
                     angle = math.tau * vertex_idx / max(1, len(point_setting.cross_section_verts))
                     vertex.offset_x = math.cos(angle) * self._radius
@@ -5957,84 +5633,6 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
 
-class HAIRPIPE_OT_begin_custom_profile(bpy.types.Operator):
-    bl_idname = "hair_pipe.begin_custom_profile"
-    bl_label = "添加自定义横截面"
-
-    def execute(self, context):
-        obj = get_context_curve_object(context)
-        if obj is None or not is_curve_edit_mode(obj):
-            self.report({'WARNING'}, "请先选择头发曲线并进入曲线编辑模式")
-            return {'CANCELLED'}
-        try:
-            bpy.ops.hair_pipe.widget_interact('INVOKE_DEFAULT')
-        except RuntimeError:
-            pass
-        obj["hair_pipe_custom_profile_editing"] = True
-        self.report({'INFO'}, "请在横截面编辑窗口中编辑，完成后点击确认保存")
-        return {'FINISHED'}
-
-
-class HAIRPIPE_OT_save_custom_profile(bpy.types.Operator):
-    bl_idname = "hair_pipe.save_custom_profile"
-    bl_label = "保存自定义横截面"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    profile_name: StringProperty(name="名称", default="自定义横截面")
-
-    def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self)
-
-    def execute(self, context):
-        obj = get_context_curve_object(context)
-        if obj is None or not obj.hair_pipe_settings.point_settings:
-            self.report({'WARNING'}, "请先打开横截面编辑器并创建横截面")
-            return {'CANCELLED'}
-        settings = obj.hair_pipe_settings
-        point_idx = max(0, min(settings.active_point_index, len(settings.point_settings) - 1))
-        verts = settings.point_settings[point_idx].cross_section_verts
-        if len(verts) < 3:
-            return {'CANCELLED'}
-        points = [(v.offset_x, v.offset_y) for v in verts]
-        name = self.profile_name.strip() or "自定义横截面"
-        try:
-            library = json.loads(context.scene.get("figuhair_custom_profiles", "[]"))
-        except (TypeError, ValueError):
-            library = []
-        library = [item for item in library if item.get("name") != name]
-        library.append({"name": name, "points": points})
-        context.scene["figuhair_custom_profiles"] = json.dumps(library)
-        settings.custom_profile_data = json.dumps(points)
-        settings.custom_profile_name = name
-        settings.use_custom_profile = True
-        self.report({'INFO'}, f"已保存横截面：{name}")
-        return {'FINISHED'}
-
-
-class HAIRPIPE_OT_cancel_custom_profile(bpy.types.Operator):
-    bl_idname = "hair_pipe.cancel_custom_profile"
-    bl_label = "取消自定义横截面"
-
-    def execute(self, context):
-        obj = get_context_curve_object(context)
-        if obj is not None:
-            obj["hair_pipe_custom_profile_editing"] = False
-        return {'FINISHED'}
-
-
-class HAIRPIPE_OT_toggle_custom_profile(bpy.types.Operator):
-    bl_idname = "hair_pipe.toggle_custom_profile"
-    bl_label = "选择自定义横截面"
-
-    def execute(self, context):
-        obj = get_context_curve_object(context)
-        if obj is None:
-            return {'CANCELLED'}
-        settings = obj.hair_pipe_settings
-        settings.use_custom_profile = not settings.use_custom_profile
-        return {'FINISHED'}
-
-
 class HAIRPIPE_WST_draw_hair_curve(bpy.types.WorkSpaceTool):
     bl_space_type = 'VIEW_3D'
     bl_context_mode = 'OBJECT'
@@ -6049,16 +5647,8 @@ class HAIRPIPE_WST_draw_hair_curve(bpy.types.WorkSpaceTool):
 
 
 classes = (
-    HAIRPIPE_OT_create_group_from_selected,
-    HAIRPIPE_OT_move_selected_to_last_group,
-    HAIRPIPE_OT_randomize_selected_group_color,
-    HAIRPIPE_OT_sync_parent_collections,
     HAIRPIPE_OT_cross_section_spread,
     HAIRPIPE_OT_draw_hair_curve,
-    HAIRPIPE_OT_begin_custom_profile,
-    HAIRPIPE_OT_save_custom_profile,
-    HAIRPIPE_OT_cancel_custom_profile,
-    HAIRPIPE_OT_toggle_custom_profile,
     HAIRPIPE_OT_mesh_to_hair_curve,
     HAIRPIPE_OT_generate_pipe,
     HAIRPIPE_OT_sync_points,
@@ -6078,11 +5668,6 @@ classes = (
     HAIRPIPE_OT_toggle_redirect_selection,
     HAIRPIPE_OT_reverse_curve_direction,
     HAIRPIPE_OT_equalize_point_distance,
-    HAIRPIPE_OT_create_tail_mesh,
-    HAIRPIPE_OT_remove_tail_mesh,
-    HAIRPIPE_OT_toggle_tail_visibility,
-    HAIRPIPE_OT_hide_all_tail_meshes,
-    HAIRPIPE_OT_edit_tail_mesh,
     HAIRPIPE_OT_hide_hair,
     HAIRPIPE_OT_show_all_hair,
     HAIRPIPE_OT_family_local_view,

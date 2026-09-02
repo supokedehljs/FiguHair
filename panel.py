@@ -82,14 +82,6 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         row.scale_y = 1.2
         row.operator("hair_pipe.mesh_to_hair_curve", text="管状网格转头发曲线", icon='CURVE_DATA')
 
-        group_box = layout.box()
-        group_box.label(text="头发分组", icon='OUTLINER_COLLECTION')
-        group_box.prop(context.scene, "hair_pipe_group_color_mode", text="分组颜色显示", toggle=True)
-        group_box.operator("hair_pipe.create_group_from_selected", text="选中头发添加到新组", icon='ADD')
-        group_box.operator("hair_pipe.move_selected_to_last_group", text="转移到最后选组", icon='FORWARD')
-        group_box.operator("hair_pipe.randomize_selected_group_color", text="随机当前组颜色", icon='FILE_REFRESH')
-        group_box.operator("hair_pipe.sync_parent_collections", text="爸爸去哪了", icon='FILE_PARENT')
-
         if curve_obj is None:
             layout.label(text="未选择 FiguHair 头发；设置暂不可编辑", icon='INFO')
             settings = None
@@ -114,7 +106,7 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         box = plugin_controls.box()
         box.label(text="默认设置", icon='MESH_CIRCLE')
         box.prop(settings, "shared_hair_material", text="材质选择", icon='MATERIAL')
-        box.prop(settings, "roll_mode", text="滚转算法")
+        box.label(text="滚转算法：START 绝对锁定")
         box.prop(settings, "smooth_shading", text="平滑着色")
         row = box.row(align=True)
         row.prop(settings, "subdivision_levels", text="细分层级")
@@ -149,20 +141,6 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         op.power = settings.edge_flow_power
         op.blend = settings.edge_flow_blend
         row.operator("hair_pipe.reverse_curve_direction", text="翻转方向", icon='ARROW_LEFTRIGHT')
-
-        profile_box = header_box.box()
-        profile_box.label(text="我的横截面库", icon='MESH_CIRCLE')
-        row = profile_box.row(align=True)
-        row.operator("hair_pipe.save_custom_profile", text="保存当前横截面", icon='ADD')
-        if settings.custom_profile_data:
-            row = profile_box.row(align=True)
-            row.operator(
-                "hair_pipe.toggle_custom_profile",
-                text=settings.custom_profile_name,
-                icon='RADIOBUT_ON' if settings.use_custom_profile else 'RADIOBUT_OFF',
-                depress=settings.use_custom_profile,
-            )
-            row.label(text="缩略图", icon='MESH_CIRCLE')
 
         sliders = header_box.box()
         sliders.label(text="滑块区域", icon='DRIVER_DISTANCE')
