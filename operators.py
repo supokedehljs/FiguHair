@@ -5453,6 +5453,8 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
         end_world, _normal = self.raycast_surface(context, event)
         if end_world is not None:
             return end_world
+        if self._start_world is None:
+            return None
         region = context.region
         region_data = context.region_data
         coord = (event.mouse_region_x, event.mouse_region_y)
@@ -5568,18 +5570,15 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
                 bpy.data.curves.remove(curve_data)
 
     def invoke(self, context, event):
+        if context.area is None or context.area.type != 'VIEW_3D':
+            return {'CANCELLED'}
         self._start_world = None
         self._start_normal = None
         self._preview_curve = None
         self._preview_mesh = None
         self._points = []
         self._radius = 0.012
-        self._start_world, self._start_normal = self.raycast_surface(context, event)
-        if self._start_world is None:
-            self.report({'WARNING'}, "请在网格物体表面开始拖动")
-            return {'CANCELLED'}
-        self._points.append(self._start_world.copy())
-        self._hover_world = self.get_drag_end(context, event)
+        self._hover_world = None
         self._draw_handle = bpy.types.SpaceView3D.draw_handler_add(
             self.draw_path_preview, (context,), 'WINDOW', 'POST_PIXEL'
         )
@@ -5621,8 +5620,16 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
                 context.area.tag_redraw()
             return {'RUNNING_MODAL'}
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
-            point_world = self.get_drag_end(context, event)
-            if point_world is not None and (point_world - self._points[-1]).length >= 1e-5:
+            if not self._points:
+                point_world, normal = self.raycast_surface(context, event)
+                if point_world is not None:
+                    self._start_world = point_world.copy()
+                    self._start_normal = normal.copy() if normal is not None else None
+            else:
+                point_world = self.get_drag_end(context, event)
+            if point_world is not None and (
+                not self._points or (point_world - self._points[-1]).length >= 1e-5
+            ):
                 self._points.append(point_world.copy())
                 self._hover_world = point_world.copy()
                 context.area.header_text_set(
@@ -5633,17 +5640,10 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
 
-class HAIRPIPE_WST_draw_hair_curve(bpy.types.WorkSpaceTool):
-    bl_space_type = 'VIEW_3D'
-    bl_context_mode = 'OBJECT'
-    bl_idname = "hair_pipe.draw_hair_curve_tool"
-    bl_label = "新建头发曲线"
-    bl_description = "左键逐点创建 FiguHair 曲线，滚轮调整横截面宽度，空格或回车确认"
-    bl_icon = "ops.curve.draw"
-    bl_widget = None
-    bl_keymap = (
-        ("hair_pipe.draw_hair_curve", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
-    )
+def draw_hair_add_menu(self, context):
+    layout = self.layout
+    layout.operator("hair_pipe.draw_hair_curve", text="添加头发", icon='CURVE_DATA')
+    layout.separator()
 
 
 classes = (
@@ -5716,18 +5716,15 @@ def unregister_keymaps():
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
-    try:
-        bpy.utils.register_tool(HAIRPIPE_WST_draw_hair_curve, after={"builtin.cursor"}, separator=True, group=True)
-    except RuntimeError:
-        pass
+    bpy.types.VIEW3D_MT_add.prepend(draw_hair_add_menu)
     register_keymaps()
 
 
 def unregister():
     unregister_keymaps()
     try:
-        bpy.utils.unregister_tool(HAIRPIPE_WST_draw_hair_curve)
-    except RuntimeError:
+        bpy.types.VIEW3D_MT_add.remove(draw_hair_add_menu)
+    except (AttributeError, ValueError):
         pass
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

@@ -63,6 +63,10 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         else:
             enable_box.label(text="选择 FiguHair 曲线以切换插件", icon='INFO')
 
+        create_box = layout.box()
+        create_box.label(text="创建", icon='CURVE_DATA')
+        create_box.operator("hair_pipe.draw_hair_curve", text="添加头发", icon='CURVE_DATA')
+
         box = layout.box()
         box.label(text="通用", icon='MESH_CYLINDER')
         row = box.row(align=True)
