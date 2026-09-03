@@ -10,20 +10,41 @@ from pathlib import Path
 from mathutils import Matrix, Vector
 from bpy.props import IntProperty, FloatProperty, EnumProperty, BoolProperty, StringProperty
 from bpy_extras import view3d_utils
+from .curve_data import (
+    ensure_curve_defaults as curve_ensure_curve_defaults,
+    get_curve_points_data as curve_get_curve_points_data,
+    is_curve_edit_mode as curve_is_curve_edit_mode,
+    get_selected_curve_point_index as curve_get_selected_curve_point_index,
+    get_selected_curve_point_indices as curve_get_selected_curve_point_indices,
+)
+from .hair_lifecycle import (
+    get_next_figuhair_base_name as lifecycle_get_next_figuhair_base_name,
+    get_curve_from_figuhair_root as lifecycle_get_curve_from_figuhair_root,
+    get_figuhair_root as lifecycle_get_figuhair_root,
+    ensure_figuhair_root as lifecycle_ensure_figuhair_root,
+    get_pipe_mesh_name as lifecycle_get_pipe_mesh_name,
+    get_tail_mesh_name as lifecycle_get_tail_mesh_name,
+    get_pipe_object_for_curve as lifecycle_get_pipe_object_for_curve,
+    get_tail_object_for_curve as lifecycle_get_tail_object_for_curve,
+    get_pipe_source_curve as lifecycle_get_pipe_source_curve,
+    get_tail_source_curve as lifecycle_get_tail_source_curve,
+    get_context_curve_object as lifecycle_get_context_curve_object,
+    get_hair_family_objects as lifecycle_get_hair_family_objects,
+    generated_pipe_vertices as lifecycle_generated_pipe_vertices,
+    set_generated_object_transform as lifecycle_set_generated_object_transform,
+)
 
 
 def ensure_curve_defaults(curve_obj):
-    if curve_obj is None or curve_obj.type != 'CURVE':
-        return
-    curve_obj.data.dimensions = '3D'
-    curve_obj.data.resolution_u = max(getattr(curve_obj.data, 'resolution_u', 0), 16)
-    curve_obj.data.render_resolution_u = max(getattr(curve_obj.data, 'render_resolution_u', 0), 16)
-    for spline in curve_obj.data.splines:
-        spline.resolution_u = max(getattr(spline, 'resolution_u', 0), 16)
+    return curve_ensure_curve_defaults(curve_obj)
 
 
 def get_curve_points_data(curve_obj):
-    """Extract control points from a curve object"""
+    return curve_get_curve_points_data(curve_obj)
+
+
+def _legacy_get_curve_points_data(curve_obj):
+    """Retained internally until all geometry consumers use curve_data."""
     ensure_curve_defaults(curve_obj)
     if is_curve_edit_mode(curve_obj):
         try:
@@ -1571,16 +1592,38 @@ def add_cross_section_vertex_after(point_setting, idx, is_ghost=False):
     return True
 
 
-def add_cross_section_vertex_after_all(settings, idx):
+def get_curve_spline_point_ranges(curve_obj):
+    ranges = []
+    offset = 0
+    for spline in curve_obj.data.splines:
+        count = len(spline.bezier_points) if spline.type == 'BEZIER' else len(spline.points)
+        ranges.append((offset, offset + count))
+        offset += count
+    return ranges
+
+
+def get_active_spline_point_range(curve_obj, settings):
+    active_idx = min(max(0, settings.active_point_index), max(0, len(settings.point_settings) - 1))
+    for start, end in get_curve_spline_point_ranges(curve_obj):
+        if start <= active_idx < end:
+            return start, end
+    return 0, len(settings.point_settings)
+
+
+def add_cross_section_vertex_after_all(settings, idx, point_range=None):
+    start, end = point_range or (0, len(settings.point_settings))
     active_idx = min(settings.active_point_index, len(settings.point_settings) - 1)
-    for point_idx, point_setting in enumerate(settings.point_settings):
+    for point_idx in range(start, end):
+        point_setting = settings.point_settings[point_idx]
         add_cross_section_vertex_after(point_setting, idx, point_idx != active_idx)
 
 
-def remove_cross_section_vertex_all(settings, idx):
-    if any(len(point_setting.cross_section_verts) <= 3 for point_setting in settings.point_settings):
+def remove_cross_section_vertex_all(settings, idx, point_range=None):
+    start, end = point_range or (0, len(settings.point_settings))
+    point_settings = settings.point_settings[start:end]
+    if any(len(point_setting.cross_section_verts) <= 3 for point_setting in point_settings):
         return False
-    for point_setting in settings.point_settings:
+    for point_setting in point_settings:
         csv = point_setting.cross_section_verts
         remove_idx = max(0, min(idx, len(csv) - 1))
         csv.remove(remove_idx)
@@ -1588,23 +1631,27 @@ def remove_cross_section_vertex_all(settings, idx):
     return True
 
 
-def normalize_cross_section_topology(settings):
+def normalize_cross_section_topology(settings, curve_obj=None):
     if len(settings.point_settings) == 0:
         return
-    active_idx = min(settings.active_point_index, len(settings.point_settings) - 1)
-    target_count = len(settings.point_settings[active_idx].cross_section_verts)
-    if target_count < 3:
-        return
-
-    for point_setting in settings.point_settings:
-        csv = point_setting.cross_section_verts
-        while len(csv) < target_count and len(csv) >= 2:
-            insert_idx = max(0, len(csv) - 1)
-            add_cross_section_vertex_after(point_setting, insert_idx)
-        while len(csv) > target_count and len(csv) > 3:
-            csv.remove(len(csv) - 1)
-        if point_setting.active_vert_index >= len(csv):
-            point_setting.active_vert_index = len(csv) - 1
+    ranges = get_curve_spline_point_ranges(curve_obj) if curve_obj is not None else [(0, len(settings.point_settings))]
+    for start, end in ranges:
+        if start >= len(settings.point_settings):
+            continue
+        end = min(end, len(settings.point_settings))
+        target_count = len(settings.point_settings[start].cross_section_verts)
+        if target_count < 3:
+            continue
+        for point_idx in range(start, end):
+            point_setting = settings.point_settings[point_idx]
+            csv = point_setting.cross_section_verts
+            while len(csv) < target_count and len(csv) >= 2:
+                insert_idx = max(0, len(csv) - 1)
+                add_cross_section_vertex_after(point_setting, insert_idx)
+            while len(csv) > target_count and len(csv) > 3:
+                csv.remove(len(csv) - 1)
+            if point_setting.active_vert_index >= len(csv):
+                point_setting.active_vert_index = len(csv) - 1
 
 
 def generate_pipe_mesh(curve_obj, settings):
@@ -2038,16 +2085,20 @@ def sync_point_settings(curve_obj):
         settings.active_point_index = total_points - 1
     if total_points == 0:
         settings.active_point_index = 0
-    normalize_cross_section_topology(settings)
+    normalize_cross_section_topology(settings, curve_obj)
     update_all_ghost_vertices(settings)
     _store_curve_point_signatures(curve_obj, new_signatures)
 
 
 def is_curve_edit_mode(curve_obj):
-    return getattr(curve_obj, 'mode', '') in {'EDIT', 'EDIT_CURVE'}
+    return curve_is_curve_edit_mode(curve_obj)
 
 
 def get_selected_curve_point_index(curve_obj):
+    return curve_get_selected_curve_point_index(curve_obj)
+
+
+def _legacy_get_selected_curve_point_index(curve_obj):
     if curve_obj is None or curve_obj.type != 'CURVE':
         return None
 
@@ -2075,6 +2126,10 @@ def get_selected_curve_point_index(curve_obj):
 
 
 def get_selected_curve_point_indices(curve_obj):
+    return curve_get_selected_curve_point_indices(curve_obj)
+
+
+def _legacy_get_selected_curve_point_indices(curve_obj):
     if curve_obj is None or curve_obj.type != 'CURVE':
         return []
 
@@ -2116,61 +2171,34 @@ def sync_active_point_from_selection(curve_obj):
 
 
 def get_next_figuhair_base_name():
-    used_names = {obj.name for obj in bpy.data.objects}
-    index = 1
-    while True:
-        name = f"FiguHair {index:02d}"
-        if name not in used_names:
-            return name
-        index += 1
+    return lifecycle_get_next_figuhair_base_name()
 
 
 def get_curve_from_figuhair_root(root_obj):
-    if root_obj is None:
-        return None
-    if root_obj.type == 'CURVE' and hasattr(root_obj, 'hair_pipe_settings'):
-        return root_obj
-    for child in root_obj.children:
-        if child.type == 'CURVE' and hasattr(child, 'hair_pipe_settings'):
-            return child
-    return None
+    return lifecycle_get_curve_from_figuhair_root(root_obj)
 
 
 def get_figuhair_root(curve_obj):
-    """The only supported hair root is the curve object itself."""
-    if curve_obj is None or curve_obj.type != 'CURVE':
-        return None
-    return curve_obj
+    return lifecycle_get_figuhair_root(curve_obj)
 
 
 def ensure_figuhair_root(curve_obj):
-    """Normalize a hair curve so its generated mesh is always its direct child."""
-    if curve_obj is None or curve_obj.type != 'CURVE':
-        return None
-    base_name = curve_obj.get("hair_pipe_base_name")
-    if not base_name:
-        base_name = get_next_figuhair_base_name()
-        curve_obj["hair_pipe_base_name"] = base_name
-
-    if curve_obj.parent is not None:
-        world_matrix = curve_obj.matrix_world.copy()
-        curve_obj.parent = None
-        curve_obj.matrix_world = world_matrix
-
-    curve_obj.name = base_name + " Curve"
-    curve_obj["hair_pipe_root"] = curve_obj.name
-    return curve_obj
+    return lifecycle_ensure_figuhair_root(curve_obj)
 
 
 def get_pipe_mesh_name(curve_obj):
-    return curve_obj.name + "_FiguHair"
+    return lifecycle_get_pipe_mesh_name(curve_obj)
 
 
 def get_tail_mesh_name(curve_obj):
-    return curve_obj.name + "_FiguHairTail"
+    return lifecycle_get_tail_mesh_name(curve_obj)
 
 
 def get_pipe_object_for_curve(curve_obj):
+    return lifecycle_get_pipe_object_for_curve(curve_obj)
+
+
+def _legacy_get_pipe_object_for_curve(curve_obj):
     root_obj = get_figuhair_root(curve_obj)
     if root_obj is not None:
         for child in root_obj.children:
@@ -2195,6 +2223,10 @@ def get_pipe_object_for_curve(curve_obj):
 
 
 def get_tail_object_for_curve(curve_obj):
+    return lifecycle_get_tail_object_for_curve(curve_obj)
+
+
+def _legacy_get_tail_object_for_curve(curve_obj):
     root_obj = get_figuhair_root(curve_obj)
     if root_obj is not None:
         for child in root_obj.children:
@@ -2235,86 +2267,23 @@ def verts_to_world_space(verts, curve_obj):
 
 
 def generated_pipe_vertices(verts, curve_obj):
-    """Generated meshes use curve-local coordinates and follow as curve children."""
-    return [Vector(vert) for vert in verts]
+    return lifecycle_generated_pipe_vertices(verts, curve_obj)
 
 
 def set_generated_object_transform(obj, curve_obj):
-    """Use the stable Curve -> Mesh hierarchy without world/local double transforms."""
-    if obj is None:
-        return
-    obj.parent = curve_obj
-    obj.matrix_parent_inverse = Matrix.Identity(4)
-    obj.matrix_basis = Matrix.Identity(4)
+    return lifecycle_set_generated_object_transform(obj, curve_obj)
 
 
 def get_pipe_source_curve(pipe_obj):
-    if pipe_obj is None or pipe_obj.type != 'MESH':
-        return None
-    if pipe_obj.parent is not None and pipe_obj.parent.type == 'CURVE':
-        return pipe_obj.parent
-    source_name = pipe_obj.get("hair_pipe_source_curve")
-    if not source_name:
-        return None
-    curve_obj = bpy.data.objects.get(source_name)
-    if curve_obj is not None and curve_obj.type == 'CURVE':
-        return curve_obj
-    return None
+    return lifecycle_get_pipe_source_curve(pipe_obj)
 
 
 def get_tail_source_curve(tail_obj):
-    if tail_obj is None or tail_obj.type != 'MESH':
-        return None
-    source_name = tail_obj.get("hair_pipe_tail_source_curve")
-    if source_name:
-        curve_obj = bpy.data.objects.get(source_name)
-        if curve_obj is not None and curve_obj.type == 'CURVE':
-            return curve_obj
-    if tail_obj.parent is not None and tail_obj.parent.type == 'CURVE':
-        return tail_obj.parent
-    return None
+    return lifecycle_get_tail_source_curve(tail_obj)
 
 
 def get_context_curve_object(context):
-    view_layer = getattr(context, 'view_layer', None)
-    active_obj = view_layer.objects.active if view_layer is not None else None
-    candidates = (
-        getattr(context, 'object', None),
-        getattr(context, 'active_object', None),
-        active_obj,
-    )
-
-    for obj in candidates:
-        if obj is None:
-            continue
-        if obj.type == 'CURVE':
-            return obj
-        if obj.type == 'EMPTY':
-            root_curve = get_curve_from_figuhair_root(obj)
-            if root_curve is not None:
-                return root_curve
-        source_curve = get_pipe_source_curve(obj)
-        if source_curve is not None:
-            return source_curve
-        source_curve = get_tail_source_curve(obj)
-        if source_curve is not None:
-            return source_curve
-
-    for obj in getattr(context, 'selected_objects', ()):
-        if obj.type == 'CURVE':
-            return obj
-        if obj.type == 'EMPTY':
-            root_curve = get_curve_from_figuhair_root(obj)
-            if root_curve is not None:
-                return root_curve
-        source_curve = get_pipe_source_curve(obj)
-        if source_curve is not None:
-            return source_curve
-        source_curve = get_tail_source_curve(obj)
-        if source_curve is not None:
-            return source_curve
-
-    return None
+    return lifecycle_get_context_curve_object(context)
 
 
 def parent_keep_world(obj, parent_obj):
@@ -3698,7 +3667,7 @@ def make_hair_curve_from_tube_mesh(context, mesh_obj):
                 v.is_ghost = False
             ps.active_vert_index = 0
 
-        normalize_cross_section_topology(settings)
+        normalize_cross_section_topology(settings, curve_obj)
         update_all_ghost_vertices(settings)
         if len(settings.point_settings) > 0:
             settings.active_point_index = 0
@@ -4043,6 +4012,7 @@ class HAIRPIPE_OT_add_cs_vert(bpy.types.Operator):
     def execute(self, context):
         settings = context.active_object.hair_pipe_settings
         ps = settings.point_settings[settings.active_point_index]
+        point_range = get_active_spline_point_range(context.active_object, settings)
         csv = ps.cross_section_verts
         n = len(csv)
         if n < 2:
@@ -4053,7 +4023,7 @@ class HAIRPIPE_OT_add_cs_vert(bpy.types.Operator):
                 v.is_ghost = point_idx != settings.active_point_index
                 point_setting.active_vert_index = len(point_setting.cross_section_verts) - 1
         else:
-            add_cross_section_vertex_after_all(settings, ps.active_vert_index)
+            add_cross_section_vertex_after_all(settings, ps.active_vert_index, point_range)
         update_all_ghost_vertices(settings)
         return {'FINISHED'}
 
@@ -4072,12 +4042,14 @@ class HAIRPIPE_OT_remove_cs_vert(bpy.types.Operator):
         s = obj.hair_pipe_settings
         if s.active_point_index >= len(s.point_settings):
             return False
-        return all(len(ps.cross_section_verts) > 3 for ps in s.point_settings)
+        start, end = get_active_spline_point_range(obj, s)
+        return all(len(ps.cross_section_verts) > 3 for ps in s.point_settings[start:end])
 
     def execute(self, context):
         settings = context.active_object.hair_pipe_settings
         ps = settings.point_settings[settings.active_point_index]
-        remove_cross_section_vertex_all(settings, ps.active_vert_index)
+        point_range = get_active_spline_point_range(context.active_object, settings)
+        remove_cross_section_vertex_all(settings, ps.active_vert_index, point_range)
         return {'FINISHED'}
 
 
@@ -5156,22 +5128,7 @@ def _copy_spline_to_curve(source_spline, target_data, transform):
 
 
 def _delete_generated_for_curve(curve_obj):
-    if curve_obj is None:
-        return
-    generated_objects = set()
-    for obj in list(bpy.data.objects):
-        if obj.type != 'MESH':
-            continue
-        source_name = obj.get("hair_pipe_source_curve") or obj.get("hair_pipe_tail_source_curve")
-        if source_name == curve_obj.name or obj.parent == curve_obj:
-            generated_objects.add(obj)
-    generated_objects.update(
-        generated for generated in (
-            get_pipe_object_for_curve(curve_obj),
-            get_tail_object_for_curve(curve_obj),
-        ) if generated is not None
-    )
-    for generated in generated_objects:
+    for generated in lifecycle_get_hair_family_objects(curve_obj)[1:]:
         bpy.data.objects.remove(generated, do_unlink=True)
 
 

@@ -1,17 +1,18 @@
 import time
 import bpy
 from bpy.app.handlers import persistent
+from .curve_data import ensure_curve_defaults, is_curve_edit_mode
+from .hair_lifecycle import (
+    generated_pipe_vertices,
+    get_curve_from_figuhair_root,
+    get_pipe_object_for_curve,
+)
+from .pipe_generation import generate_pipe_mesh
 from .operators import (
     sync_point_settings,
-    generate_pipe_mesh,
     sync_active_point_from_selection,
-    is_curve_edit_mode,
-    ensure_curve_defaults,
-    get_pipe_object_for_curve,
-    generated_pipe_vertices,
     redirect_pipe_selection,
     sync_selected_curve_visibility,
-    get_curve_from_figuhair_root,
 )
 
 

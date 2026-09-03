@@ -1,9 +1,6 @@
 import bpy
-from .operators import (
-    is_curve_edit_mode,
-    get_curve_point_by_global_index,
-    get_context_curve_object,
-)
+from .curve_data import is_curve_edit_mode
+from .hair_lifecycle import get_context_curve_object
 
 
 class HAIRPIPE_PT_main_panel(bpy.types.Panel):

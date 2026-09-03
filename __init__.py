@@ -8,7 +8,16 @@ bl_info = {
     "category": "Add Curve",
 }
 
-from . import operators, panel, properties, handler, widget_operator, preferences
+from . import (
+    curve_data,
+    hair_lifecycle,
+    operators,
+    panel,
+    properties,
+    handler,
+    widget_operator,
+    preferences,
+)
 
 
 def register():
