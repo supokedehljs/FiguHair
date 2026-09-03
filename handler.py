@@ -20,6 +20,8 @@ _last_rebuild_time = 0.0
 _rebuild_guard = False
 _visibility_guard = False
 _root_visibility_states = {}
+_last_selection_signature = None
+_last_visibility_sync_time = 0.0
 
 
 def update_mesh_data_in_place(mesh, verts, faces, smooth_shading):
@@ -178,33 +180,39 @@ _timer_registered = False
 
 
 def selection_sync_timer():
-    global _is_redirecting_selection
+    global _is_redirecting_selection, _last_selection_signature, _last_visibility_sync_time
     try:
-        obj = getattr(bpy.context, 'active_object', None)
+        context = bpy.context
+        obj = getattr(context, 'active_object', None)
+        selected_signature = tuple(sorted(item.name for item in context.selected_objects))
+        selection_changed = selected_signature != _last_selection_signature
+        if selection_changed:
+            _last_selection_signature = selected_signature
+
         if obj is not None and obj.type == 'MESH' and not _is_redirecting_selection:
-            # Selecting an object does not reliably emit a depsgraph update.
-            # This timer is the authoritative fallback for clicks, including
-            # Blender's ordinary duplicate operation on a FiguHair hierarchy.
             _is_redirecting_selection = True
             try:
-                redirect_pipe_selection(bpy.context, obj)
+                redirect_pipe_selection(context, obj)
             finally:
                 _is_redirecting_selection = False
         elif obj is not None and obj.type == 'CURVE' and is_curve_edit_mode(obj):
             sync_active_point_from_selection(obj)
             if time.perf_counter() - _last_rebuild_time > 0.35:
                 rebuild_existing_pipe(obj)
-                screen = getattr(bpy.context, 'screen', None)
+                screen = getattr(context, 'screen', None)
                 if screen is not None:
                     for area in screen.areas:
                         if area.type == 'VIEW_3D':
                             area.tag_redraw()
-        sync_selected_curve_visibility(bpy.context)
-        sync_selected_curve_visibility(bpy.context)
-        sync_figuhair_visibility()
+
+        now = time.perf_counter()
+        if selection_changed or now - _last_visibility_sync_time > 0.5:
+            sync_selected_curve_visibility(context)
+            sync_figuhair_visibility()
+            _last_visibility_sync_time = now
     except AttributeError:
         pass
-    return 0.1
+    return 0.25
 
 
 @persistent
