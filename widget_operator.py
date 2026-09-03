@@ -28,6 +28,8 @@ from .operators import (
     get_cross_section_frame,
     add_cross_section_vertex_after,
     remove_cross_section_vertex_all,
+    get_curve_spline_point_ranges,
+    get_active_spline_point_range,
     get_uncontrolled_roll_diagnostics,
 )
 
@@ -731,13 +733,25 @@ def map_vertex_index_between_sections(settings, source_idx, target_idx, vertex_i
 
 
 def get_neighbor_point_indices(settings):
-    """Return (prev_idx, current_idx, next_idx) for point settings."""
+    """Return neighbors within the active spline, never across separate hairs."""
     current = settings.active_point_index
     total = len(settings.point_settings)
     if total <= 1:
         return -1, current, -1
-    prev_idx = current - 1 if current > 0 else -1
-    next_idx = current + 1 if current < total - 1 else -1
+    obj = bpy.context.active_object
+    if obj is None or obj.type != 'CURVE':
+        return -1, current, -1
+    start = 0
+    end = total
+    offset = 0
+    for spline in obj.data.splines:
+        count = len(spline.bezier_points) if spline.type == 'BEZIER' else len(spline.points)
+        if offset <= current < offset + count:
+            start, end = offset, offset + count
+            break
+        offset += count
+    prev_idx = current - 1 if current > start else -1
+    next_idx = current + 1 if current + 1 < end else -1
     return prev_idx, current, next_idx
 
 
@@ -2271,7 +2285,8 @@ def get_widget_target_point_indices(context, settings):
     selected = get_selected_curve_point_indices(obj) if is_curve_edit_mode(obj) else []
     if settings.active_point_index not in selected:
         selected.append(settings.active_point_index)
-    return [idx for idx in dict.fromkeys(selected) if 0 <= idx < len(settings.point_settings)]
+    point_range = get_active_spline_point_range(obj, settings)
+    return [idx for idx in dict.fromkeys(selected) if point_range[0] <= idx < point_range[1]]
 
 
 def copy_cross_section_shape(source_ps, target_ps):
@@ -2703,7 +2718,10 @@ def add_cross_section_vertex(ps, settings):
     n = len(verts)
     active_point_index = settings.active_point_index
     if n < 2:
-        for idx, point_setting in enumerate(settings.point_settings):
+        context = bpy.context
+        point_range = get_active_spline_point_range(context.active_object, settings)
+        for idx in range(point_range[0], point_range[1]):
+            point_setting = settings.point_settings[idx]
             v = point_setting.cross_section_verts.add()
             v.offset_x = settings.default_radius
             v.offset_y = 0.0
@@ -2712,11 +2730,14 @@ def add_cross_section_vertex(ps, settings):
         return
 
     idx = max(0, min(ps.active_vert_index, n - 1))
-    add_cross_section_vertex_after_all(settings, active_point_index, idx)
+    point_range = get_active_spline_point_range(context.active_object, settings)
+    add_cross_section_vertex_after_all(settings, idx, point_range)
 
 
-def add_cross_section_vertex_after_all(settings, active_index, idx):
-    for point_idx, point_setting in enumerate(settings.point_settings):
+def add_cross_section_vertex_after_all(settings, active_index, idx, point_range=None):
+    start, end = point_range or (0, len(settings.point_settings))
+    for point_idx in range(start, end):
+        point_setting = settings.point_settings[point_idx]
         if len(point_setting.cross_section_verts) >= 2:
             add_cross_section_vertex_after(point_setting, idx, point_idx != active_index)
 
@@ -2749,7 +2770,10 @@ def insert_cross_section_vertex_on_edge_at_ratio(ps, edge_idx, edge_t, is_ghost=
 
 
 def insert_cross_section_vertex_on_edge_all(settings, active_index, edge_idx, local_x, local_y, edge_t, curve_point):
-    for idx, point_setting in enumerate(settings.point_settings):
+    context = bpy.context
+    point_range = get_active_spline_point_range(context.active_object, settings)
+    for idx in range(point_range[0], point_range[1]):
+        point_setting = settings.point_settings[idx]
         if len(point_setting.cross_section_verts) < 2:
             continue
         if idx == active_index:
@@ -2889,7 +2913,10 @@ def remove_selected_cross_section_vertices(settings, ps, selected_indices):
     if not indices or len(ps.cross_section_verts) - len(indices) < 3:
         return False
 
-    for point_setting in settings.point_settings:
+    context = bpy.context
+    point_range = get_active_spline_point_range(context.active_object, settings)
+    for point_idx in range(point_range[0], point_range[1]):
+        point_setting = settings.point_settings[point_idx]
         verts = point_setting.cross_section_verts
         for idx in indices:
             if 0 <= idx < len(verts):
@@ -3524,7 +3551,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             return {'RUNNING_MODAL'}
         if inside_remove_button:
             push_widget_undo(context, "删除横截面顶点")
-            remove_cross_section_vertex_all(settings, ps.active_vert_index)
+            point_range = get_active_spline_point_range(context.active_object, settings)
+            remove_cross_section_vertex_all(settings, ps.active_vert_index, point_range)
             sync_active_cross_section_to_selected_points(context)
             wd.drag_vert_index = -1
             redraw_view3d(context)
@@ -3762,7 +3790,8 @@ class HAIRPIPE_OT_widget_remove_vertex(bpy.types.Operator):
         if ps is None:
             return {'CANCELLED'}
         push_widget_undo(context, "删除横截面顶点")
-        remove_cross_section_vertex_all(settings, ps.active_vert_index)
+        point_range = get_active_spline_point_range(obj, settings)
+        remove_cross_section_vertex_all(settings, ps.active_vert_index, point_range)
         sync_active_cross_section_to_selected_points(context)
         if wd is not None:
             wd.drag_vert_index = -1
