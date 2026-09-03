@@ -86,19 +86,25 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         row.scale_y = 1.2
         row.operator("hair_pipe.mesh_to_hair_curve", text="管状网格转头发曲线", icon='CURVE_DATA')
 
+        edit_mode = curve_obj is not None and is_curve_edit_mode(curve_obj)
+        action_box = layout.box()
+        action_box.label(text="合并与分离", icon='CURVE_DATA')
+        merge_row = action_box.row(align=True)
+        merge_row.enabled = context.mode == 'OBJECT'
+        merge_row.operator("hair_pipe.merge_hair_curves", text="合并选中头发", icon='AUTOMERGE_ON')
+        separate_row = action_box.row(align=True)
+        separate_row.enabled = edit_mode
+        separate_row.operator("hair_pipe.separate_hair_splines", text="分离选中头发", icon='UNLINKED')
         if curve_obj is None:
             layout.label(text="未选择 FiguHair 头发；设置暂不可编辑", icon='INFO')
             settings = None
-            edit_mode = False
         else:
             try:
                 settings = curve_obj.hair_pipe_settings
-                edit_mode = is_curve_edit_mode(curve_obj)
             except Exception as exc:
                 layout.label(text="FiguHair 状态初始化失败", icon='ERROR')
                 layout.label(text=str(exc)[:80], icon='INFO')
                 settings = None
-                edit_mode = False
 
         if settings is None:
             self.draw_unavailable_settings(context, layout)
@@ -116,6 +122,15 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         row.prop(settings, "subdivision_levels", text="细分层级")
         icon = 'HIDE_OFF' if settings.default_subdiv else 'HIDE_ON'
         row.prop(settings, "default_subdiv", text="", icon=icon, toggle=True)
+
+        action_box = layout.box()
+        action_box.label(text="合并与分离", icon='CURVE_DATA')
+        merge_row = action_box.row(align=True)
+        merge_row.enabled = context.mode == 'OBJECT'
+        merge_row.operator("hair_pipe.merge_hair_curves", text="合并选中头发", icon='AUTOMERGE_ON')
+        separate_row = action_box.row(align=True)
+        separate_row.enabled = edit_mode
+        separate_row.operator("hair_pipe.separate_hair_splines", text="分离选中头发", icon='UNLINKED')
 
         header_box = layout.box()
         auto_update_row = header_box.row()

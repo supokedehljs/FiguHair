@@ -5128,6 +5128,215 @@ class HAIRPIPE_OT_duplicate_hair(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _copy_spline_to_curve(source_spline, target_data, transform):
+    target = target_data.splines.new(source_spline.type)
+    if source_spline.type == 'BEZIER':
+        target.bezier_points.add(max(0, len(source_spline.bezier_points) - 1))
+        for source, destination in zip(source_spline.bezier_points, target.bezier_points):
+            destination.co = transform @ source.co
+            destination.handle_left = transform @ source.handle_left
+            destination.handle_right = transform @ source.handle_right
+            destination.handle_left_type = source.handle_left_type
+            destination.handle_right_type = source.handle_right_type
+            destination.radius = source.radius
+            destination.tilt = source.tilt
+    else:
+        target.points.add(max(0, len(source_spline.points) - 1))
+        for source, destination in zip(source_spline.points, target.points):
+            co = transform @ Vector(source.co[:3])
+            destination.co = (co.x, co.y, co.z, source.co[3])
+            destination.radius = source.radius
+            destination.tilt = source.tilt
+        if source_spline.type == 'NURBS':
+            target.order_u = source_spline.order_u
+            target.use_endpoint_u = source_spline.use_endpoint_u
+    target.use_cyclic_u = source_spline.use_cyclic_u
+    target.resolution_u = source_spline.resolution_u
+    return target
+
+
+def _delete_generated_for_curve(curve_obj):
+    if curve_obj is None:
+        return
+    generated_objects = set()
+    for obj in list(bpy.data.objects):
+        if obj.type != 'MESH':
+            continue
+        source_name = obj.get("hair_pipe_source_curve") or obj.get("hair_pipe_tail_source_curve")
+        if source_name == curve_obj.name or obj.parent == curve_obj:
+            generated_objects.add(obj)
+    generated_objects.update(
+        generated for generated in (
+            get_pipe_object_for_curve(curve_obj),
+            get_tail_object_for_curve(curve_obj),
+        ) if generated is not None
+    )
+    for generated in generated_objects:
+        bpy.data.objects.remove(generated, do_unlink=True)
+
+
+class HAIRPIPE_OT_merge_hair_curves(bpy.types.Operator):
+    bl_idname = "hair_pipe.merge_hair_curves"
+    bl_label = "合并选中头发"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and len([
+            obj for obj in context.selected_objects
+            if obj.type == 'CURVE' and hasattr(obj, 'hair_pipe_settings')
+        ]) >= 2
+
+    def execute(self, context):
+        curves = [obj for obj in context.selected_objects
+                  if obj.type == 'CURVE' and hasattr(obj, 'hair_pipe_settings')]
+        active = context.view_layer.objects.active
+        if active not in curves:
+            active = curves[0]
+        for curve in curves:
+            try:
+                curve.update_from_editmode()
+            except Exception:
+                pass
+            sync_point_settings(curve)
+
+        active_matrix = active.matrix_world.copy()
+        merged_settings = [
+            _point_setting_to_data(item)
+            for item in active.hair_pipe_settings.point_settings
+        ]
+        source_splines = []
+        active_data = active.data.copy()
+        target_data = active_data
+        active_spline_count = len(active_data.splines)
+        for curve in curves:
+            if curve is active:
+                continue
+            source_settings = curve.hair_pipe_settings
+            point_offset = 0
+            transform = active_matrix.inverted_safe() @ curve.matrix_world
+            for spline in curve.data.splines:
+                count = len(spline.bezier_points) if spline.type == 'BEZIER' else len(spline.points)
+                source_splines.append((spline, transform))
+                for idx in range(point_offset, point_offset + count):
+                    if idx < len(source_settings.point_settings):
+                        merged_settings.append(_point_setting_to_data(source_settings.point_settings[idx]))
+                    else:
+                        merged_settings.append(None)
+                point_offset += count
+
+        # Remove every preview belonging to the selected sources before
+        # replacing the curve data. The active preview must not remain tied to
+        # the pre-merge curve datablock.
+        for curve in curves:
+            _delete_generated_for_curve(curve)
+
+        for spline, transform in source_splines:
+            _copy_spline_to_curve(spline, target_data, transform)
+        for curve in curves:
+            if curve is active:
+                continue
+            data = curve.data
+            bpy.data.objects.remove(curve, do_unlink=True)
+            if data.users == 0:
+                bpy.data.curves.remove(data)
+
+        old_active_data = active.data
+        active.data = active_data
+        if old_active_data.users == 0:
+            bpy.data.curves.remove(old_active_data)
+        _replace_point_settings_from_data(active.hair_pipe_settings, merged_settings)
+        active.hair_pipe_settings.auto_update = False
+        ensure_figuhair_root(active)
+        sync_point_settings(active)
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        active.select_set(True)
+        context.view_layer.objects.active = active
+        result = bpy.ops.hair_pipe.generate_pipe()
+        if 'FINISHED' not in result:
+            self.report({'ERROR'}, "合并后管线生成失败")
+            return {'CANCELLED'}
+        self.report({'INFO'}, f"已合并选中的 {len(curves)} 根头发")
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_separate_hair_splines(bpy.types.Operator):
+    bl_idname = "hair_pipe.separate_hair_splines"
+    bl_label = "分离选中头发"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        curve = get_context_curve_object(context)
+        return curve is not None and is_curve_edit_mode(curve)
+
+    def execute(self, context):
+        curve = get_context_curve_object(context)
+        try:
+            curve.update_from_editmode()
+        except Exception:
+            pass
+        sync_point_settings(curve)
+        settings = curve.hair_pipe_settings
+        selected = []
+        offset = 0
+        for spline in curve.data.splines:
+            points = spline.bezier_points if spline.type == 'BEZIER' else spline.points
+            flags = [p.select_control_point if spline.type == 'BEZIER' else p.select for p in points]
+            if flags and all(flags):
+                selected.append((spline, offset, len(points)))
+            offset += len(points)
+        if not selected or len(selected) == len(curve.data.splines):
+            self.report({'ERROR'}, "请选中部分完整头发后再分离")
+            return {'CANCELLED'}
+
+        _delete_generated_for_curve(curve)
+        new_data = bpy.data.curves.new(curve.name + " 分离Curve", 'CURVE')
+        new_data.dimensions = curve.data.dimensions
+        new_data.resolution_u = curve.data.resolution_u
+        new_data.render_resolution_u = curve.data.render_resolution_u
+        new_obj = bpy.data.objects.new(curve.name + " 分离", new_data)
+        collection = curve.users_collection[0] if curve.users_collection else context.scene.collection
+        collection.objects.link(new_obj)
+        new_obj.matrix_world = curve.matrix_world.copy()
+        new_obj["hair_pipe_base_name"] = get_next_figuhair_base_name()
+        new_settings = new_obj.hair_pipe_settings
+        new_settings.plugin_enabled = True
+        new_settings.auto_update = False
+        new_point_data = []
+        for spline, start, count in selected:
+            _copy_spline_to_curve(spline, new_data, Matrix.Identity(4))
+            for idx in range(start, start + count):
+                if idx < len(settings.point_settings):
+                    new_point_data.append(_point_setting_to_data(settings.point_settings[idx]))
+        _replace_point_settings_from_data(new_settings, new_point_data)
+
+        for spline, _start, _count in reversed(selected):
+            curve.data.splines.remove(spline)
+        sync_point_settings(curve)
+        ensure_figuhair_root(new_obj)
+        sync_point_settings(new_obj)
+
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        curve.select_set(True)
+        context.view_layer.objects.active = curve
+        with context.temp_override(active_object=curve, object=curve):
+            bpy.ops.object.mode_set(mode='OBJECT')
+            bpy.ops.hair_pipe.generate_pipe()
+        new_obj.select_set(True)
+        context.view_layer.objects.active = new_obj
+        with context.temp_override(active_object=new_obj, object=new_obj):
+            bpy.ops.hair_pipe.generate_pipe()
+        curve.select_set(True)
+        context.view_layer.objects.active = curve
+        with context.temp_override(active_object=curve, object=curve):
+            bpy.ops.object.mode_set(mode='EDIT')
+        self.report({'INFO'}, f"已分离选中的 {len(selected)} 根头发")
+        return {'FINISHED'}
+
+
 class HAIRPIPE_OT_merge_hair_for_export(bpy.types.Operator):
     """\u5c06\u6240\u6709\u5934\u53d1\u7f51\u683c\u5408\u5e76\u4e3a\u5355\u4e00\u7f51\u683c\u7528\u4e8e\u5bfc\u51fa\uff0c\u5e76\u9690\u85cf\u539f\u59cb\u5934\u53d1"""
     bl_idname = "hair_pipe.merge_hair_for_export"
@@ -5673,6 +5882,8 @@ classes = (
     HAIRPIPE_OT_family_local_view,
     HAIRPIPE_OT_delete_hair,
     HAIRPIPE_OT_duplicate_hair,
+    HAIRPIPE_OT_merge_hair_curves,
+    HAIRPIPE_OT_separate_hair_splines,
     HAIRPIPE_OT_merge_hair_for_export,
 )
 

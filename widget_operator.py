@@ -922,19 +922,22 @@ def select_curve_point_by_index(obj, target_idx):
                 global_idx += 1
 
 
-def get_curve_start_world_position(obj):
+def get_curve_start_world_positions(obj):
     if obj is None or obj.type != 'CURVE':
-        return None
-    if len(obj.data.splines) == 0:
-        return None
-    spline = obj.data.splines[0]
-    if spline.type == 'BEZIER':
-        if len(spline.bezier_points) == 0:
-            return None
-        return obj.matrix_world @ spline.bezier_points[0].co
-    if len(spline.points) == 0:
-        return None
-    return obj.matrix_world @ Vector(spline.points[0].co[:3])
+        return []
+    starts = []
+    for spline in obj.data.splines:
+        if spline.type == 'BEZIER':
+            if len(spline.bezier_points) > 0:
+                starts.append(obj.matrix_world @ spline.bezier_points[0].co)
+        elif len(spline.points) > 0:
+            starts.append(obj.matrix_world @ Vector(spline.points[0].co[:3]))
+    return starts
+
+
+def get_curve_start_world_position(obj):
+    starts = get_curve_start_world_positions(obj)
+    return starts[0] if starts else None
 
 
 def draw_curve_highlight_lines(context, obj):
@@ -1002,18 +1005,21 @@ def draw_curve_start_marker(context, obj):
     region_data = context.region_data
     if region is None or region_data is None:
         return
-    start_world = get_curve_start_world_position(obj)
-    if start_world is None:
+    start_positions = get_curve_start_world_positions(obj)
+    if not start_positions:
         return
-    pos = view3d_utils.location_3d_to_region_2d(region, region_data, start_world)
-    if pos is None:
+    projected = []
+    for start_world in start_positions:
+        pos = view3d_utils.location_3d_to_region_2d(region, region_data, start_world)
+        if pos is not None:
+            projected.append((pos.x, pos.y))
+    if not projected:
         return
 
-    x, y = pos.x, pos.y
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
     gpu.state.blend_set('ALPHA')
     gpu.state.point_size_set(9.0)
-    batch = batch_for_shader(shader, 'POINTS', {"pos": [(x, y)]})
+    batch = batch_for_shader(shader, 'POINTS', {"pos": projected})
     shader.bind()
     shader.uniform_float("color", (0.1, 1.0, 0.15, 1.0))
     batch.draw(shader)
@@ -1155,10 +1161,18 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
     selected_curve_indices = [active_idx] if active_idx >= 0 else []
 
     control_positions = []
+    spline_ranges = []
+    point_offset = 0
     for spline_data in get_curve_points_data(obj):
-        for point_data in spline_data.get('points', []):
-            control_positions.append(obj.matrix_world @ point_data['co'])
+        spline_points = spline_data.get('points', [])
+        control_positions.extend(obj.matrix_world @ point_data['co'] for point_data in spline_points)
+        spline_ranges.append((point_offset, point_offset + len(spline_points)))
+        point_offset += len(spline_points)
 
+    active_spline_range = next(
+        (item for item in spline_ranges if item[0] <= active_idx < item[1]),
+        None,
+    )
     ring_candidates = []
     for start in range(0, len(mesh_verts) - segments + 1, segments):
         ring = mesh_verts[start:start + segments]
@@ -1194,6 +1208,19 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
     show_roll_grid = False
     show_section_grid = False
     ring_count = len(mesh_verts) // segments
+    spline_ring_ranges = []
+    for spline_data in get_curve_points_data(obj):
+        point_count = len(spline_data.get('points', []))
+        if point_count < 2:
+            continue
+        segment_count = point_count if spline_data.get('cyclic', False) else point_count - 1
+        sample_steps = segment_count * max(1, int(getattr(obj.hair_pipe_settings, 'pipe_resolution', 0)) + 1)
+        ring_count_for_spline = sample_steps if spline_data.get('cyclic', False) else sample_steps + 1
+        start_ring = spline_ring_ranges[-1][1] if spline_ring_ranges else 0
+        end_ring = min(ring_count, start_ring + ring_count_for_spline)
+        spline_ring_ranges.append((start_ring, end_ring))
+    if not spline_ring_ranges and ring_count:
+        spline_ring_ranges.append((0, ring_count))
     view_forward = region_data.view_rotation @ Vector((0.0, 0.0, -1.0))
     camera_dir = -safe_normalized(view_forward)
     projected_rings = []
@@ -1220,7 +1247,7 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
         projected_rings.append(projected)
         front_masks.append([(world_pos - ring_center).dot(camera_dir) >= 0.0 for world_pos in ring_world])
 
-    bridge_offsets = [0] * max(0, ring_count - 1)
+    bridge_offsets = [None] * max(0, ring_count - 1)
     for ring_idx in range(len(bridge_offsets)):
         next_start = (ring_idx + 1) * segments
         next_ring = mesh_verts[next_start:next_start + segments]
@@ -1232,7 +1259,8 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
             range(len(control_positions)),
             key=lambda idx: (control_positions[idx] - next_center_world).length_squared,
         )
-        if target_idx < len(obj.hair_pipe_settings.point_settings):
+        same_spline = active_spline_range is not None and active_spline_range[0] <= target_idx < active_spline_range[1]
+        if same_spline and target_idx < len(obj.hair_pipe_settings.point_settings):
             bridge_offsets[ring_idx] = int(
                 getattr(obj.hair_pipe_settings.point_settings[target_idx], 'bridge_offset', 0)
             )
@@ -1279,11 +1307,15 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
             ring_indices = {active_ring_idx: selected_idx}
             for ring_idx in range(active_ring_idx, len(projected_rings) - 1):
                 current_idx = ring_indices[ring_idx]
-                offset = bridge_offsets[ring_idx] if ring_idx < len(bridge_offsets) else 0
+                offset = bridge_offsets[ring_idx]
+                if offset is None:
+                    break
                 ring_indices[ring_idx + 1] = (current_idx + offset) % segments
             for ring_idx in range(active_ring_idx - 1, -1, -1):
                 next_idx = ring_indices[ring_idx + 1]
-                offset = bridge_offsets[ring_idx] if ring_idx < len(bridge_offsets) else 0
+                offset = bridge_offsets[ring_idx]
+                if offset is None:
+                    break
                 ring_indices[ring_idx] = (next_idx - offset) % segments
 
             for ring_idx in range(len(projected_rings) - 1):
