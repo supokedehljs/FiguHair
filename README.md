@@ -13,6 +13,7 @@
 - 内置圆形重置、线性渐细预设
 - 将某个点的横截面复制到所有点
 - 自动更新：编辑参数后管道实时重新生成
+- 横截面编辑器支持 G/R/S（移动/旋转/缩放）、比例编辑、纵向联动、中键插入、右键框选
 
 ## 安装方法
 
@@ -31,170 +32,133 @@
 2. 选中曲线，在 3D 视图右侧边栏找到 **FiguHair** 标签
 3. 点击 **Sync Point Settings** 同步控制点
 4. 在 **Curve Points** 子面板选择要编辑的控制点
-5. 在 **Cross-Section Editor** 中调整横截面顶点位置
-6. 点击 **Generate Hair Pipe** 生成管道网格
+5. 按 `C` 进入横截面编辑器，拖动顶点调整形状（`G` 移动 / `R` 旋转 / `S` 缩放 / 滚轮切换控制点）
+6. 退出编辑器后管线自动更新，无需手动 Generate
 
 ### Cross-Section Editor 说明
 
-选中某个曲线控制点后，面板会显示该点的横截面：
+选中某个曲线控制点后按 `C` 进入编辑器：
 - 横截面是一个由多个顶点围成的闭合轮廓（默认是圆形）
-- 每个顶点显示 X / Y 坐标，直接修改数值即可改变形状
-- **Add Vertex**：在当前顶点和下一个顶点之间插入新顶点
-- **Remove Vertex**：删除当前选中的顶点（最少保留 3 个）
-- **Reset to Circle**：将当前点的横截面恢复为圆形
-- **Copy to All Points**：将当前横截面形状应用到所有控制点
-- **Scale**：整体缩放横截面
-- **Rotation**：整体旋转横截面
-
-### 典型工作流：制作一根头发
-
-1. 添加 Bezier 曲线，编辑模式下调整形状
-2. 回到物体模式，Hair Pipe 面板 → Sync Point Settings
-3. 点击 Linear Taper 应用渐细效果
-4. 选择某个特定的点，手动拖动横截面顶点做出扁平或不规则形状
-5. Generate Hair Pipe 生成最终网格
+- 拖动顶点或框选多点后 `G/R/S` 变换
+- **中键**：在边上插入新顶点
+- **右键拖拽**：框选顶点；`Shift` 追加选择
+- **Ctrl+滚轮**：切换控制点
+- **X / Delete**：删除选中顶点（最少保留 3 个）
+- **面板内按钮**：添加/删除顶点、幽灵点切换、平滑预览、翻转
 
 ## 兼容性
 
-- Blender 3.6+
+- Blender 4.0+（`bl_info.blender = (4,0,0)`，实测 5.1 可用）
 - 支持 Bezier、Poly、NURBS 曲线
 - 支持环形（Cyclic）曲线
 
-## 文件结构
+## 文件结构（2026-09-05 实测）
 
 ```
 hair_curve_pipe/
-├── __init__.py       # 插件入口
-├── properties.py     # 属性（横截面顶点、逐点设置、全局设置）
-├── operators.py      # 操作符（现阶段保留兼容层，逐步瘦身，约 200k -> 持续下降）
-├── panel.py          # 右栏 UI 面板（通用区已移除 生成/更新管线）
-├── handler.py        # 自动更新与可见性同步（0.25s 定时 + depsgraph，含框选重定向修复）
-├── curve_data.py     # 曲线读取与控制点选择
-├── hair_lifecycle.py # 头发对象族与预览网格管理
-├── cross_section.py  # 横截面拓扑（添加/删除/对齐与 spline 范围）
-├── math_utils.py     # 向量/切线/横截面坐标系/基础数学
-├── interp.py         # 数值插值（ease/lerp/hermite/section）
-├── sampling.py       # 采样（Bezier/NURBS/弧长/分布/切线）
-├── transition.py     # 横截面过渡与平滑插值、过渡点更新
-├── frames.py         # 帧/环构建、最小扭转与平滑
-├── ghost.py          # 幽灵点插值与同步
-├── selection.py      # 选择重定向与选中高亮（单点/框选均重定向到曲线）
-├── edit_utils.py     # 边流/点编辑工具（edge_flow、全局点索引等）
+├── __init__.py          # 插件入口（61 行，带 _force_unregister_stale 容错）
+├── preferences.py       # 偏好设置与快捷键（169 行）
+├── properties.py        # 属性（351 行）
+├── panel.py             # 右栏 UI（194 行）
+├── handler.py           # 自动更新与选择重定向（290 行）
+├── operators.py         # ★ 巨石剩余（4921 行 / 193 KB，待继续拆分）
+├── cross_section.py     # 横截面拓扑（92 行）
+├── curve_data.py        # 曲线读取与选择（83 行）
+├── hair_lifecycle.py    # 头发对象族管理（149 行）
+├── math_utils.py        # 数学工具（73 行）
+├── interp.py            # 插值（56 行）
+├── sampling.py          # 采样（227 行）
+├── transition.py        # 过渡点（236 行）
+├── frames.py            # 帧/环构建（184 行）
+├── ghost.py             # 幽灵点（69 行）
+├── selection.py         # 选择重定向（121 行，含框选重定向修复）
+├── edit_utils.py        # 编辑工具（104 行）
+├── pipe_generation.py   # 管线生成核心（219 行，已独立）
+├── point_data.py        # 逐点数据同步（227 行，已独立）
+├── widget_cache.py      # 管线网格缓存（55 行）
+├── widget_geometry.py   # 几何/对齐/顶点操作（733 行）
+├── widget_state.py      # 状态/PropertyGroup/undo（1156 行）
+├── widget_draw.py       # 绘制回调（1107 行）
+├── widget_interact.py   # 交互 Operator 与 modal（1305 行）
+├── widget_operator.py   # 兼容垫片（8 行，转发到上述 5 个 widget_*）
 └── README.md
+
+合计 26 个 py 文件 / 约 490 KB，operators.py 仍占约 39%
 ```
+
+> 统计命令：`python -c "import pathlib; base=pathlib.Path('.'); print(sum(p.stat().st_size for p in base.glob('*.py'))//1024)"`
 
 ## 模块化重构进度与后续计划
 
-### 当前阶段
+### 已完成
 
-- [x] 第一阶段：基础模块安全迁移
+- [x] **第一阶段：基础模块安全迁移**
+  - `curve_data.py` / `hair_lifecycle.py` 独立，`handler.py` / `panel.py` 已切换。
 
-当前处于**第一轮安全迁移阶段**。目标不是一次性重写插件，而是在保持 Blender 操作 ID、旧 `.blend` 文件兼容性和现有功能的前提下，逐步降低 `operators.py` 的职责。
+- [x] **第二阶段：头发生命周期正式切换**
+  - `get_figuhair_root / ensure_figuhair_root`、管线查找、源曲线反查等已迁移到 `hair_lifecycle.py`。
 
-目前已经完成：
+- [x] **第三阶段：管线生成与 Widget 拆分（2026-09-04 — 2026-09-05）**
+  - `cross_section.py` / `math_utils.py` / `ghost.py` / `interp.py` / `sampling.py` / `transition.py` / `frames.py` 独立；
+  - `selection.py` 独立（单点与框选均重定向到曲线，`handler.selection_redirect_callback` 同步修复）；
+  - `edit_utils.py` 独立；
+  - `pipe_generation.py`（`generate_pipe_mesh` 真实实现，~219 行）与 `point_data.py`（`sync_point_settings / sync_active_point_from_selection`）独立，`operators.py` 改为委托；
+  - `widget_operator.py`（原单文件约 180KB / 3500+ 行）按**定义顺序保留**显式拆为 5 模块：`widget_cache`（2 块）/ `widget_geometry`（41 块）/ `widget_state`（55 块）/ `widget_draw`（25 块）/ `widget_interact`（22 块），`widget_operator.py` 保留为兼容垫片：
+    ```python
+    from .widget_state import HairPipeWidgetSettings, refresh_widget_preview_from_property, ...
+    from .widget_cache import get_cached_pipe_mesh, clear_pipe_mesh_cache
+    from .widget_geometry import *
+    from .widget_draw import *
+    from .widget_interact import *
+    ```
+  - 修复拆分引入的 4 个启动/运行时回归（均已验证 `py_compile OK`）：
+    1. `HairPipeWidgetSettings.update=refresh_widget_preview_from_property` 的 `NameError`（`*` 导出顺序导致）→ 改显式导入并保证 `refresh` 定义在类之前；
+    2. `cannot import get_stable_widget_alignment from widget_state` → 改为 `from widget_geometry import get_stable_widget_alignment`；
+    3. `_draw_handle is not defined` / `HairPipePreferences already registered` → 补 `_draw_handle / _PIPE_BASEMESH_STATE_KEY / _CURVE_OVERLAY_STATE_KEY` 全局、幂等 `register`、惰性 `ensure_draw_handler` 与 `__pycache__` 清理；
+    4. `setup_widget: sync_point_settings is not defined` / `prepare_proportional_transform: get_active_curve_point_world_position is not defined` → 补 `point_data` 导入与 `get_active_curve_point_world_position` 惰性循环导入。
 
-- 新增 `curve_data.py`，承接曲线默认值、曲线点读取和控制点选择。
-- 新增 `hair_lifecycle.py`，承接 FiguHair 曲线、预览管线和末端网格的查找与对象关系管理。
-- `handler.py` 已经改为直接使用拆分后的曲线数据和生命周期模块。
-- `panel.py` 已经直接使用拆分后的基础模块。
-- `operators.py` 保留兼容入口，因此现有功能和外部导入不会突然失效。
-- 自动更新定时器已经从约每秒 10 次降低为约每秒 4 次，并增加选择状态缓存。
-- 合并 spline 的默认点问题已经修复，避免产生原点控制点和错误连线。
+### 当前巨石
 
-### 已经简化了多少
+- `operators.py` 仍为 4921 行 / 193 KB，占仓库约 39%，是最后的巨石。其余模块均已 < 60 KB。
+- 已采用**兼容层小步迁移**策略：新模块提供正式实现，`operators.py` 保留同名委托，`bl_idname` 与旧 `.blend` 保持不变，因此每轮拆分后可直接在 Blender 中测试。
 
-目前是**架构职责开始分离，但核心代码体积还没有大幅减少**的阶段。
+### 下一步（第四/五阶段，计划按此顺序每轮一个小功能组）
 
-按功能计算，已经迁移了两类基础职责：
+- [ ] **第四阶段：生成与对象服务**
+  - `pipe_service.py`：生成/更新预览管线（抽离 `generate_pipe_mesh` 的调用与容错）；
+  - `tail_service.py`：末端网格（已停用，仅清理残留）；
+  - `modifier_service.py`：细分/Geometry Nodes 修改器开关；
+  - `mesh_service.py`：安全重建、法线与材质。
 
-- [x] 曲线数据层：已迁移。
-- [x] 头发对象生命周期层：已建立独立实现，并开始被 handler 使用。
-
-尚未完全迁移的部分仍然主要集中在 `operators.py`：
-
-- 管线和横截面生成算法；
-- Bezier、NURBS、Poly 采样；
-- frame、ring 和 mesh 拓扑计算；
-- 尾部网格生成与重拓扑；
-- 曲线编辑操作；
-- 合并、分离、复制、删除和转换操作；
-- Widget 交互和相关辅助逻辑。
-
-因此当前可以理解为：**运行时耦合已经开始降低，但 `operators.py` 的文件行数暂时不会明显下降**。这是有意的安全策略，不是拆分没有生效。
-
-### 为什么拆分后测试没有问题
-
-这是因为本轮采用了兼容层迁移，而不是直接删除旧代码：
-
-1. 新模块提供新的正式实现。
-2. `operators.py` 暂时保留同名函数作为兼容入口。
-3. 旧的操作 ID 没有改变。
-4. `handler.py` 和 `panel.py` 只迁移了已经确认安全的调用。
-5. 尚未迁移的模块仍然可以从 `operators.py` 获取旧接口。
-
-所以测试没有问题是预期结果：外部行为保持不变，内部调用逐步转向新模块。等所有调用者完成迁移后，才会删除兼容实现。
-
-### 接下来需要拆分的主要部分
-
-后续还有 **4 个主要模块阶段**，每个阶段仍然会拆成多个小轮次，并在每轮后进行 Blender 测试。
-
-- [x] 第二阶段：头发生命周期正式切换
-
-已完成：`get_figuhair_root / ensure_figuhair_root`、管线与尾部网格查找、源曲线反查、预览网格父子关系与变换、头发对象族查找与清理已迁移到 `hair_lifecycle.py`，`operators.py` 保留兼容层，上层模块已切换到新入口；旧版末端网格功能已停用。
-
-- [ ] 第三阶段：管线生成核心（进行中，2026-09-04）
-
-已完成：`cross_section.py` 已独立；`math_utils.py` 已独立（`safe_normalized / get_cross_section_frame / Catmull-Rom / lerp_angle`）；`ghost.py` 已独立；`interp.py` 已独立；`sampling.py` 已独立（Bezier/NURBS 评估、弧长、分布、切线）；`transition.py` 已独立（横截面采样、过渡与 NURBS 插值）；`frames.py` 已独立（最小扭转环与平滑）；`selection.py` 已独立（选择重定向，单点与**框选**均重定向到曲线，修复框选能选到头发网格的 bug）；`edit_utils.py` 已独立（`get_curve_point_by_global_index / edge_flow_t / apply_edge_flow_to_target_indices` 等）；`operators.py` 中多头发合并/分离已移除，右栏通用区已隐藏 `生成 / 更新管线`，`添加头发` 为创建入口；`handler.py` 的 `selection_redirect_callback` 与 `selection_sync_timer` 已改为同时处理 `selected_objects` 框选集合。主线保持小步迁移与可测试策略。
-
-- [ ] 第四阶段：生成与对象服务
-
-目标：把“生成几何”和“写入 Blender 对象”分开。
-
-计划新增：
-
-- `pipe_service.py`：生成或更新预览管线；
-- `tail_service.py`：末端网格创建、连接和重拓扑；
-- `modifier_service.py`：细分和 Geometry Nodes 修改器；
-- `mesh_service.py`：安全重建、清理面和法线处理。
-
-这样 `generate_pipe` Operator 只负责检查上下文、调用服务和显示报告。
-
-- [ ] 第五阶段：Operator 和注册层整理
-
-目标：让 `operators.py` 最终只负责 Blender 操作符注册和少量上下文转换。
-
-计划按功能拆出：
-
-- `operators/generate.py`；
-- `operators/editing.py`；
-- `operators/hair_objects.py`；
-- `operators/conversion.py`；
-- `operators/merge_split.py`；
-- `operators/register.py`。
-
-所有现有 `bl_idname` 会保持不变，避免旧快捷键、面板和用户文件失效。
+- [ ] **第五阶段：Operator 注册层整理**（`operators.py` 最终只保留注册）
+  - 新建 `operators/` 包：
+    ```
+    operators/
+    ├── __init__.py      # register / unregister 汇总
+    ├── hair_objects.py  # hide/show/duplicate/delete/family_local_view
+    ├── editing.py       # edge_flow / point edit
+    ├── conversion.py    # curve <-> mesh 转换
+    ├── generate.py      # generate_pipe Operator 本体
+    └── merge_split.py   # 合并/分离（已移除，仅保留兼容空实现）
+    ```
+  - 每拆一个文件即：保留旧 `bl_idname` → `__init__.py` 重导出 → `operators.py` 改为 `from .operators.hair_objects import *` 委托 → Blender 测试 → 删除旧实现。
 
 ### 每一轮的固定流程
 
-后续每次重构都遵循以下流程：
-
 1. 只迁移一个小功能组。
 2. 保留旧接口兼容层。
-3. 检查导入和静态错误。
+3. 检查导入和静态错误（`py_compile` + `ReadLints`）。
 4. 你在 Blender 中测试实际操作。
-5. 如果有问题，先修复，不继续拆分。
+5. 如有问题先修复，不继续拆分。
 6. 确认稳定后再进入下一轮。
 7. 最后才删除旧兼容代码。
 
 ### 重构完成的判断标准
 
-只有满足以下条件，才认为模块化重构完成：
-
-- `operators.py` 不再包含大段几何算法；
+- `operators.py` 不再包含大段几何算法（目标 < 300 行，仅注册）；
 - handler 不再依赖 Operator 文件中的核心实现；
 - 头发对象创建、查找、清理有唯一实现；
 - 管线生成和 Blender 对象写入彻底分离；
-- 所有现有操作 ID 保持兼容；
-- 合并、分离、复制、删除、隐藏、尾部编辑和网格转换均通过测试；
-- 旧兼容入口可以安全删除。
-
+- 所有现有 `bl_idname` 保持兼容；
+- 合并、分离、复制、删除、隐藏、框选重定向均通过测试；
+- 旧兼容入口可安全删除。
