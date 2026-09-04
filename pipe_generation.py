@@ -62,14 +62,14 @@ def generate_pipe_mesh(curve_obj, settings):
     point_settings = settings.point_settings
     global_point_idx = 0
 
-    # 默认关闭：6点只出6环，不插过渡环，保持与旧版一致
-    adaptive_enabled = bool(getattr(settings, 'adaptive_resolution', False))
-    adaptive_max = int(getattr(settings, 'adaptive_max_steps', 4))
-    adaptive_max = max(1, min(32, adaptive_max))
+    # 已简化：固定 1点=1环，忽略旧的 pipe_resolution/adaptive 属性（保留兼容但不再生效）
+    adaptive_enabled = False
+    adaptive_max = 4
+    resolution = 0
 
     for spline_index, spline_data in enumerate(splines_data):
         points = spline_data['points']
-        resolution = max(0, int(getattr(settings, 'pipe_resolution', 0)))
+        resolution = 0  # 固定 1点=1环，已隐藏面板选项
         is_cyclic = spline_data['cyclic']
         num_points = len(points)
         if num_points < 2:

@@ -13,6 +13,21 @@ from .operators import (
     sync_point_settings,
     sync_active_point_from_selection,
 )
+def _clear_all_existing_crease_once():
+    try:
+        from .pipe_ops import clear_boulder_crease
+        import bpy as _bpy
+        for obj in list(_bpy.data.objects):
+            if getattr(obj, 'type', None) == 'MESH' and obj.get('hair_pipe_source_curve'):
+                try:
+                    clear_boulder_crease(obj)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return None
+
+
 from .selection import (
     redirect_pipe_selection,
     sync_selected_curve_visibility,
@@ -127,6 +142,27 @@ def rebuild_existing_pipe(curve_obj, fast=False):
         verts = generated_pipe_vertices(verts, curve_obj)
 
         update_mesh_data_in_place(pipe_obj.data, verts, faces, settings.smooth_shading)
+        # 重建后若细分被意外移除则补回
+        try:
+            from .pipe_ops import ensure_pipe_subdivision_modifier
+            if pipe_obj.modifiers.get("FiguHair Catmull-Clark") is None:
+                ensure_pipe_subdivision_modifier(pipe_obj, bool(settings.default_subdiv), int(settings.subdivision_levels))
+            else:
+                # 同步显隐与层级
+                m = pipe_obj.modifiers.get("FiguHair Catmull-Clark")
+                try:
+                    m.show_viewport = bool(settings.default_subdiv)
+                    m.levels = int(settings.subdivision_levels)
+                    m.render_levels = int(settings.subdivision_levels)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            from .pipe_ops import clear_boulder_crease
+            clear_boulder_crease(pipe_obj)
+        except Exception:
+            pass
         _last_rebuild_time = time.perf_counter()
     finally:
         _rebuild_guard = False
@@ -268,6 +304,11 @@ def register_handler():
 
     if not bpy.app.timers.is_registered(selection_sync_timer):
         bpy.app.timers.register(selection_sync_timer, persistent=True)
+    try:
+        if not bpy.app.timers.is_registered(_clear_all_existing_crease_once):
+            bpy.app.timers.register(_clear_all_existing_crease_once, first_interval=0.5)
+    except Exception:
+        pass
     _timer_registered = True
 
 

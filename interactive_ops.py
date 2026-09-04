@@ -354,11 +354,22 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
                             pass
                     try:
                         _configure_pipe(pipe_obj, curve_obj)
-                    except Exception:
+                    except Exception as _e:
+                        print(f"[FiguHair] interactive configure failed: {_e}")
                         try:
                             _set_gen_xform(pipe_obj, curve_obj)
                         except Exception:
                             pass
+                    # 模态内 _configure 可能被异常吞掉，二次保底确保细分一定存在
+                    try:
+                        from .pipe_ops import ensure_pipe_subdivision_modifier as _ensure_subd
+                        _ensure_subd(pipe_obj, bool(settings_for_pipe.default_subdiv), int(settings_for_pipe.subdivision_levels))
+                        try:
+                            pipe_obj.update_tag()
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
                     try:
                         context.view_layer.update()
                     except Exception:

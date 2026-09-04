@@ -211,26 +211,47 @@ def ensure_pipe_subdivision_modifier(pipe_obj, show_viewport=True, levels=2):
 
 
 def _configure_subdiv_edge_crease(pipe_obj, segments):
-    """对管的纵向边施加 crease，避免 Catmull-Clark 在较长四边面处鼓起（视觉上的巨石/气球膨胀）。"""
-    if pipe_obj is None or pipe_obj.type != 'MESH':
-        return
-    mesh = pipe_obj.data
-    if mesh is None:
-        return
-    segments = max(3, int(segments))
-    # 首次创建网格时不一定有边；静默跳过，下一帧生成后自然生效
+    # 已移除纵向折痕功能：不再对任何边加 crease，保持 Catmull-Clark 正常圆顺
     try:
-        if len(mesh.edges) == 0:
-            return
-        if 'crease' not in mesh.attributes and not hasattr(mesh.edges[0], 'crease'):
-            # Blender <4 中 crease 在 mesh.edges[].crease
-            pass
+        clear_boulder_crease(pipe_obj)
     except Exception:
+        pass
+
+
+def clear_boulder_crease(pipe_obj):
+    """清除所有纵向/任意边的 crease，恢复细分后的圆顺效果。"""
+    if pipe_obj is None or getattr(pipe_obj, "type", None) != 'MESH':
         return
-    # Catmull-Clark 的气球效应主要来自纵向跨度过大的四边面；
-    # 自适应细分已将长宽比压到 ~1，本函数仅作为第二道保险。
-    # 若后续需要更强约束，可在此对纵向环边设置 crease=1.0。
-    return
+    mesh = getattr(pipe_obj, "data", None)
+    if mesh is None or len(getattr(mesh, "edges", [])) == 0:
+        return
+    try:
+        if "crease_edge" in mesh.attributes:
+            try:
+                attr = mesh.attributes["crease_edge"]
+                vals = [0.0] * len(mesh.edges)
+                try:
+                    attr.data.foreach_set("value", vals)
+                except Exception:
+                    for i in range(len(vals)):
+                        try: attr.data[i].value = 0.0
+                        except: pass
+            except Exception:
+                pass
+        for e in mesh.edges:
+            try: e.crease = 0.0
+            except: pass
+        try: mesh.update()
+        except: pass
+        try: pipe_obj.update_tag()
+        except: pass
+    except Exception:
+        pass
+
+
+def apply_boulder_crease_to_pipe(pipe_obj, curve_obj=None, segments_override=None):
+    """兼容旧调用：现在一律清除折痕，不再制造棱角。"""
+    clear_boulder_crease(pipe_obj)
 
 
 def move_modifier_before(pipe_obj, modifier, before_modifier):
@@ -430,11 +451,31 @@ def configure_pipe_object(pipe_obj, curve_obj):
 
     pipe_obj.show_in_front = False
     pipe_obj.hide_select = False
-    ensure_pipe_subdivision_modifier(
-        pipe_obj,
-        curve_obj.hair_pipe_settings.default_subdiv,
-        curve_obj.hair_pipe_settings.subdivision_levels,
-    )
+    # 必须确保细分修改器存在（修复添加头发没有细分的问题）
+    try:
+        ensure_pipe_subdivision_modifier(
+            pipe_obj,
+            bool(curve_obj.hair_pipe_settings.default_subdiv),
+            int(curve_obj.hair_pipe_settings.subdivision_levels),
+        )
+    except Exception as _e:
+        print(f"[FiguHair] ensure subdiv failed: {_e}")
+        try:
+            ensure_pipe_subdivision_modifier(pipe_obj, True, 2)
+        except Exception:
+            pass
+    # 已移除纵向折痕：确保网格无 crease，保持圆顺
+    try:
+        clear_boulder_crease(pipe_obj)
+    except Exception:
+        pass
+    # 强制刷新
+    try:
+        pipe_obj.update_tag()
+        if hasattr(pipe_obj.data, "update_tag"):
+            pipe_obj.data.update_tag()
+    except Exception:
+        pass
     pipe_obj.select_set(False)
 
 

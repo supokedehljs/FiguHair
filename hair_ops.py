@@ -397,37 +397,163 @@ def _copy_spline_to_curve(source_spline, target_data, transform):
 
 
 class HAIRPIPE_OT_merge_hair_for_export(bpy.types.Operator):
-    """Merge selected pipe meshes for export (legacy helper kept for compatibility)"""
+    """将场景中所有 FiguHair 头发网格合并为一个导出网格（不修改原物体，合并结果不带细分）"""
     bl_idname = "hair_pipe.merge_hair_for_export"
     bl_label = "导出合并网格"
     bl_options = {'REGISTER', 'UNDO'}
 
+    @classmethod
+    def poll(cls, context):
+        return True
+
     def execute(self, context):
-        pipe_objs = [o for o in context.selected_objects if _is_pipe_mesh_obj(o)]
+        # 兼容旧版“选中合并”：优先用选中集推导；由于 FiguHair 开启时网格不可选（hide_select），
+        # selected_objects 常为空或只有曲线，因此回退到全场景收集，避免“请选择至少一个FiguHair网格”误报
+        selected_pipe = [o for o in getattr(context, 'selected_objects', []) if _is_pipe_mesh_obj(o)]
+        selected_curves = []
+        for o in getattr(context, 'selected_objects', []):
+            if o is None:
+                continue
+            if o.type == 'CURVE' and hasattr(o, 'hair_pipe_settings'):
+                selected_curves.append(o)
+            elif o.type == 'EMPTY':
+                c = get_curve_from_figuhair_root(o)
+                if c is not None:
+                    selected_curves.append(c)
+            elif o.type == 'MESH':
+                c = get_pipe_source_curve(o) or get_tail_source_curve(o)
+                if c is not None:
+                    selected_curves.append(c)
+        # 去重
+        uniq = {}
+        for c in selected_curves:
+            uniq[c.name] = c
+        selected_curves = list(uniq.values())
+
+        pipe_objs = []
+        if selected_pipe:
+            pipe_objs = list(selected_pipe)
+        elif selected_curves:
+            for c in selected_curves:
+                po = get_pipe_object_for_curve(c)
+                if po is not None and po not in pipe_objs:
+                    pipe_objs.append(po)
+        # 选中集仍为空 -> 合并全场景所有头发网格（符合用户直觉：按一次就把所有头发合为一个）
         if not pipe_objs:
-            self.report({'WARNING'}, "请选择至少一个 FiguHair 网格")
+            pipe_objs = [o for o in bpy.data.objects if _is_pipe_mesh_obj(o)]
+        if not pipe_objs:
+            self.report({'WARNING'}, "场景中没有可合并的 FiguHair 网格（请先生成管线）")
             return {'CANCELLED'}
+        # 去重并过滤无效
+        seen = set()
+        uniq_pipes = []
+        for o in pipe_objs:
+            if o is None or o.name in seen or o.type != 'MESH':
+                continue
+            seen.add(o.name)
+            uniq_pipes.append(o)
+        pipe_objs = uniq_pipes
+        if not pipe_objs:
+            self.report({'WARNING'}, "没有找到可合并的 FiguHair 网格")
+            return {'CANCELLED'}
+
         merged_verts = []
         merged_faces = []
         vert_offset = 0
+        # 用基础网格（不应用修改器），确保“合成的不要有细分”
         for obj in pipe_objs:
             mesh = obj.data
-            verts = [obj.matrix_world @ v.co for v in mesh.vertices]
+            if mesh is None or len(mesh.vertices) == 0:
+                continue
+            # 世界空间顶点，原物体保持不变
+            mtx = obj.matrix_world
+            verts = [mtx @ v.co for v in mesh.vertices]
             merged_verts.extend(verts)
             for poly in mesh.polygons:
                 face = tuple(vert_offset + idx for idx in poly.vertices)
-                merged_faces.append(face)
+                if len(face) >= 3:
+                    merged_faces.append(face)
             vert_offset += len(verts)
+        if not merged_verts or not merged_faces:
+            self.report({'WARNING'}, "FiguHair 网格为空，无法合并")
+            return {'CANCELLED'}
         merged_mesh = bpy.data.meshes.new("HairMerged")
-        merged_mesh.from_pydata(merged_verts, [], merged_faces)
-        merged_mesh.update()
-        merged_obj = bpy.data.objects.new("HairMerged", merged_mesh)
-        context.scene.collection.objects.link(merged_obj)
-        for o in context.selected_objects:
-            o.select_set(False)
-        merged_obj.select_set(True)
-        context.view_layer.objects.active = merged_obj
-        self.report({'INFO'}, f"已合并 {len(pipe_objs)} 个头发网格为: {merged_obj.name}")
+        try:
+            merged_mesh.from_pydata(merged_verts, [], merged_faces)
+            merged_mesh.update()
+            # 保留平滑着色，与原管一致但不带细分修改器
+            try:
+                for poly in merged_mesh.polygons:
+                    poly.use_smooth = True
+            except Exception:
+                pass
+        except Exception as exc:
+            self.report({'ERROR'}, f"合并网格失败: {exc}")
+            return {'CANCELLED'}
+        # 命名避免冲突
+        base_name = "HairMerged"
+        name = base_name
+        idx = 1
+        while bpy.data.objects.get(name) is not None:
+            idx += 1
+            name = f"{base_name}.{idx:03d}"
+        merged_obj = bpy.data.objects.new(name, merged_mesh)
+        # 明确不带任何修改器
+        # 链接到当前集合
+        try:
+            coll = context.collection
+            if coll is None:
+                coll = context.scene.collection
+            coll.objects.link(merged_obj)
+        except Exception:
+            context.scene.collection.objects.link(merged_obj)
+        merged_obj.display_type = 'TEXTURED'
+        merged_obj.show_in_front = False
+        # 不隐藏原物体，保持“原本的不要改变”
+        for o in list(getattr(context, 'selected_objects', [])):
+            try:
+                o.select_set(False)
+            except Exception:
+                pass
+        try:
+            merged_obj.select_set(True)
+            context.view_layer.objects.active = merged_obj
+        except Exception:
+            pass
+        self.report({'INFO'}, f"已合并 {len(pipe_objs)} 个头发网格为: {merged_obj.name}（不含细分，已保留原物体）")
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_toggle_plugin_enabled(bpy.types.Operator):
+    """全局开关 FiguHair（与偏好设置中的插件启用等效）"""
+    bl_idname = "hair_pipe.toggle_plugin_enabled"
+    bl_label = "切换 FiguHair 启用"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        try:
+            from .operators import apply_plugin_enabled_state, is_plugin_enabled
+            new_val = not bool(is_plugin_enabled())
+            # 若场景中尚无任何头发曲线，则以当前上下文曲线为准
+            has_any = any(o.type == 'CURVE' and hasattr(o, 'hair_pipe_settings') for o in bpy.data.objects)
+            if not has_any:
+                curve_obj = get_context_curve_object(context)
+                if curve_obj is not None and hasattr(curve_obj, 'hair_pipe_settings'):
+                    curve_obj.hair_pipe_settings.plugin_enabled = new_val
+                    self.report({'INFO'}, "FiguHair 已开启" if new_val else "FiguHair 已关闭")
+                    return {'FINISHED'}
+            apply_plugin_enabled_state(new_val)
+            # 强制刷新视口与可选性
+            try:
+                for area in getattr(context.screen, 'areas', []):
+                    if getattr(area, 'type', None) == 'VIEW_3D':
+                        area.tag_redraw()
+            except Exception:
+                pass
+            self.report({'INFO'}, "FiguHair 已开启" if new_val else "FiguHair 已关闭")
+        except Exception as exc:
+            self.report({'ERROR'}, f"切换失败: {exc}")
+            return {'CANCELLED'}
         return {'FINISHED'}
 
 
@@ -438,4 +564,5 @@ classes = (
     HAIRPIPE_OT_delete_hair,
     HAIRPIPE_OT_duplicate_hair,
     HAIRPIPE_OT_merge_hair_for_export,
+    HAIRPIPE_OT_toggle_plugin_enabled,
 )

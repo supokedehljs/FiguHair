@@ -30,10 +30,36 @@ def update_shared_hair_material(self, context):
 
 def update_subdivision_modifier_settings(self, context):
     owner = getattr(self, "id_data", None)
-    if owner is None or getattr(owner, "type", None) != 'CURVE':
+    # 兼容部分旧文件 id_data 可能为 None 或 Curve 数据块
+    curve_name = None
+    if owner is not None:
+        if getattr(owner, "type", None) == 'CURVE':
+            curve_name = getattr(owner, "name", None)
+        elif hasattr(owner, "name"):
+            # 可能是 Curve 数据块 -> 反查对象
+            try:
+                for o in bpy.data.objects:
+                    if getattr(o, "type", None) == 'CURVE' and getattr(o, "data", None) == owner:
+                        curve_name = o.name
+                        owner = o
+                        break
+            except Exception:
+                pass
+    if not curve_name:
+        # 兜底：按当前活动曲线
+        try:
+            from .hair_lifecycle import get_context_curve_object
+            ctx = context if context is not None else bpy.context
+            co = get_context_curve_object(ctx)
+            if co is not None:
+                curve_name = co.name
+                owner = co
+        except Exception:
+            pass
+    if not curve_name:
         return
     for obj in bpy.data.objects:
-        if obj.type != 'MESH' or obj.get("hair_pipe_source_curve") != owner.name:
+        if obj.type != 'MESH' or obj.get("hair_pipe_source_curve") != curve_name:
             continue
         modifier = obj.modifiers.get("FiguHair Catmull-Clark")
         if modifier is None:
@@ -41,9 +67,36 @@ def update_subdivision_modifier_settings(self, context):
             modifier.subdivision_type = 'CATMULL_CLARK'
             modifier.show_render = True
         modifier.subdivision_type = 'CATMULL_CLARK'
-        modifier.levels = self.subdivision_levels
-        modifier.render_levels = self.subdivision_levels
-        modifier.show_viewport = self.default_subdiv
+        try:
+            modifier.levels = int(self.subdivision_levels)
+            modifier.render_levels = int(self.subdivision_levels)
+        except Exception:
+            pass
+        modifier.show_viewport = bool(self.default_subdiv)
+        modifier.show_render = True
+
+
+def update_boulder_fix(self, context):
+    # 折痕功能已移除：此回调仅清除残留 crease，避免棱角
+    owner = getattr(self, "id_data", None)
+    if owner is None or getattr(owner, "type", None) != 'CURVE':
+        return
+    try:
+        from .pipe_ops import clear_boulder_crease
+        from .hair_lifecycle import get_pipe_object_for_curve
+        pipe_obj = get_pipe_object_for_curve(owner)
+        if pipe_obj is not None:
+            clear_boulder_crease(pipe_obj)
+            try:
+                pipe_obj.data.update_tag()
+                pipe_obj.update_tag()
+            except Exception:
+                pass
+            for area in getattr(getattr(context, 'screen', None), 'areas', ()):
+                if getattr(area, 'type', None) == 'VIEW_3D':
+                    area.tag_redraw()
+    except Exception:
+        pass
 
 
 class HairPipeCrossSectionVertex(PropertyGroup):
@@ -168,11 +221,13 @@ class HairPipeSettings(PropertyGroup):
         default=0,
         min=0,
         max=12,
+        options={'HIDDEN'},
     )
     adaptive_resolution: BoolProperty(
         name="自适应补环（可选）",
         description="关闭时严格 1点=1环。开启时才按段长/半径自动在长段中插入过渡环以改善长宽比（会改变环数，仅在长段鼓包严重时开启）",
         default=False,
+        options={'HIDDEN'},
     )
     adaptive_max_steps: IntProperty(
         name="自适应单段上限",
@@ -180,6 +235,25 @@ class HairPipeSettings(PropertyGroup):
         default=4,
         min=1,
         max=32,
+        options={'HIDDEN'},
+    )
+    boulder_fix_enabled: BoolProperty(
+        name="巨石修复（纵向折痕）",
+        description="不改变环数：给管的纵向边加 Edge Crease，让 Catmull-Clark 不把细长四边面鼓成巨石。关闭则完全不改网格",
+        default=True,
+        update=update_boulder_fix,
+        options={'HIDDEN'},
+    )
+    boulder_fix_crease: FloatProperty(
+        name="折痕强度",
+        description="纵向边的 Crease 值，1.0 完全压住膨胀，0.5 保留少许圆顺",
+        default=1.0,
+        min=0.0,
+        max=1.0,
+        precision=2,
+        subtype='FACTOR',
+        update=update_boulder_fix,
+        options={'HIDDEN'},
     )
     transition_mode: EnumProperty(
         name="Transition Mode",

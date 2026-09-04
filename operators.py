@@ -129,6 +129,7 @@ from .hair_lifecycle import (
     set_generated_object_transform as lifecycle_set_generated_object_transform,
 )
 from .hair_ops import (
+    HAIRPIPE_OT_toggle_plugin_enabled as hair_ops_toggle_plugin_enabled,
     HAIRPIPE_OT_hide_hair as hair_ops_hide_hair,
     HAIRPIPE_OT_show_all_hair as hair_ops_show_all_hair,
     HAIRPIPE_OT_family_local_view as hair_ops_family_local_view,
@@ -1969,6 +1970,7 @@ HAIRPIPE_OT_hide_hair = hair_ops_hide_hair
 HAIRPIPE_OT_show_all_hair = hair_ops_show_all_hair
 HAIRPIPE_OT_family_local_view = hair_ops_family_local_view
 HAIRPIPE_OT_delete_hair = hair_ops_delete_hair
+HAIRPIPE_OT_toggle_plugin_enabled = hair_ops_toggle_plugin_enabled
 HAIRPIPE_OT_duplicate_hair = hair_ops_duplicate_hair
 HAIRPIPE_OT_merge_hair_for_export = hair_ops_merge_hair_for_export
 
@@ -2013,6 +2015,7 @@ classes = (
     HAIRPIPE_OT_delete_hair,
     HAIRPIPE_OT_duplicate_hair,
     HAIRPIPE_OT_merge_hair_for_export,
+    HAIRPIPE_OT_toggle_plugin_enabled,
 )
 
 

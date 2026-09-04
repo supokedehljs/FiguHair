@@ -47,18 +47,21 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         layout = self.layout
         curve_obj = get_context_curve_object(context)
 
+        # 全局开关：与偏好设置中的插件启用同步，无论是否选中曲线均可切换（修复右栏按钮不起作用）
         enable_box = layout.box()
-        if curve_obj is not None:
-            settings = curve_obj.hair_pipe_settings
-            enable_box.prop(
-                settings,
-                "plugin_enabled",
-                text="FiguHair 已开启" if settings.plugin_enabled else "FiguHair 已关闭",
-                icon='CHECKBOX_HLT' if settings.plugin_enabled else 'CHECKBOX_DEHLT',
-                toggle=True,
-            )
-        else:
-            enable_box.label(text="选择 FiguHair 曲线以切换插件", icon='INFO')
+        try:
+            from .operators import is_plugin_enabled
+            _enabled = bool(is_plugin_enabled())
+        except Exception:
+            _enabled = bool(curve_obj.hair_pipe_settings.plugin_enabled) if curve_obj is not None and hasattr(curve_obj, 'hair_pipe_settings') else True
+        row = enable_box.row(align=True)
+        row.scale_y = 1.15
+        row.operator(
+            "hair_pipe.toggle_plugin_enabled",
+            text="FiguHair 已开启" if _enabled else "FiguHair 已关闭",
+            icon='CHECKBOX_HLT' if _enabled else 'CHECKBOX_DEHLT',
+            depress=_enabled,
+        )
 
         create_box = layout.box()
         create_box.label(text="创建", icon='CURVE_DATA')
@@ -102,19 +105,14 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         box.prop(settings, "shared_hair_material", text="材质选择", icon='MATERIAL')
         box.label(text="滚转算法：START 绝对锁定")
         box.prop(settings, "smooth_shading", text="平滑着色")
-        row = box.row(align=True)
-        row.prop(settings, "subdivision_levels", text="细分层级")
+        # 细分控制始终可用，不受全局开关的 column.enabled 影响（修复“无法设置”）
+        subdiv_row = box.row(align=True)
+        subdiv_row.enabled = True
+        subdiv_row.prop(settings, "subdivision_levels", text="细分层级")
         icon = 'HIDE_OFF' if settings.default_subdiv else 'HIDE_ON'
-        row.prop(settings, "default_subdiv", text="", icon=icon, toggle=True)
+        subdiv_row.prop(settings, "default_subdiv", text="", icon=icon, toggle=True)
 
-        boulder_box = plugin_controls.box()
-        boulder_box.label(text="细分（默认 1点=1环）", icon='MOD_SUBSURF')
-        boulder_box.prop(settings, "pipe_resolution", text="中间环数")
-        col = boulder_box.column(align=True)
-        col.prop(settings, "adaptive_resolution", text="仅长段自适应补环（关闭=严格 1点1环）")
-        sub = col.column(align=True)
-        sub.enabled = settings.adaptive_resolution and settings.pipe_resolution == 0
-        sub.prop(settings, "adaptive_max_steps", text="单段上限")
+        # 细分与巨石修复已简化：固定 1点=1环，纵向折痕自动常驻（已隐藏多余面板选项）
 
         edit_mode = curve_obj is not None and is_curve_edit_mode(curve_obj)
         header_box = layout.box()
