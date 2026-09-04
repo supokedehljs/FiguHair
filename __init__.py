@@ -11,6 +11,8 @@ bl_info = {
 from . import (
     cross_section,
     curve_data,
+    edit_utils,
+    frames,
     ghost,
     hair_lifecycle,
     interp,
@@ -18,6 +20,9 @@ from . import (
     operators,
     panel,
     properties,
+    sampling,
+    selection,
+    transition,
     handler,
     widget_operator,
     preferences,

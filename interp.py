@@ -1,4 +1,3 @@
-import math
 from .math_utils import catmull_rom_value
 
 

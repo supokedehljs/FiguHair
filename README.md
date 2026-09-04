@@ -66,15 +66,20 @@
 hair_curve_pipe/
 ├── __init__.py       # 插件入口
 ├── properties.py     # 属性（横截面顶点、逐点设置、全局设置）
-├── operators.py      # 操作符（现阶段保留兼容层，逐步瘦身）
-├── panel.py          # 右栏 UI 面板
-├── handler.py        # 自动更新与可见性同步
+├── operators.py      # 操作符（现阶段保留兼容层，逐步瘦身，约 200k -> 持续下降）
+├── panel.py          # 右栏 UI 面板（通用区已移除 生成/更新管线）
+├── handler.py        # 自动更新与可见性同步（0.25s 定时 + depsgraph，含框选重定向修复）
 ├── curve_data.py     # 曲线读取与控制点选择
 ├── hair_lifecycle.py # 头发对象族与预览网格管理
 ├── cross_section.py  # 横截面拓扑（添加/删除/对齐与 spline 范围）
-├── math_utils.py     # 向量/切线/横截面坐标系/插值数学
+├── math_utils.py     # 向量/切线/横截面坐标系/基础数学
 ├── interp.py         # 数值插值（ease/lerp/hermite/section）
+├── sampling.py       # 采样（Bezier/NURBS/弧长/分布/切线）
+├── transition.py     # 横截面过渡与平滑插值、过渡点更新
+├── frames.py         # 帧/环构建、最小扭转与平滑
 ├── ghost.py          # 幽灵点插值与同步
+├── selection.py      # 选择重定向与选中高亮（单点/框选均重定向到曲线）
+├── edit_utils.py     # 边流/点编辑工具（edge_flow、全局点索引等）
 └── README.md
 ```
 
@@ -137,9 +142,9 @@ hair_curve_pipe/
 
 已完成：`get_figuhair_root / ensure_figuhair_root`、管线与尾部网格查找、源曲线反查、预览网格父子关系与变换、头发对象族查找与清理已迁移到 `hair_lifecycle.py`，`operators.py` 保留兼容层，上层模块已切换到新入口；旧版末端网格功能已停用。
 
-- [ ] 第三阶段：管线生成核心（进行中）
+- [ ] 第三阶段：管线生成核心（进行中，2026-09-04）
 
-已完成：`cross_section.py` 已独立；`math_utils.py` 已独立（`safe_normalized / get_cross_section_frame / Catmull-Rom`）；`ghost.py` 已独立；`interp.py` 已独立（数值插值与段插值）；`operators.py` 中多头发合并/分离已移除，右栏通用区已隐藏 `生成 / 更新管线`，`添加头发` 为创建入口，主线保持小步迁移与可测试策略。
+已完成：`cross_section.py` 已独立；`math_utils.py` 已独立（`safe_normalized / get_cross_section_frame / Catmull-Rom / lerp_angle`）；`ghost.py` 已独立；`interp.py` 已独立；`sampling.py` 已独立（Bezier/NURBS 评估、弧长、分布、切线）；`transition.py` 已独立（横截面采样、过渡与 NURBS 插值）；`frames.py` 已独立（最小扭转环与平滑）；`selection.py` 已独立（选择重定向，单点与**框选**均重定向到曲线，修复框选能选到头发网格的 bug）；`edit_utils.py` 已独立（`get_curve_point_by_global_index / edge_flow_t / apply_edge_flow_to_target_indices` 等）；`operators.py` 中多头发合并/分离已移除，右栏通用区已隐藏 `生成 / 更新管线`，`添加头发` 为创建入口；`handler.py` 的 `selection_redirect_callback` 与 `selection_sync_timer` 已改为同时处理 `selected_objects` 框选集合。主线保持小步迁移与可测试策略。
 
 - [ ] 第四阶段：生成与对象服务
 

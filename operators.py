@@ -25,6 +25,93 @@ from .curve_data import (
     get_selected_curve_point_index as curve_get_selected_curve_point_index,
     get_selected_curve_point_indices as curve_get_selected_curve_point_indices,
 )
+from .frames import (
+    build_minimal_twist_rings as frames_build_minimal_twist_rings,
+    smooth_ring_offsets as frames_smooth_ring_offsets,
+    make_ring_from_frame as frames_make_ring_from_frame,
+)
+from .ghost import (
+    update_ghost_vertices as ghost_update_ghost_vertices,
+    update_all_ghost_vertices as ghost_update_all_ghost_vertices,
+)
+from .interp import (
+    ease_value as interp_ease_value,
+    lerp_value as interp_lerp_value,
+    mix_value as interp_mix_value,
+    monotone_tangent as interp_monotone_tangent,
+    hermite_value as interp_hermite_value,
+    interpolate_section_value as interp_interpolate_section_value,
+)
+from .sampling import (
+    evaluate_bezier_segment as sampling_evaluate_bezier_segment,
+    evaluate_bezier_tangent as sampling_evaluate_bezier_tangent,
+    make_nurbs_knot_vector as sampling_make_nurbs_knot_vector,
+    find_nurbs_span as sampling_find_nurbs_span,
+    nurbs_basis_values as sampling_nurbs_basis_values,
+    get_nurbs_weighted_controls as sampling_get_nurbs_weighted_controls,
+    evaluate_nurbs_from_weighted as sampling_evaluate_nurbs_from_weighted,
+    get_nurbs_domain as sampling_get_nurbs_domain,
+    distribute_steps_by_lengths as sampling_distribute_steps_by_lengths,
+    bezier_arc_length_at_t as sampling_bezier_arc_length_at_t,
+    invert_bezier_arc_length as sampling_invert_bezier_arc_length,
+    make_cumulative_lengths as sampling_make_cumulative_lengths,
+    find_nearest_center_distance as sampling_find_nearest_center_distance,
+    average_tangents as sampling_average_tangents,
+    get_bezier_control_tangent as sampling_get_bezier_control_tangent,
+    get_poly_control_tangent as sampling_get_poly_control_tangent,
+)
+from .math_utils import (
+    catmull_rom_vector as math_catmull_rom_vector,
+    catmull_rom_tangent_vector as math_catmull_rom_tangent_vector,
+    safe_normalized as math_safe_normalized,
+    get_cross_section_frame as math_get_cross_section_frame,
+    catmull_rom_2d as math_catmull_rom_2d,
+    catmull_rom_value as math_catmull_rom_value,
+    lerp_angle as math_lerp_angle,
+    lerp_radians as math_lerp_radians,
+)
+from .transition import (
+    is_transition_point as transition_is_transition_point,
+    find_previous_editable_point_index as transition_find_previous_editable_point_index,
+    find_next_editable_point_index as transition_find_next_editable_point_index,
+    get_transition_source_indices as transition_get_transition_source_indices,
+    get_point_setting as transition_get_point_setting,
+    get_effective_point_setting as transition_get_effective_point_setting,
+    get_cross_section_sample as transition_get_cross_section_sample,
+    interpolate_cross_sections as transition_interpolate_cross_sections,
+    interpolate_cross_sections_smooth as transition_interpolate_cross_sections_smooth,
+    interpolate_transition_cross_section as transition_interpolate_transition_cross_section,
+    update_transition_point_values as transition_update_transition_point_values,
+    interpolate_nurbs_cross_sections as transition_interpolate_nurbs_cross_sections,
+    interpolate_nurbs_cross_sections_by_control_range as transition_interpolate_nurbs_cross_sections_by_control_range,
+    interpolate_cross_sections_by_anchor_distance as transition_interpolate_cross_sections_by_anchor_distance,
+)
+from .edit_utils import (
+    get_curve_point_by_global_index as edit_get_curve_point_by_global_index,
+    edge_flow_t as edit_edge_flow_t,
+    find_previous_edge_flow_source_index as edit_find_previous_edge_flow_source_index,
+    find_next_edge_flow_source_index as edit_find_next_edge_flow_source_index,
+    apply_edge_flow_to_target_indices as edit_apply_edge_flow_to_target_indices,
+)
+from .point_data import (
+    sync_point_settings as point_sync_point_settings,
+    sync_active_point_from_selection as point_sync_active_point_from_selection,
+    init_cross_section_circle as point_init_cross_section_circle,
+    _curve_point_position_signatures as point__curve_point_position_signatures,
+    _load_curve_point_signatures as point__load_curve_point_signatures,
+    _store_curve_point_signatures as point__store_curve_point_signatures,
+    _point_setting_to_data as point__point_setting_to_data,
+    _default_point_setting_data as point__default_point_setting_data,
+    _apply_point_setting_data as point__apply_point_setting_data,
+)
+from .pipe_generation import (
+    generate_pipe_mesh as pipe_generate_pipe_mesh,
+)
+from .selection import (
+    ensure_selected_curve_visible as selection_ensure_selected_curve_visible,
+    sync_selected_curve_visibility as selection_sync_selected_curve_visibility,
+    redirect_pipe_selection as selection_redirect_pipe_selection,
+)
 from .hair_lifecycle import (
     get_next_figuhair_base_name as lifecycle_get_next_figuhair_base_name,
     get_curve_from_figuhair_root as lifecycle_get_curve_from_figuhair_root,
@@ -95,21 +182,16 @@ def _legacy_get_curve_points_data(curve_obj):
 
 
 def evaluate_bezier_segment(p0, h0_right, h1_left, p1, t):
-    u = 1.0 - t
-    return (u**3)*p0 + 3*(u**2)*t*h0_right + 3*u*(t**2)*h1_left + (t**3)*p1
+    return sampling_evaluate_bezier_segment(p0, h0_right, h1_left, p1, t)
 
 
 def evaluate_bezier_tangent(p0, h0_right, h1_left, p1, t):
-    u = 1.0 - t
-    tangent = 3*(u**2)*(h0_right-p0) + 6*u*t*(h1_left-h0_right) + 3*(t**2)*(p1-h1_left)
-    if tangent.length < 1e-8:
-        tangent = p1 - p0
-    return tangent.normalized()
+    return sampling_evaluate_bezier_tangent(p0, h0_right, h1_left, p1, t)
 
 
 def make_nurbs_knot_vector(num_points, degree, is_cyclic, use_endpoint):
-    if is_cyclic:
-        return [float(i) for i in range(num_points + 2 * degree + 1)]
+    return sampling_make_nurbs_knot_vector(num_points, degree, is_cyclic, use_endpoint)
+
 
     knot_count = num_points + degree + 1
     if use_endpoint:
@@ -125,11 +207,8 @@ def make_nurbs_knot_vector(num_points, degree, is_cyclic, use_endpoint):
 
 
 def find_nurbs_span(num_eval_points, degree, u, knots):
-    last_span = num_eval_points - 1
-    if u >= knots[last_span + 1]:
-        return last_span
-    if u <= knots[degree]:
-        return degree
+    return sampling_find_nurbs_span(num_eval_points, degree, u, knots)
+
 
     low = degree
     high = last_span + 1
@@ -144,10 +223,8 @@ def find_nurbs_span(num_eval_points, degree, u, knots):
 
 
 def nurbs_basis_values(span, degree, u, knots):
-    values = [0.0] * (degree + 1)
-    left = [0.0] * (degree + 1)
-    right = [0.0] * (degree + 1)
-    values[0] = 1.0
+    return sampling_nurbs_basis_values(span, degree, u, knots)
+
 
     for j in range(1, degree + 1):
         left[j] = u - knots[span + 1 - j]
@@ -164,9 +241,8 @@ def nurbs_basis_values(span, degree, u, knots):
 
 
 def get_nurbs_weighted_controls(points, degree, u, knots, is_cyclic):
-    eval_points = points + points[:degree] if is_cyclic else points
-    span = find_nurbs_span(len(eval_points), degree, u, knots)
-    basis_values = nurbs_basis_values(span, degree, u, knots)
+    return sampling_get_nurbs_weighted_controls(points, degree, u, knots, is_cyclic)
+
 
     weighted = []
     total = 0.0
@@ -186,8 +262,8 @@ def get_nurbs_weighted_controls(points, degree, u, knots, is_cyclic):
 
 
 def evaluate_nurbs_from_weighted(points, weighted, total):
-    if total < 1e-8 or not weighted:
-        return points[0]['co'].copy()
+    return sampling_evaluate_nurbs_from_weighted(points, weighted, total)
+
 
     numerator = Vector((0, 0, 0))
     for idx, weight in weighted:
@@ -196,14 +272,12 @@ def evaluate_nurbs_from_weighted(points, weighted, total):
 
 
 def get_nurbs_domain(num_points, degree, knots, is_cyclic):
-    if is_cyclic:
-        return knots[degree], knots[num_points]
-    return knots[degree], knots[num_points]
+    return sampling_get_nurbs_domain(num_points, degree, knots, is_cyclic)
 
 
 def interpolate_nurbs_cross_sections(point_settings, points, weighted, total, settings, global_point_idx):
-    if total < 1e-8 or not weighted:
-        return []
+    return transition_interpolate_nurbs_cross_sections(point_settings, points, weighted, total, settings, global_point_idx)
+
 
     max_count = 0
     cached_offsets = []
@@ -228,73 +302,20 @@ def interpolate_nurbs_cross_sections(point_settings, points, weighted, total, se
 
 
 def interpolate_nurbs_cross_sections_by_control_range(point_settings, points, settings, global_point_idx, sample_t, is_cyclic):
-    num_points = len(points)
-    if num_points < 2:
-        return []
-    span_count = num_points if is_cyclic else num_points - 1
-    span_pos = sample_t * span_count
-    idx0 = int(math.floor(span_pos))
-    local_t = span_pos - idx0
-    if not is_cyclic and idx0 >= span_count:
-        idx0 = span_count - 1
-        local_t = 1.0
-    idx1 = (idx0 + 1) % num_points
-    idx_prev = (idx0 - 1) % num_points if is_cyclic or idx0 > 0 else idx0
-    idx_next = (idx1 + 1) % num_points if is_cyclic or idx1 < num_points - 1 else idx1
-    ps_prev = get_point_setting(point_settings, global_point_idx + idx_prev, settings)
-    ps0 = get_point_setting(point_settings, global_point_idx + idx0, settings)
-    ps1 = get_point_setting(point_settings, global_point_idx + idx1, settings)
-    ps_next = get_point_setting(point_settings, global_point_idx + idx_next, settings)
-    return interpolate_cross_sections_smooth(
-        ps_prev, ps0, ps1, ps_next, local_t,
-        points[idx_prev], points[idx0], points[idx1], points[idx_next],
-        settings.transition_mode, settings.transition_strength
-    )
+    return transition_interpolate_nurbs_cross_sections_by_control_range(point_settings, points, settings, global_point_idx, sample_t, is_cyclic)
 
 
 def make_cumulative_lengths(centers, is_cyclic=False):
-    if not centers:
-        return []
-    distances = [0.0]
-    for idx in range(1, len(centers)):
-        distances.append(distances[-1] + (centers[idx] - centers[idx - 1]).length)
-    return distances
+    return sampling_make_cumulative_lengths(centers, is_cyclic)
 
 
 def find_nearest_center_distance(centers, distances, co):
-    if not centers or not distances:
-        return 0.0
-    best_idx = 0
-    best_dist = (centers[0] - co).length_squared
-    for idx in range(1, len(centers)):
-        dist = (centers[idx] - co).length_squared
-        if dist < best_dist:
-            best_idx = idx
-            best_dist = dist
-    return distances[best_idx]
+    return sampling_find_nearest_center_distance(centers, distances, co)
 
 
 def interpolate_cross_sections_by_anchor_distance(point_settings, points, settings, global_point_idx, anchors, distance):
-    num_points = len(points)
-    if num_points < 2 or not anchors:
-        return []
-    if distance <= anchors[0]:
-        idx0 = 0
-        idx1 = 1
-        local_t = 0.0
-    elif distance >= anchors[-1]:
-        idx0 = num_points - 2
-        idx1 = num_points - 1
-        local_t = 1.0
-    else:
-        idx0 = 0
-        for anchor_idx in range(len(anchors) - 1):
-            if anchors[anchor_idx] <= distance <= anchors[anchor_idx + 1]:
-                idx0 = anchor_idx
-                break
-        idx1 = idx0 + 1
-        span = max(anchors[idx1] - anchors[idx0], 1e-8)
-        local_t = (distance - anchors[idx0]) / span
+    return transition_interpolate_cross_sections_by_anchor_distance(point_settings, points, settings, global_point_idx, anchors, distance)
+
 
     idx_prev = idx0 - 1 if idx0 > 0 else idx0
     idx_next = idx1 + 1 if idx1 < num_points - 1 else idx1
@@ -310,14 +331,8 @@ def interpolate_cross_sections_by_anchor_distance(point_settings, points, settin
 
 
 def distribute_steps_by_lengths(lengths, total_steps):
-    if not lengths:
-        return []
-    positive_lengths = [max(length, 1e-8) for length in lengths]
-    total_length = sum(positive_lengths)
-    total_steps = max(len(positive_lengths), int(total_steps))
-    raw_steps = [length / total_length * total_steps for length in positive_lengths]
-    steps = [max(1, int(math.floor(raw))) for raw in raw_steps]
-    remaining = total_steps - sum(steps)
+    return sampling_distribute_steps_by_lengths(lengths, total_steps)
+
 
     fractions = sorted(
         ((raw_steps[i] - math.floor(raw_steps[i]), i) for i in range(len(raw_steps))),
@@ -339,43 +354,11 @@ def distribute_steps_by_lengths(lengths, total_steps):
 
 
 def bezier_arc_length_at_t(p0, h0_right, h1_left, p1, t, subdivisions=12):
-    t = max(0.0, min(1.0, t))
-    if t <= 0.0:
-        return 0.0
-    length = 0.0
-    prev = evaluate_bezier_segment(p0, h0_right, h1_left, p1, 0.0)
-    for k in range(1, subdivisions + 1):
-        sample_t = t * k / subdivisions
-        cur = evaluate_bezier_segment(p0, h0_right, h1_left, p1, sample_t)
-        length += (cur - prev).length
-        prev = cur
-    return length
+    return sampling_bezier_arc_length_at_t(p0, h0_right, h1_left, p1, t, subdivisions)
 
 
 def invert_bezier_arc_length(p0, h0_right, h1_left, p1, target_length, total_length):
-    if total_length <= 1e-8:
-        return 0.0
-    target_length = max(0.0, min(total_length, target_length))
-    low = 0.0
-    high = 1.0
-    for _ in range(12):
-        mid = (low + high) * 0.5
-        length = bezier_arc_length_at_t(p0, h0_right, h1_left, p1, mid)
-        if length < target_length:
-            low = mid
-        else:
-            high = mid
-    return (low + high) * 0.5
-
-
-from .math_utils import (
-    catmull_rom_vector as math_catmull_rom_vector,
-    catmull_rom_tangent_vector as math_catmull_rom_tangent_vector,
-    safe_normalized as math_safe_normalized,
-    get_cross_section_frame as math_get_cross_section_frame,
-    catmull_rom_2d as math_catmull_rom_2d,
-    catmull_rom_value as math_catmull_rom_value,
-)
+    return sampling_invert_bezier_arc_length(p0, h0_right, h1_left, p1, target_length, total_length)
 
 
 def catmull_rom_vector(p0, p1, p2, p3, t):
@@ -391,19 +374,12 @@ def safe_normalized(vector, fallback=None):
 
 
 def average_tangents(prev_tangent, next_tangent):
-    prev_dir = safe_normalized(prev_tangent)
-    next_dir = safe_normalized(next_tangent, prev_dir)
-    averaged = prev_dir + next_dir
-    if averaged.length < 1e-8:
-        return next_dir
-    return averaged.normalized()
+    return sampling_average_tangents(prev_tangent, next_tangent)
 
 
 def get_bezier_control_tangent(points, idx, is_cyclic):
-    num_points = len(points)
-    point = points[idx]
-    prev_tangent = None
-    next_tangent = None
+    return sampling_get_bezier_control_tangent(points, idx, is_cyclic)
+
 
     if is_cyclic or idx > 0:
         prev_tangent = point['co'] - point['handle_left']
@@ -426,10 +402,8 @@ def get_bezier_control_tangent(points, idx, is_cyclic):
 
 
 def get_poly_control_tangent(points, idx, is_cyclic):
-    num_points = len(points)
-    point = points[idx]['co']
-    prev_tangent = None
-    next_tangent = None
+    return sampling_get_poly_control_tangent(points, idx, is_cyclic)
+
 
     if is_cyclic or idx > 0:
         prev_idx = (idx - 1) % num_points
@@ -459,16 +433,6 @@ def catmull_rom_2d(p0, p1, p2, p3, t):
     return math_catmull_rom_2d(p0, p1, p2, p3, t)
 
 
-from .interp import (
-    ease_value as interp_ease_value,
-    lerp_value as interp_lerp_value,
-    mix_value as interp_mix_value,
-    monotone_tangent as interp_monotone_tangent,
-    hermite_value as interp_hermite_value,
-    interpolate_section_value as interp_interpolate_section_value,
-)
-
-
 def ease_value(v0, v1, t):
     return interp_ease_value(v0, v1, t)
 
@@ -494,52 +458,28 @@ def interpolate_section_value(prev_value, value0, value1, next_value, t, mode, s
 
 
 def is_transition_point(point_setting):
-    return bool(getattr(point_setting, 'use_transition', False))
+    return transition_is_transition_point(point_setting)
 
 
 def find_previous_editable_point_index(point_settings, idx):
-    for point_idx in range(idx - 1, -1, -1):
-        if not is_transition_point(point_settings[point_idx]):
-            return point_idx
-    return None
+    return transition_find_previous_editable_point_index(point_settings, idx)
 
 
 def find_next_editable_point_index(point_settings, idx):
-    for point_idx in range(idx + 1, len(point_settings)):
-        if not is_transition_point(point_settings[point_idx]):
-            return point_idx
-    return None
+    return transition_find_next_editable_point_index(point_settings, idx)
 
 
 def get_transition_source_indices(point_settings, idx):
-    if idx < 0 or idx >= len(point_settings):
-        return None, None
-    if not is_transition_point(point_settings[idx]):
-        return idx, idx
-    return find_previous_editable_point_index(point_settings, idx), find_next_editable_point_index(point_settings, idx)
+    return transition_get_transition_source_indices(point_settings, idx)
 
 
 def get_effective_point_setting(point_settings, idx, settings):
-    if idx < 0:
-        return get_point_setting(point_settings, idx, settings)
-    if idx >= len(point_settings):
-        return get_point_setting(point_settings, idx, settings)
-    prev_idx, next_idx = get_transition_source_indices(point_settings, idx)
-    if prev_idx is None and next_idx is None:
-        return point_settings[idx]
-    if prev_idx is None:
-        return point_settings[next_idx]
-    if next_idx is None:
-        return point_settings[prev_idx]
-    if prev_idx == next_idx:
-        return point_settings[prev_idx]
-    return point_settings[idx]
+    return transition_get_effective_point_setting(point_settings, idx, settings)
 
 
 def get_cross_section_sample(point_setting, point=None, vert_idx=0):
-    verts = point_setting.cross_section_verts
-    if len(verts) == 0:
-        return 0.0, 0.0, 0.0
+    return transition_get_cross_section_sample(point_setting, point, vert_idx)
+
 
     curve_radius = point.get('radius', 1.0) if point else 1.0
     curve_tilt = point.get('tilt', 0.0) if point else 0.0
@@ -550,13 +490,8 @@ def get_cross_section_sample(point_setting, point=None, vert_idx=0):
 
 
 def interpolate_cross_sections(ps0, ps1, t, point0=None, point1=None):
-    """Interpolate cross-section vertex positions between two point settings"""
-    verts0 = ps0.cross_section_verts
-    verts1 = ps1.cross_section_verts
-    n0 = len(verts0)
-    n1 = len(verts1)
-    if n0 == 0 or n1 == 0:
-        return []
+    return transition_interpolate_cross_sections(ps0, ps1, t, point0, point1)
+
 
     num_verts = min(n0, n1)
     _, _, rot0 = get_cross_section_sample(ps0, point0)
@@ -612,82 +547,16 @@ def interpolate_cross_sections_smooth(
 
 
 def interpolate_transition_cross_section(point_settings, idx, settings, point=None):
-    prev_idx, next_idx = get_transition_source_indices(point_settings, idx)
-    if prev_idx is None and next_idx is None:
-        return []
-    if prev_idx is None:
-        source = point_settings[next_idx]
-        return interpolate_cross_sections(source, source, 0.0, point, point)
-    if next_idx is None:
-        source = point_settings[prev_idx]
-        return interpolate_cross_sections(source, source, 0.0, point, point)
-    if prev_idx == next_idx:
-        source = point_settings[prev_idx]
-        return interpolate_cross_sections(source, source, 0.0, point, point)
-    prev_ps = point_settings[prev_idx]
-    next_ps = point_settings[next_idx]
-    t = (idx - prev_idx) / max(1, next_idx - prev_idx)
-    return interpolate_cross_sections_smooth(
-        prev_ps, prev_ps, next_ps, next_ps, t,
-        point, point, point, point,
-        settings.transition_mode, settings.transition_strength,
-    )
+    return transition_interpolate_transition_cross_section(point_settings, idx, settings, point)
 
 
 def update_transition_point_values(curve_obj, settings):
-    point_settings = settings.point_settings
-    if len(point_settings) < 3:
-        return 0
-    changed = 0
-    for idx, ps in enumerate(point_settings):
-        if not is_transition_point(ps):
-            continue
-        prev_idx = find_previous_editable_point_index(point_settings, idx)
-        next_idx = find_next_editable_point_index(point_settings, idx)
-        if prev_idx is None or next_idx is None or prev_idx == next_idx:
-            continue
-        prev_ps = point_settings[prev_idx]
-        next_ps = point_settings[next_idx]
-        count = min(len(prev_ps.cross_section_verts), len(next_ps.cross_section_verts))
-        if count < 3:
-            continue
-        while len(ps.cross_section_verts) < count:
-            v = ps.cross_section_verts.add()
-            v.offset_x = 0.0
-            v.offset_y = 0.0
-            v.is_ghost = False
-        while len(ps.cross_section_verts) > count and len(ps.cross_section_verts) > 3:
-            ps.cross_section_verts.remove(len(ps.cross_section_verts) - 1)
-        raw_t = (idx - prev_idx) / max(1, next_idx - prev_idx)
-        t = edge_flow_t('SMOOTHER', raw_t, 2.0)
-        for vert_idx in range(count):
-            prev_v = prev_ps.cross_section_verts[vert_idx]
-            next_v = next_ps.cross_section_verts[vert_idx]
-            v = ps.cross_section_verts[vert_idx]
-            v.offset_x = prev_v.offset_x * (1.0 - t) + next_v.offset_x * t
-            v.offset_y = prev_v.offset_y * (1.0 - t) + next_v.offset_y * t
-            v.is_ghost = False
-        ps.scale = prev_ps.scale * (1.0 - t) + next_ps.scale * t
-        ps.rotation = lerp_angle(prev_ps.rotation, next_ps.rotation, t)
-        prev_point = get_curve_point_by_global_index(curve_obj, prev_idx)
-        next_point = get_curve_point_by_global_index(curve_obj, next_idx)
-        curve_point = get_curve_point_by_global_index(curve_obj, idx)
-        if prev_point is not None and next_point is not None and curve_point is not None:
-            prev_radius = getattr(prev_point, 'radius', 1.0)
-            next_radius = getattr(next_point, 'radius', 1.0)
-            prev_tilt = getattr(prev_point, 'tilt', 0.0)
-            next_tilt = getattr(next_point, 'tilt', 0.0)
-            curve_point.radius = prev_radius * (1.0 - t) + next_radius * t
-            curve_point.tilt = lerp_radians(prev_tilt, next_tilt, t)
-        if ps.active_vert_index >= len(ps.cross_section_verts):
-            ps.active_vert_index = len(ps.cross_section_verts) - 1
-        changed += 1
-    return changed
+    return transition_update_transition_point_values(curve_obj, settings)
 
 
 def smooth_ring_offsets(ring_specs, iterations=2, factor=0.5, is_cyclic=False):
-    if len(ring_specs) < 3:
-        return ring_specs
+    return frames_smooth_ring_offsets(ring_specs, iterations, factor, is_cyclic)
+
 
     smoothed = list(ring_specs)
     for _ in range(max(1, iterations)):
@@ -720,11 +589,7 @@ def smooth_ring_offsets(ring_specs, iterations=2, factor=0.5, is_cyclic=False):
 
 
 def make_ring_from_frame(center, normal, binormal, interp_offsets):
-    verts = []
-    for rx, ry in interp_offsets:
-        point = center + normal * rx + binormal * ry
-        verts.append(point)
-    return verts
+    return frames_make_ring_from_frame(center, normal, binormal, interp_offsets)
 
 
 def make_ring_from_interpolated(center, tangent, interp_offsets):
@@ -1068,8 +933,8 @@ def build_minimal_twist_rings(
 
 
 def get_point_setting(point_settings, idx, settings):
-    if idx < len(point_settings):
-        return point_settings[idx]
+    return transition_get_point_setting(point_settings, idx, settings)
+
 
     class DefaultPointSetting:
         def __init__(self, s):
@@ -1090,14 +955,7 @@ def get_point_setting(point_settings, idx, settings):
 
 
 def init_cross_section_circle(point_setting, radius, segments):
-    point_setting.cross_section_verts.clear()
-    for i in range(segments):
-        angle = 2.0 * math.pi * i / segments
-        v = point_setting.cross_section_verts.add()
-        v.offset_x = math.cos(angle) * radius
-        v.offset_y = math.sin(angle) * radius
-        v.is_ghost = False
-
+    return point_init_cross_section_circle(point_setting, radius, segments)
 
 def catmull_rom_2d(p0, p1, p2, p3, t):
     t2 = t * t
@@ -1500,280 +1358,23 @@ def normalize_cross_section_topology(settings, curve_obj=None):
 
 
 def generate_pipe_mesh(curve_obj, settings):
-    update_transition_point_values(curve_obj, settings)
-    update_all_ghost_vertices(settings)
-    splines_data = get_curve_points_data(curve_obj)
-    if not splines_data:
-        return None, None
-
-    all_verts = []
-    all_faces = []
-    vert_offset = 0
-    point_settings = settings.point_settings
-    global_point_idx = 0
-
-    for spline_index, spline_data in enumerate(splines_data):
-        points = spline_data['points']
-        resolution = max(0, settings.pipe_resolution)
-        is_cyclic = spline_data['cyclic']
-        num_points = len(points)
-        if num_points < 2:
-            global_point_idx += num_points
-            continue
-
-        ring_specs = []
-        if spline_data['type'] == 'BEZIER':
-            seg_count = num_points if is_cyclic else num_points - 1
-
-            # ── Step 1: estimate arc length of every segment ──────────────
-            ARC_SUBDIV = 8
-            seg_lengths = []
-            for seg_idx in range(seg_count):
-                idx0 = seg_idx
-                idx1 = (seg_idx + 1) % num_points
-                p0_  = points[idx0]['co']
-                h0r_ = points[idx0]['handle_right']
-                h1l_ = points[idx1]['handle_left']
-                p1_  = points[idx1]['co']
-                length = 0.0
-                prev = evaluate_bezier_segment(p0_, h0r_, h1l_, p1_, 0.0)
-                for k in range(1, ARC_SUBDIV + 1):
-                    cur = evaluate_bezier_segment(p0_, h0r_, h1l_, p1_, k / ARC_SUBDIV)
-                    length += (cur - prev).length
-                    prev = cur
-                seg_lengths.append(max(length, 1e-8))
-            total_length = sum(seg_lengths)
-
-            # ── Step 2: distribute sample steps proportionally ────────────
-            # Total samples across the whole spline (same budget as before)
-            total_steps = seg_count * max(1, resolution + 1)
-            seg_steps = distribute_steps_by_lengths(seg_lengths, total_steps)
-
-            # ── Step 3: sample each segment ───────────────────────────────
-            for seg_idx in range(seg_count):
-                idx0 = seg_idx
-                idx1 = (seg_idx + 1) % num_points
-                p0 = points[idx0]['co']
-                h0r = points[idx0]['handle_right']
-                h1l = points[idx1]['handle_left']
-                p1 = points[idx1]['co']
-                global_idx0 = global_point_idx + idx0
-                global_idx1 = global_point_idx + idx1
-                ps0 = get_effective_point_setting(point_settings, global_idx0, settings)
-                ps1 = get_effective_point_setting(point_settings, global_idx1, settings)
-                idx_prev = (idx0 - 1) % num_points if is_cyclic or idx0 > 0 else idx0
-                idx_next = (idx1 + 1) % num_points if is_cyclic or idx1 < num_points - 1 else idx1
-                ps_prev = get_effective_point_setting(point_settings, global_point_idx + idx_prev, settings)
-                ps_next = get_effective_point_setting(point_settings, global_point_idx + idx_next, settings)
-                steps = seg_steps[seg_idx]
-                step_count = steps if (is_cyclic or seg_idx < seg_count - 1) else steps + 1
-                segment_length = seg_lengths[seg_idx]
-                for step in range(step_count):
-                    if not is_cyclic and seg_idx == seg_count - 1 and step == step_count - 1:
-                        distance_t = 1.0
-                        shape_t = 1.0
-                    else:
-                        distance_t = step / steps
-                        shape_t = invert_bezier_arc_length(p0, h0r, h1l, p1, segment_length * distance_t, segment_length)
-                    pos = evaluate_bezier_segment(p0, h0r, h1l, p1, shape_t)
-                    tan = evaluate_bezier_tangent(p0, h0r, h1l, p1, shape_t)
-                    interp = interpolate_cross_sections_smooth(
-                        ps_prev, ps0, ps1, ps_next, distance_t,
-                        points[idx_prev], points[idx0], points[idx1], points[idx_next],
-                        settings.transition_mode, settings.transition_strength
-                    )
-                    ring_specs.append((pos, tan, interp))
-        elif spline_data['type'] == 'NURBS':
-            seg_count = num_points if is_cyclic else num_points - 1
-            seg_lengths = []
-            for seg_idx in range(seg_count):
-                idx0 = seg_idx
-                idx1 = (seg_idx + 1) % num_points
-                seg_lengths.append(max((points[idx1]['co'] - points[idx0]['co']).length, 1e-8))
-
-            total_steps = seg_count * max(1, resolution + 1)
-            seg_steps = distribute_steps_by_lengths(seg_lengths, total_steps)
-
-            for seg_idx in range(seg_count):
-                idx0 = seg_idx
-                idx1 = (seg_idx + 1) % num_points
-                idx_prev = (idx0 - 1) % num_points if is_cyclic or idx0 > 0 else idx0
-                idx_next = (idx1 + 1) % num_points if is_cyclic or idx1 < num_points - 1 else idx1
-                p_prev = points[idx_prev]['co']
-                p0 = points[idx0]['co']
-                p1 = points[idx1]['co']
-                p_next = points[idx_next]['co']
-                ps_prev = get_effective_point_setting(point_settings, global_point_idx + idx_prev, settings)
-                ps0 = get_effective_point_setting(point_settings, global_point_idx + idx0, settings)
-                ps1 = get_effective_point_setting(point_settings, global_point_idx + idx1, settings)
-                ps_next = get_effective_point_setting(point_settings, global_point_idx + idx_next, settings)
-                steps = seg_steps[seg_idx]
-                step_count = steps if (is_cyclic or seg_idx < seg_count - 1) else steps + 1
-                for step in range(step_count):
-                    t = 1.0 if (not is_cyclic and seg_idx == seg_count - 1 and step == step_count - 1) else step / steps
-                    pos = catmull_rom_vector(p_prev, p0, p1, p_next, t)
-                    tan = safe_normalized(catmull_rom_tangent_vector(p_prev, p0, p1, p_next, t), p1 - p0)
-                    interp = interpolate_cross_sections_smooth(
-                        ps_prev, ps0, ps1, ps_next, t,
-                        points[idx_prev], points[idx0], points[idx1], points[idx_next],
-                        settings.transition_mode, settings.transition_strength,
-                    )
-                    ring_specs.append((pos, tan, interp))
-        elif spline_data['type'] == 'POLY':
-            seg_count = num_points if is_cyclic else num_points - 1
-
-            # Arc lengths for POLY are just straight-line distances
-            seg_lengths = []
-            for seg_idx in range(seg_count):
-                idx0 = seg_idx
-                idx1 = (seg_idx + 1) % num_points
-                seg_lengths.append(max((points[idx1]['co'] - points[idx0]['co']).length, 1e-8))
-            total_steps = seg_count * max(1, resolution + 1)
-            seg_steps = distribute_steps_by_lengths(seg_lengths, total_steps)
-
-            for seg_idx in range(seg_count):
-                idx0 = seg_idx
-                idx1 = (seg_idx + 1) % num_points
-                p0 = points[idx0]['co']
-                p1 = points[idx1]['co']
-                ps0 = get_point_setting(point_settings, global_point_idx + idx0, settings)
-                ps1 = get_point_setting(point_settings, global_point_idx + idx1, settings)
-                idx_prev = (idx0 - 1) % num_points if is_cyclic or idx0 > 0 else idx0
-                idx_next = (idx1 + 1) % num_points if is_cyclic or idx1 < num_points - 1 else idx1
-                ps_prev = get_point_setting(point_settings, global_point_idx + idx_prev, settings)
-                ps_next = get_point_setting(point_settings, global_point_idx + idx_next, settings)
-                steps = seg_steps[seg_idx]
-                step_count = steps if (is_cyclic or seg_idx < seg_count - 1) else steps + 1
-                for step in range(step_count):
-                    t = 1.0 if (not is_cyclic and seg_idx == seg_count - 1 and step == step_count - 1) else step / steps
-                    pos = p0.lerp(p1, t)
-                    tan = safe_normalized(p1 - p0)
-                    interp = interpolate_cross_sections_smooth(
-                        ps_prev, ps0, ps1, ps_next, t,
-                        points[idx_prev], points[idx0], points[idx1], points[idx_next],
-                        settings.transition_mode, settings.transition_strength
-                    )
-                    ring_specs.append((pos, tan, interp))
-        if settings.strong_smoothing:
-            ring_specs = smooth_ring_offsets(
-                ring_specs,
-                settings.strong_smoothing_iterations,
-                0.45,
-                is_cyclic,
-            )
-
-        start_normal = None
-        if not is_cyclic and ring_specs:
-            start_normal = _get_start_roll_normal(curve_obj, safe_normalized(ring_specs[0][1]))
-        rings = build_minimal_twist_rings(
-            ring_specs, is_cyclic, start_normal, curve_obj, spline_index,
-            'START_FIXED',
-        )
-        global_point_idx += num_points
-        if not rings:
-            continue
-
-        segments = len(rings[0])
-        for ring in rings:
-            all_verts.extend(ring)
-        num_rings = len(rings)
-        ring_count = num_rings if is_cyclic else num_rings - 1
-        for i in range(ring_count):
-            i_next = (i + 1) % num_rings
-            bridge_offset = 0
-            target_idx = global_point_idx - num_points + min(i + 1, num_points - 1)
-            if 0 <= target_idx < len(point_settings):
-                bridge_offset = int(getattr(point_settings[target_idx], 'bridge_offset', 0))
-            for j in range(segments):
-                j_next = (j + 1) % segments
-                v0 = vert_offset + i * segments + j
-                v1 = vert_offset + i * segments + j_next
-                v2 = vert_offset + i_next * segments + ((j_next + bridge_offset) % segments)
-                v3 = vert_offset + i_next * segments + ((j + bridge_offset) % segments)
-                all_faces.append((v0, v1, v2, v3))
-        if settings.cap_ends and not is_cyclic and num_rings > 0:
-            cap_s = list(range(vert_offset, vert_offset + segments))
-            all_faces.append(tuple(reversed(cap_s)))
-        vert_offset += num_rings * segments
-
-    return all_verts, all_faces
+    return pipe_generate_pipe_mesh(curve_obj, settings)
 
 
 def _curve_point_position_signatures(curve_obj):
-    if curve_obj is None or curve_obj.type != 'CURVE':
-        return []
-    if is_curve_edit_mode(curve_obj):
-        try:
-            curve_obj.update_from_editmode()
-        except Exception:
-            pass
-
-    signatures = []
-    for spline in curve_obj.data.splines:
-        if spline.type == 'BEZIER':
-            points = spline.bezier_points
-            for point in points:
-                co = point.co
-                signatures.append((round(co.x, 6), round(co.y, 6), round(co.z, 6)))
-        else:
-            points = spline.points
-            for point in points:
-                co = point.co
-                signatures.append((round(co.x, 6), round(co.y, 6), round(co.z, 6)))
-    return signatures
-
+    return point__curve_point_position_signatures(curve_obj)
 
 def _load_curve_point_signatures(curve_obj):
-    raw = curve_obj.get("hair_pipe_point_signatures", "")
-    if not raw:
-        return []
-    try:
-        return [tuple(item) for item in json.loads(raw)]
-    except Exception:
-        return []
-
+    return point__load_curve_point_signatures(curve_obj)
 
 def _store_curve_point_signatures(curve_obj, signatures):
-    try:
-        curve_obj["hair_pipe_point_signatures"] = json.dumps(signatures)
-    except Exception:
-        pass
-
+    return point__store_curve_point_signatures(curve_obj, signatures)
 
 def _point_setting_to_data(point_setting):
-    return {
-        "scale": point_setting.scale,
-        "rotation": point_setting.rotation,
-        "use_transition": bool(getattr(point_setting, "use_transition", False)),
-        "active_vert_index": point_setting.active_vert_index,
-        "verts": [
-            {
-                "offset_x": vert.offset_x,
-                "offset_y": vert.offset_y,
-                "is_ghost": bool(getattr(vert, "is_ghost", False)),
-            }
-            for vert in point_setting.cross_section_verts
-        ],
-    }
-
+    return point__point_setting_to_data(point_setting)
 
 def _default_point_setting_data(settings):
-    verts = []
-    for idx in range(settings.default_segments):
-        angle = 2.0 * math.pi * idx / settings.default_segments
-        verts.append({
-            "offset_x": math.cos(angle) * settings.default_radius,
-            "offset_y": math.sin(angle) * settings.default_radius,
-            "is_ghost": False,
-        })
-    return {
-        "scale": 1.0,
-        "rotation": 0.0,
-        "use_transition": False,
-        "active_vert_index": 0,
-        "verts": verts,
-    }
-
+    return point__default_point_setting_data(settings)
 
 def _interpolate_point_setting_data(left_data, right_data, t):
     if left_data is None and right_data is None:
@@ -1820,25 +1421,7 @@ def _clone_point_setting_data(data):
 
 
 def _apply_point_setting_data(point_setting, data, settings):
-    if data is None:
-        data = _default_point_setting_data(settings)
-    verts = data.get("verts", [])
-    point_setting.cross_section_verts.clear()
-    point_setting.scale = data.get("scale", 1.0)
-    point_setting.rotation = data.get("rotation", 0.0)
-    point_setting.use_transition = bool(data.get("use_transition", False))
-    for vert_data in verts:
-        vert = point_setting.cross_section_verts.add()
-        vert.offset_x = vert_data.get("offset_x", 0.0)
-        vert.offset_y = vert_data.get("offset_y", 0.0)
-        vert.is_ghost = bool(vert_data.get("is_ghost", False))
-    if len(point_setting.cross_section_verts) == 0:
-        init_cross_section_circle(point_setting, settings.default_radius, settings.default_segments)
-    point_setting.active_vert_index = min(
-        max(0, int(data.get("active_vert_index", 0))),
-        max(0, len(point_setting.cross_section_verts) - 1),
-    )
-
+    return point__apply_point_setting_data(point_setting, data, settings)
 
 def _replace_point_settings_from_data(settings, point_data):
     settings.point_settings.clear()
@@ -1880,60 +1463,7 @@ def _rebuild_point_data_for_insert(old_data, insert_index, insert_count, setting
 
 
 def sync_point_settings(curve_obj):
-    settings = curve_obj.hair_pipe_settings
-    new_signatures = _curve_point_position_signatures(curve_obj)
-    total_points = len(new_signatures)
-    current = len(settings.point_settings)
-    old_signatures = _load_curve_point_signatures(curve_obj)
-    if old_signatures and new_signatures and old_signatures[0] != new_signatures[0]:
-        curve_obj["hair_pipe_start_point_changed"] = True
-    old_data = [_point_setting_to_data(point_setting) for point_setting in settings.point_settings]
-
-    if current < total_points:
-        inserted = False
-        if len(old_signatures) == current and current > 0:
-            prefix, suffix = _matching_prefix_suffix(old_signatures, new_signatures)
-            insert_count = total_points - current
-            if prefix + suffix == current:
-                _replace_point_settings_from_data(
-                    settings,
-                    _rebuild_point_data_for_insert(old_data, prefix, insert_count, settings),
-                )
-                if settings.active_point_index >= prefix:
-                    settings.active_point_index += insert_count
-                inserted = True
-        if not inserted:
-            template_data = old_data[settings.active_point_index] if current > 0 else _default_point_setting_data(settings)
-            for _ in range(total_points - current):
-                ps = settings.point_settings.add()
-                _apply_point_setting_data(ps, template_data, settings)
-    elif current > total_points:
-        removed = False
-        if len(old_signatures) == current and total_points > 0:
-            prefix, suffix = _matching_prefix_suffix(old_signatures, new_signatures)
-            remove_count = current - total_points
-            if prefix + suffix == total_points:
-                rebuilt = []
-                rebuilt.extend(_clone_point_setting_data(data) for data in old_data[:prefix])
-                rebuilt.extend(_clone_point_setting_data(data) for data in old_data[prefix + remove_count:])
-                _replace_point_settings_from_data(settings, rebuilt)
-                if settings.active_point_index >= prefix + remove_count:
-                    settings.active_point_index -= remove_count
-                elif settings.active_point_index >= prefix:
-                    settings.active_point_index = max(0, prefix - 1)
-                removed = True
-        if not removed:
-            for _ in range(current - total_points):
-                settings.point_settings.remove(len(settings.point_settings) - 1)
-
-    if total_points > 0 and settings.active_point_index >= total_points:
-        settings.active_point_index = total_points - 1
-    if total_points == 0:
-        settings.active_point_index = 0
-    normalize_cross_section_topology(settings, curve_obj)
-    update_all_ghost_vertices(settings)
-    _store_curve_point_signatures(curve_obj, new_signatures)
-
+    return point_sync_point_settings(curve_obj)
 
 def is_curve_edit_mode(curve_obj):
     return curve_is_curve_edit_mode(curve_obj)
@@ -2001,19 +1531,7 @@ def _legacy_get_selected_curve_point_indices(curve_obj):
 
 
 def sync_active_point_from_selection(curve_obj):
-    settings = curve_obj.hair_pipe_settings
-    selected_index = get_selected_curve_point_index(curve_obj)
-    if selected_index is None:
-        return False
-
-    sync_point_settings(curve_obj)
-    if selected_index >= len(settings.point_settings):
-        return False
-
-    if settings.active_point_index != selected_index:
-        settings.active_point_index = selected_index
-    return True
-
+    return point_sync_active_point_from_selection(curve_obj)
 
 def get_next_figuhair_base_name():
     return lifecycle_get_next_figuhair_base_name()
@@ -2860,217 +2378,37 @@ def configure_pipe_object(pipe_obj, curve_obj):
 
 
 def ensure_selected_curve_visible(curve_obj):
-    if curve_obj is None or curve_obj.type != 'CURVE':
-        return
-    # The generated mesh redirects selection to this curve. Keep the source
-    # curve visible so Blender can draw its normal orange selection highlight.
-    if curve_obj.get("hair_pipe_widget_hide_curve_overlay", False):
-        return
-    curve_obj.hide_viewport = False
-    curve_obj.hide_set(False)
-    # Keep the source spline above the generated tube so Blender can draw its
-    # orange selection highlight instead of hiding it behind the mesh.
-    curve_obj.display_type = 'WIRE'
-    curve_obj.show_wire = True
-    curve_obj.show_in_front = True
-    if hasattr(curve_obj.data, "show_handles") and is_curve_edit_mode(curve_obj):
-        curve_obj.data.show_handles = True
+    return selection_ensure_selected_curve_visible(curve_obj)
 
 
 def sync_selected_curve_visibility(context):
-    selected_names = {obj.name for obj in context.selected_objects}
-    for curve_obj in bpy.data.objects:
-        if curve_obj.type != 'CURVE' or not hasattr(curve_obj, 'hair_pipe_settings'):
-            continue
-        if curve_obj.get("hair_pipe_widget_hide_curve_overlay", False):
-            continue
-        if curve_obj.name in selected_names:
-            ensure_selected_curve_visible(curve_obj)
-        elif curve_obj.show_in_front:
-            curve_obj.show_in_front = False
-
-
-def sync_selected_curve_visibility(context):
-    selected_names = {
-        obj.name for obj in getattr(context, 'selected_objects', [])
-        if obj.type == 'CURVE' and hasattr(obj, 'hair_pipe_settings')
-    }
-    for curve_obj in bpy.data.objects:
-        if curve_obj.type != 'CURVE' or not hasattr(curve_obj, 'hair_pipe_settings'):
-            continue
-        if curve_obj.get("hair_pipe_widget_hide_curve_overlay", False):
-            continue
-        is_selected = curve_obj.name in selected_names
-        curve_obj.show_in_front = is_selected
-        if is_selected:
-            curve_obj.hide_viewport = False
-            curve_obj.hide_set(False)
-            curve_obj.display_type = 'WIRE'
-            curve_obj.show_wire = True
+    return selection_sync_selected_curve_visibility(context)
 
 
 def redirect_pipe_selection(context, pipe_obj=None):
-    pipe_obj = pipe_obj or context.active_object
-    active_curve = get_pipe_source_curve(pipe_obj)
-    if active_curve is None:
-        return False
-
-    if not active_curve.hair_pipe_settings.plugin_enabled:
-        return False
-
-    if context.view_layer.objects.get(active_curve.name) is None:
-        return False
-
-    if context.mode != 'OBJECT':
-        return False
-
-    selected_curves = []
-    selected_meshes = []
-    for obj in list(context.selected_objects):
-        if obj.type == 'CURVE' and hasattr(obj, 'hair_pipe_settings'):
-            selected_curves.append(obj)
-        elif obj.type == 'MESH':
-            source_curve = get_pipe_source_curve(obj)
-            if source_curve is not None and source_curve.hair_pipe_settings.plugin_enabled:
-                selected_meshes.append(obj)
-                selected_curves.append(source_curve)
-
-    if active_curve not in selected_curves:
-        selected_curves.append(active_curve)
-
-    selected_curves = [curve for curve in dict.fromkeys(selected_curves) if context.view_layer.objects.get(curve.name) is not None]
-    if not selected_curves:
-        return False
-
-    for mesh_obj in selected_meshes:
-        mesh_obj.select_set(False)
-    for curve in selected_curves:
-        curve.hide_set(False)
-        curve.select_set(True)
-    sync_selected_curve_visibility(context)
-    context.view_layer.objects.active = active_curve
-    return True
+    return selection_redirect_pipe_selection(context, pipe_obj)
 
 
 def get_curve_point_by_global_index(curve_obj, target_index):
-    if curve_obj is None or curve_obj.type != 'CURVE':
-        return None
-
-    global_point_idx = 0
-    for spline in curve_obj.data.splines:
-        points = spline.bezier_points if spline.type == 'BEZIER' else spline.points
-        for point in points:
-            if global_point_idx == target_index:
-                return point
-            global_point_idx += 1
-    return None
-
+    return edit_get_curve_point_by_global_index(curve_obj, target_index)
 
 def edge_flow_t(mode, t, power):
-    t = max(0.0, min(1.0, t))
-    if mode == 'EASE':
-        return t * t * (3.0 - 2.0 * t)
-    if mode == 'SMOOTHER':
-        return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
-    if mode == 'START':
-        return t ** max(0.1, power)
-    if mode == 'END':
-        return 1.0 - ((1.0 - t) ** max(0.1, power))
-    if mode == 'SINE':
-        return 0.5 - math.cos(t * math.pi) * 0.5
-    return t
-
+    return edit_edge_flow_t(mode, t, power)
 
 def lerp_angle(a, b, t):
-    delta = (b - a + 180.0) % 360.0 - 180.0
-    return a + delta * t
-
+    return math_lerp_angle(a, b, t)
 
 def lerp_radians(a, b, t):
-    delta = (b - a + math.pi) % (2.0 * math.pi) - math.pi
-    return a + delta * t
-
+    return math_lerp_radians(a, b, t)
 
 def find_previous_edge_flow_source_index(point_settings, idx, target_indices):
-    for point_idx in range(idx - 1, -1, -1):
-        if point_idx not in target_indices and not is_transition_point(point_settings[point_idx]):
-            return point_idx
-    return None
-
+    return edit_find_previous_edge_flow_source_index(point_settings, idx, target_indices)
 
 def find_next_edge_flow_source_index(point_settings, idx, target_indices):
-    for point_idx in range(idx + 1, len(point_settings)):
-        if point_idx not in target_indices and not is_transition_point(point_settings[point_idx]):
-            return point_idx
-    return None
-
+    return edit_find_next_edge_flow_source_index(point_settings, idx, target_indices)
 
 def apply_edge_flow_to_target_indices(curve_obj, settings, target_indices, mode, power, blend):
-    target_indices = sorted({idx for idx in target_indices if 0 <= idx < len(settings.point_settings)})
-    if not target_indices:
-        return 0
-
-    target_set = set(target_indices)
-    blend = max(0.0, min(1.0, blend))
-    changed = 0
-
-    for point_idx in target_indices:
-        start_idx = find_previous_edge_flow_source_index(settings.point_settings, point_idx, target_set)
-        end_idx = find_next_edge_flow_source_index(settings.point_settings, point_idx, target_set)
-        if start_idx is None or end_idx is None or start_idx == end_idx:
-            continue
-
-        start_ps = settings.point_settings[start_idx]
-        end_ps = settings.point_settings[end_idx]
-        ps = settings.point_settings[point_idx]
-        count = min(len(start_ps.cross_section_verts), len(end_ps.cross_section_verts))
-        if count < 3:
-            continue
-
-        while len(ps.cross_section_verts) < count:
-            v = ps.cross_section_verts.add()
-            v.offset_x = 0.0
-            v.offset_y = 0.0
-            v.is_ghost = False
-        while len(ps.cross_section_verts) > count and len(ps.cross_section_verts) > 3:
-            ps.cross_section_verts.remove(len(ps.cross_section_verts) - 1)
-
-        raw_t = (point_idx - start_idx) / max(1, end_idx - start_idx)
-        t = edge_flow_t(mode, raw_t, power)
-        for vert_idx in range(count):
-            sv = start_ps.cross_section_verts[vert_idx]
-            ev = end_ps.cross_section_verts[vert_idx]
-            cv = ps.cross_section_verts[vert_idx]
-            target_x = sv.offset_x * (1.0 - t) + ev.offset_x * t
-            target_y = sv.offset_y * (1.0 - t) + ev.offset_y * t
-            cv.offset_x = cv.offset_x * (1.0 - blend) + target_x * blend
-            cv.offset_y = cv.offset_y * (1.0 - blend) + target_y * blend
-            cv.is_ghost = False
-
-        ps.scale = ps.scale * (1.0 - blend) + (start_ps.scale * (1.0 - t) + end_ps.scale * t) * blend
-        target_rot = lerp_angle(start_ps.rotation, end_ps.rotation, t)
-        ps.rotation = ps.rotation * (1.0 - blend) + target_rot * blend
-
-        start_curve_point = get_curve_point_by_global_index(curve_obj, start_idx)
-        end_curve_point = get_curve_point_by_global_index(curve_obj, end_idx)
-        curve_point = get_curve_point_by_global_index(curve_obj, point_idx)
-        if start_curve_point is not None and end_curve_point is not None and curve_point is not None:
-            start_radius = getattr(start_curve_point, 'radius', 1.0)
-            end_radius = getattr(end_curve_point, 'radius', 1.0)
-            start_tilt = getattr(start_curve_point, 'tilt', 0.0)
-            end_tilt = getattr(end_curve_point, 'tilt', 0.0)
-            target_radius = start_radius * (1.0 - t) + end_radius * t
-            target_tilt = lerp_radians(start_tilt, end_tilt, t)
-            curve_point.radius = curve_point.radius * (1.0 - blend) + target_radius * blend
-            curve_point.tilt = curve_point.tilt * (1.0 - blend) + target_tilt * blend
-
-        if ps.active_vert_index >= len(ps.cross_section_verts):
-            ps.active_vert_index = len(ps.cross_section_verts) - 1
-        ps.use_transition = False
-        changed += 1
-
-    return changed
-
+    return edit_apply_edge_flow_to_target_indices(curve_obj, settings, target_indices, mode, power, blend)
 
 def _edge_key(a, b):
     return (a, b) if a < b else (b, a)
@@ -4057,8 +3395,6 @@ class HAIRPIPE_OT_copy_cs_to_all(bpy.types.Operator):
         return {'FINISHED'}
 
 
-
-
 _PLUGIN_ENABLED_STATE_GUARD = False
 
 
@@ -4589,7 +3925,6 @@ class HAIRPIPE_OT_edit_tail_mesh(bpy.types.Operator):
 
         curve_obj.hair_pipe_settings.redirect_selection = redirect_was
         return {'FINISHED'}
-
 
 
 class HAIRPIPE_OT_hide_hair(bpy.types.Operator):

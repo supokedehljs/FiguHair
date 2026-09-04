@@ -6,11 +6,14 @@ from .hair_lifecycle import (
     generated_pipe_vertices,
     get_curve_from_figuhair_root,
     get_pipe_object_for_curve,
+    get_pipe_source_curve,
 )
 from .pipe_generation import generate_pipe_mesh
 from .operators import (
     sync_point_settings,
     sync_active_point_from_selection,
+)
+from .selection import (
     redirect_pipe_selection,
     sync_selected_curve_visibility,
 )
@@ -134,15 +137,24 @@ def selection_redirect_callback(scene):
     global _is_redirecting_selection
     if _is_redirecting_selection:
         return
-
     context = bpy.context
-    active_obj = context.active_object
-    if active_obj is None or active_obj.type != 'MESH':
+    # Box-select can add meshes to selected_objects without changing active_object.
+    # Trigger redirect if any FiguHair mesh is selected, not only when active is mesh.
+    has_mesh = False
+    target = None
+    for obj in getattr(context, 'selected_objects', ()):
+        if obj is None or obj.type != 'MESH':
+            continue
+        curve = get_pipe_source_curve(obj)
+        if curve is not None and hasattr(curve, 'hair_pipe_settings') and curve.hair_pipe_settings.plugin_enabled:
+            has_mesh = True
+            target = obj
+            break
+    if not has_mesh:
         return
-
     _is_redirecting_selection = True
     try:
-        redirect_pipe_selection(context, active_obj)
+        redirect_pipe_selection(context, target or context.active_object)
     finally:
         _is_redirecting_selection = False
 
@@ -180,6 +192,26 @@ _handler_registered = False
 _timer_registered = False
 
 
+def _has_figuhair_mesh_selected(context):
+    for obj in getattr(context, 'selected_objects', ()):
+        if obj is None or obj.type != 'MESH':
+            continue
+        curve = get_pipe_source_curve(obj)
+        if curve is not None and hasattr(curve, 'hair_pipe_settings') and curve.hair_pipe_settings.plugin_enabled:
+            return True
+    return False
+
+
+def _first_figuhair_mesh_selected(context):
+    for obj in getattr(context, 'selected_objects', ()):
+        if obj is None or obj.type != 'MESH':
+            continue
+        curve = get_pipe_source_curve(obj)
+        if curve is not None and hasattr(curve, 'hair_pipe_settings') and curve.hair_pipe_settings.plugin_enabled:
+            return obj
+    return None
+
+
 def selection_sync_timer():
     global _is_redirecting_selection, _last_selection_signature, _last_visibility_sync_time
     try:
@@ -190,10 +222,12 @@ def selection_sync_timer():
         if selection_changed:
             _last_selection_signature = selected_signature
 
-        if obj is not None and obj.type == 'MESH' and not _is_redirecting_selection:
+        has_mesh = _has_figuhair_mesh_selected(context)
+        if has_mesh and not _is_redirecting_selection:
+            mesh_obj = _first_figuhair_mesh_selected(context) or obj
             _is_redirecting_selection = True
             try:
-                redirect_pipe_selection(context, obj)
+                redirect_pipe_selection(context, mesh_obj)
             finally:
                 _is_redirecting_selection = False
         elif obj is not None and obj.type == 'CURVE' and is_curve_edit_mode(obj):
