@@ -532,7 +532,7 @@ class HAIRPIPE_OT_toggle_plugin_enabled(bpy.types.Operator):
 
     def execute(self, context):
         try:
-            from .operators import apply_plugin_enabled_state, is_plugin_enabled
+            from .plugin_state import apply_plugin_enabled_state, is_plugin_enabled
             new_val = not bool(is_plugin_enabled())
             # 若场景中尚无任何头发曲线，则以当前上下文曲线为准
             has_any = any(o.type == 'CURVE' and hasattr(o, 'hair_pipe_settings') for o in bpy.data.objects)

@@ -9,10 +9,7 @@ from .hair_lifecycle import (
     get_pipe_source_curve,
 )
 from .pipe_generation import generate_pipe_mesh
-from .operators import (
-    sync_point_settings,
-    sync_active_point_from_selection,
-)
+from .point_data import sync_point_settings, sync_active_point_from_selection
 def _clear_all_existing_crease_once():
     try:
         from .pipe_ops import clear_boulder_crease

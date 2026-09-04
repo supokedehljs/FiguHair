@@ -16,7 +16,7 @@ from .widget_state import get_selected_widget_verts, get_widget_source_curve, ge
 from .widget_cache import get_cached_pipe_mesh
 from .pipe_generation import generate_pipe_mesh
 from .transition import is_transition_point
-from .operators import get_uncontrolled_roll_diagnostics
+from .roll_diagnostics import get_uncontrolled_roll_diagnostics
 
 _draw_handle = None
 

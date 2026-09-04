@@ -9,7 +9,7 @@ from bpy.types import PropertyGroup
 
 def update_plugin_enabled(self, context):
     try:
-        from .operators import apply_plugin_enabled_state
+        from .plugin_state import apply_plugin_enabled_state
         apply_plugin_enabled_state(bool(self.plugin_enabled))
     except (ImportError, AttributeError, RuntimeError):
         pass
@@ -162,7 +162,7 @@ def update_one_shot_slider(self, context, slider_name):
     if owner is None or getattr(owner, "type", None) != 'CURVE':
         return
     try:
-        from .operators import ensure_one_shot_slider_gesture, update_one_shot_slider_value
+        from .slider_ops import ensure_one_shot_slider_gesture, update_one_shot_slider_value
         update_one_shot_slider_value(owner, self, slider_name)
         ensure_one_shot_slider_gesture(owner, slider_name)
     except (ImportError, AttributeError, RuntimeError):

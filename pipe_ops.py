@@ -20,6 +20,9 @@ from .math_utils import safe_normalized as math_safe_normalized, get_cross_secti
 from .sampling import get_bezier_control_tangent as sampling_get_bezier_control_tangent
 from .frames import build_minimal_twist_rings as frames_build_minimal_twist_rings
 from .selection import ensure_selected_curve_visible as selection_ensure_selected_curve_visible
+# 兼容旧体内直接写 safe_normalized / get_cross_section_frame 的历史代码
+safe_normalized = math_safe_normalized
+get_cross_section_frame = math_get_cross_section_frame
 
 # tail modifier stack is defined in this module (previously erroneously imported from tail_utils)
 
@@ -73,120 +76,7 @@ def parent_keep_world(obj, parent_obj):
 
 
 
-def _minimal_twist_frames_from_tangents(raw_tangents, is_cyclic=False, start_normal=None):
-    if not raw_tangents:
-        return []
-
-    first_tangent = safe_normalized(raw_tangents[0])
-    if start_normal is None:
-        normal, binormal = get_cross_section_frame(first_tangent)
-    else:
-        normal = start_normal - first_tangent * start_normal.dot(first_tangent)
-        if normal.length < 1e-8:
-            normal, binormal = get_cross_section_frame(first_tangent)
-        else:
-            normal.normalize()
-            binormal = first_tangent.cross(normal).normalized()
-    frames = [(first_tangent, normal.copy(), binormal.copy())]
-    prev_tangent = first_tangent
-
-    for raw_tangent in raw_tangents[1:]:
-        tangent = safe_normalized(raw_tangent, prev_tangent)
-        normal = _transport_cross_section_normal(prev_tangent, tangent, normal)
-        binormal = tangent.cross(normal).normalized()
-        frames.append((tangent, normal.copy(), binormal.copy()))
-        prev_tangent = tangent
-
-    if is_cyclic and len(frames) > 2:
-        seam_normal = _transport_cross_section_normal(frames[-1][0], frames[0][0], frames[-1][1])
-        first_tangent = frames[0][0]
-        first_normal = frames[0][1]
-        seam_angle = math.atan2(
-            first_tangent.dot(seam_normal.cross(first_normal)),
-            max(-1.0, min(1.0, seam_normal.dot(first_normal))),
-        )
-        frame_count = len(frames)
-        corrected = []
-        for idx, (tangent, frame_normal, _frame_binormal) in enumerate(frames):
-            correction = seam_angle * idx / frame_count
-            if abs(correction) > 1e-12:
-                frame_normal = Matrix.Rotation(correction, 3, tangent) @ frame_normal
-            frame_normal = frame_normal - tangent * frame_normal.dot(tangent)
-            frame_normal.normalize()
-            corrected.append((tangent, frame_normal, tangent.cross(frame_normal).normalized()))
-        frames = corrected
-
-    return frames
-
-
-
-def _transport_cross_section_normal(prev_tangent, tangent, prev_normal):
-    prev_tangent = safe_normalized(prev_tangent)
-    tangent = safe_normalized(tangent, prev_tangent)
-    tangent_dot = max(-1.0, min(1.0, prev_tangent.dot(tangent)))
-
-    if tangent_dot < -0.999999:
-        normal = prev_normal - tangent * prev_normal.dot(tangent)
-    else:
-        try:
-            normal = prev_tangent.rotation_difference(tangent) @ prev_normal
-        except ValueError:
-            normal = prev_normal.copy()
-        normal = normal - tangent * normal.dot(tangent)
-
-    if normal.length < 1e-8:
-        normal, _binormal = get_cross_section_frame(tangent)
-    else:
-        normal.normalize()
-    return normal
-
-
-
-def _endpoint_driven_frames(centers, raw_tangents, is_cyclic=False, start_normal=None, roll_mode='START_FIXED'):
-    if not raw_tangents:
-        return []
-    if is_cyclic or start_normal is None:
-        return _minimal_twist_frames_from_tangents(raw_tangents, is_cyclic)
-    first_tangent = safe_normalized(raw_tangents[0])
-    anchor_normal = start_normal.copy()
-    anchor_normal = anchor_normal - first_tangent * anchor_normal.dot(first_tangent)
-    if anchor_normal.length < 1e-8:
-        anchor_normal, _tmp = get_cross_section_frame(first_tangent)
-    else:
-        anchor_normal.normalize()
-    anchor_binormal = first_tangent.cross(anchor_normal)
-    if anchor_binormal.length < 1e-8:
-        _unused_normal, anchor_binormal = get_cross_section_frame(first_tangent)
-    else:
-        anchor_binormal.normalize()
-    frames = []
-    for raw_tangent in raw_tangents:
-        tangent = safe_normalized(raw_tangent, first_tangent)
-        dot = max(-1.0, min(1.0, first_tangent.dot(tangent)))
-        if dot > 0.9995:
-            normal = anchor_normal - tangent * anchor_normal.dot(tangent)
-            if normal.length < 1e-8:
-                normal = anchor_binormal - tangent * anchor_binormal.dot(tangent)
-        elif dot < -0.9995:
-            normal = -anchor_normal - tangent * (-anchor_normal).dot(tangent)
-            if normal.length < 1e-8:
-                normal = anchor_binormal - tangent * anchor_binormal.dot(tangent)
-        else:
-            try:
-                q = first_tangent.rotation_difference(tangent)
-                normal = q @ anchor_normal
-            except Exception:
-                normal = anchor_normal - tangent * anchor_normal.dot(tangent)
-                if normal.length < 1e-8:
-                    normal = anchor_binormal - tangent * anchor_binormal.dot(tangent)
-        normal = normal - tangent * normal.dot(tangent)
-        if normal.length < 1e-8:
-            normal, binormal = get_cross_section_frame(tangent)
-        else:
-            normal.normalize()
-            binormal = tangent.cross(normal).normalized()
-        frames.append((tangent, normal, binormal))
-    return frames
+from .frames import _transport_cross_section_normal, _minimal_twist_frames_from_tangents, _endpoint_driven_frames
 
 
 

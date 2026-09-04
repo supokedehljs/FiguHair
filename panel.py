@@ -50,7 +50,7 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         # 全局开关：与偏好设置中的插件启用同步，无论是否选中曲线均可切换（修复右栏按钮不起作用）
         enable_box = layout.box()
         try:
-            from .operators import is_plugin_enabled
+            from .plugin_state import is_plugin_enabled
             _enabled = bool(is_plugin_enabled())
         except Exception:
             _enabled = bool(curve_obj.hair_pipe_settings.plugin_enabled) if curve_obj is not None and hasattr(curve_obj, 'hair_pipe_settings') else True
