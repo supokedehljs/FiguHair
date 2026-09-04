@@ -100,6 +100,21 @@ def set_generated_object_transform(obj, curve_obj):
     obj.matrix_basis = Matrix.Identity(4)
 
 
+def get_hair_root_object(curve_obj):
+    root_obj = get_figuhair_root(curve_obj)
+    if root_obj is not None:
+        return root_obj
+    if curve_obj is None:
+        return None
+    if curve_obj.parent is not None and curve_obj.parent.type == 'EMPTY' and curve_obj.parent.get("hair_pipe_root"):
+        return curve_obj.parent
+    root_name = curve_obj.name + "_FiguHair"
+    obj = bpy.data.objects.get(root_name)
+    if obj is not None and obj.type == 'EMPTY' and obj.get("hair_pipe_root"):
+        return obj
+    return None
+
+
 def get_hair_family_objects(curve_obj):
     if curve_obj is None:
         return []
