@@ -10,6 +10,14 @@ from pathlib import Path
 from mathutils import Matrix, Vector
 from bpy.props import IntProperty, FloatProperty, EnumProperty, BoolProperty, StringProperty
 from bpy_extras import view3d_utils
+from .cross_section import (
+    add_cross_section_vertex_after as cross_section_add_cross_section_vertex_after,
+    get_curve_spline_point_ranges as cross_section_get_curve_spline_point_ranges,
+    get_active_spline_point_range as cross_section_get_active_spline_point_range,
+    add_cross_section_vertex_after_all as cross_section_add_cross_section_vertex_after_all,
+    remove_cross_section_vertex_all as cross_section_remove_cross_section_vertex_all,
+    normalize_cross_section_topology as cross_section_normalize_cross_section_topology,
+)
 from .curve_data import (
     ensure_curve_defaults as curve_ensure_curve_defaults,
     get_curve_points_data as curve_get_curve_points_data,
@@ -360,32 +368,26 @@ def invert_bezier_arc_length(p0, h0_right, h1_left, p1, target_length, total_len
     return (low + high) * 0.5
 
 
+from .math_utils import (
+    catmull_rom_vector as math_catmull_rom_vector,
+    catmull_rom_tangent_vector as math_catmull_rom_tangent_vector,
+    safe_normalized as math_safe_normalized,
+    get_cross_section_frame as math_get_cross_section_frame,
+    catmull_rom_2d as math_catmull_rom_2d,
+    catmull_rom_value as math_catmull_rom_value,
+)
+
+
 def catmull_rom_vector(p0, p1, p2, p3, t):
-    t2 = t * t
-    t3 = t2 * t
-    return 0.5 * (
-        (2.0 * p1)
-        + (-p0 + p2) * t
-        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
-        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
-    )
+    return math_catmull_rom_vector(p0, p1, p2, p3, t)
 
 
 def catmull_rom_tangent_vector(p0, p1, p2, p3, t):
-    t2 = t * t
-    return 0.5 * (
-        (-p0 + p2)
-        + (2.0 * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3)) * t
-        + (3.0 * (-p0 + 3.0 * p1 - 3.0 * p2 + p3)) * t2
-    )
+    return math_catmull_rom_tangent_vector(p0, p1, p2, p3, t)
 
 
 def safe_normalized(vector, fallback=None):
-    if vector.length >= 1e-8:
-        return vector.normalized()
-    if fallback is not None and fallback.length >= 1e-8:
-        return fallback.normalized()
-    return Vector((0, 0, 1))
+    return math_safe_normalized(vector, fallback)
 
 
 def average_tangents(prev_tangent, next_tangent):
@@ -446,90 +448,49 @@ def get_poly_control_tangent(points, idx, is_cyclic):
 
 
 def get_cross_section_frame(tangent):
-    tangent = safe_normalized(tangent)
-    if tangent.z < -0.999999:
-        normal = Vector((0, -1, 0))
-    else:
-        a = 1.0 / (1.0 + tangent.z)
-        b = -tangent.x * tangent.y * a
-        normal = Vector((1.0 - tangent.x * tangent.x * a, b, -tangent.x))
-        if normal.length < 1e-8:
-            normal = Vector((1, 0, 0))
-    normal = normal - tangent * normal.dot(tangent)
-    if normal.length < 1e-8:
-        normal = Vector((1, 0, 0))
-        normal = normal - tangent * normal.dot(tangent)
-    normal.normalize()
-    binormal = tangent.cross(normal).normalized()
-    return normal, binormal
+    return math_get_cross_section_frame(tangent)
 
 
 def catmull_rom_value(v0, v1, v2, v3, t):
-    t2 = t * t
-    t3 = t2 * t
-    return 0.5 * (
-        (2.0 * v1)
-        + (-v0 + v2) * t
-        + (2.0 * v0 - 5.0 * v1 + 4.0 * v2 - v3) * t2
-        + (-v0 + 3.0 * v1 - 3.0 * v2 + v3) * t3
-    )
+    return math_catmull_rom_value(v0, v1, v2, v3, t)
+
+
+def catmull_rom_2d(p0, p1, p2, p3, t):
+    return math_catmull_rom_2d(p0, p1, p2, p3, t)
+
+
+from .interp import (
+    ease_value as interp_ease_value,
+    lerp_value as interp_lerp_value,
+    mix_value as interp_mix_value,
+    monotone_tangent as interp_monotone_tangent,
+    hermite_value as interp_hermite_value,
+    interpolate_section_value as interp_interpolate_section_value,
+)
 
 
 def ease_value(v0, v1, t):
-    t = max(0.0, min(1.0, t))
-    eased_t = t * t * (3.0 - 2.0 * t)
-    return v0 * (1.0 - eased_t) + v1 * eased_t
+    return interp_ease_value(v0, v1, t)
 
 
 def lerp_value(v0, v1, t):
-    return v0 * (1.0 - t) + v1 * t
+    return interp_lerp_value(v0, v1, t)
 
 
 def mix_value(a, b, factor):
-    factor = max(0.0, min(1.0, factor))
-    return a * (1.0 - factor) + b * factor
+    return interp_mix_value(a, b, factor)
 
 
 def monotone_tangent(prev_value, value, next_value):
-    left = value - prev_value
-    right = next_value - value
-    if left * right <= 0.0:
-        return 0.0
-    tangent = 0.5 * (left + right)
-    limit = 2.0 * min(abs(left), abs(right))
-    return max(-limit, min(limit, tangent))
+    return interp_monotone_tangent(prev_value, value, next_value)
 
 
 def hermite_value(v0, v1, m0, m1, t):
-    t2 = t * t
-    t3 = t2 * t
-    h00 = 2.0 * t3 - 3.0 * t2 + 1.0
-    h10 = t3 - 2.0 * t2 + t
-    h01 = -2.0 * t3 + 3.0 * t2
-    h11 = t3 - t2
-    return h00 * v0 + h10 * m0 + h01 * v1 + h11 * m1
+    return interp_hermite_value(v0, v1, m0, m1, t)
 
 
 def interpolate_section_value(prev_value, value0, value1, next_value, t, mode, strength):
-    t = max(0.0, min(1.0, t))
-    linear = lerp_value(value0, value1, t)
-    if mode == 'LINEAR':
-        return linear
-    if mode == 'EASE':
-        return mix_value(linear, ease_value(value0, value1, t), strength)
-
-    m0 = monotone_tangent(prev_value, value0, value1)
-    m1 = monotone_tangent(value0, value1, next_value)
-    monotone = hermite_value(value0, value1, m0, m1, t)
-    if mode == 'MONOTONE':
-        return mix_value(linear, monotone, strength)
-
-    catmull = catmull_rom_value(prev_value, value0, value1, next_value, t)
-    if mode == 'CATMULL':
-        return mix_value(linear, catmull, strength)
-    if mode == 'BLEND':
-        return mix_value(monotone, catmull, strength)
-    return monotone
+    return interp_interpolate_section_value(prev_value, value0, value1, next_value, t, mode, strength)
 
 
 def is_transition_point(point_setting):
@@ -1156,78 +1117,18 @@ def catmull_rom_2d(p0, p1, p2, p3, t):
     return x, y
 
 
+from .ghost import (
+    update_ghost_vertices as ghost_update_ghost_vertices,
+    update_all_ghost_vertices as ghost_update_all_ghost_vertices,
+)
+
+
 def update_ghost_vertices(point_setting):
-    verts = point_setting.cross_section_verts
-    count = len(verts)
-    if count < 3:
-        return
-    real_indices = [i for i, v in enumerate(verts) if not getattr(v, 'is_ghost', False)]
-    real_count = len(real_indices)
-    if real_count < 2:
-        return
-
-    for real_pos, start_idx in enumerate(real_indices):
-        end_idx = real_indices[(real_pos + 1) % real_count]
-        gap = (end_idx - start_idx - 1) % count
-        if gap <= 0:
-            continue
-
-        # The endpoints of this gap are the nearest editable vertices on both
-        # sides.  The chord is the stable reference for every ghost in the gap.
-        prev_idx = real_indices[(real_pos - 1) % real_count]
-        next_idx = real_indices[(real_pos + 2) % real_count]
-        p0 = Vector((verts[prev_idx].offset_x, verts[prev_idx].offset_y))
-        p1 = Vector((verts[start_idx].offset_x, verts[start_idx].offset_y))
-        p2 = Vector((verts[end_idx].offset_x, verts[end_idx].offset_y))
-        p3 = Vector((verts[next_idx].offset_x, verts[next_idx].offset_y))
-
-        chord = p2 - p1
-        chord_length = chord.length
-        if chord_length < 1e-8:
-            for step in range(1, gap + 1):
-                ghost_idx = (start_idx + step) % count
-                ghost_vert = verts[ghost_idx]
-                if getattr(ghost_vert, 'is_ghost', False):
-                    ghost_vert.offset_x = p1.x
-                    ghost_vert.offset_y = p1.y
-            continue
-
-        chord_dir = chord / chord_length
-        chord_normal = Vector((-chord_dir.y, chord_dir.x))
-        adjacent_length = min((p1 - p0).length, (p3 - p2).length)
-
-        # When the editable endpoints are close compared with their neighbours,
-        # curvature from the outer points is an unstable extrapolation.  Keep
-        # this case on the chord instead of allowing a large curved bulge.
-        close_ratio = chord_length / max(chord_length, adjacent_length, 1e-8)
-        direct_chord = chord_length <= adjacent_length * 0.2
-        max_offset = chord_length * min(0.25, 0.5 * close_ratio)
-
-        for step in range(1, gap + 1):
-            ghost_idx = (start_idx + step) % count
-            ghost_vert = verts[ghost_idx]
-            if not getattr(ghost_vert, 'is_ghost', False):
-                continue
-
-            t = step / (gap + 1)
-            linear = p1 + chord * t
-            if direct_chord:
-                result = linear
-            else:
-                # Catmull-Rom supplies a gentle shape for ordinary gaps, but
-                # only its displacement from the chord is retained and bounded.
-                candidate = Vector(catmull_rom_2d(p0, p1, p2, p3, t))
-                offset = (candidate - linear).dot(chord_normal)
-                offset = max(-max_offset, min(max_offset, offset))
-                result = linear + chord_normal * offset
-
-            ghost_vert.offset_x = result.x
-            ghost_vert.offset_y = result.y
+    return ghost_update_ghost_vertices(point_setting)
 
 
 def update_all_ghost_vertices(settings):
-    for point_setting in settings.point_settings:
-        update_ghost_vertices(point_setting)
+    return ghost_update_all_ghost_vertices(settings)
 
 
 def _ghost_vertex_error(point_setting, vertex_idx):
@@ -1575,83 +1476,27 @@ def ensure_auto_ghost_slider_gesture(context, curve_obj):
 
 
 def add_cross_section_vertex_after(point_setting, idx, is_ghost=False):
-    csv = point_setting.cross_section_verts
-    n = len(csv)
-    if n < 2:
-        return False
-    idx = max(0, min(idx, n - 1))
-    idx_next = (idx + 1) % n
-    v = csv.add()
-    v.offset_x = (csv[idx].offset_x + csv[idx_next].offset_x) * 0.5
-    v.offset_y = (csv[idx].offset_y + csv[idx_next].offset_y) * 0.5
-    v.is_ghost = is_ghost
-    target = idx + 1
-    for i in range(len(csv) - 1, target, -1):
-        csv.move(i, i - 1)
-    point_setting.active_vert_index = target
-    return True
+    return cross_section_add_cross_section_vertex_after(point_setting, idx, is_ghost)
 
 
 def get_curve_spline_point_ranges(curve_obj):
-    ranges = []
-    offset = 0
-    for spline in curve_obj.data.splines:
-        count = len(spline.bezier_points) if spline.type == 'BEZIER' else len(spline.points)
-        ranges.append((offset, offset + count))
-        offset += count
-    return ranges
+    return cross_section_get_curve_spline_point_ranges(curve_obj)
 
 
 def get_active_spline_point_range(curve_obj, settings):
-    active_idx = min(max(0, settings.active_point_index), max(0, len(settings.point_settings) - 1))
-    for start, end in get_curve_spline_point_ranges(curve_obj):
-        if start <= active_idx < end:
-            return start, end
-    return 0, len(settings.point_settings)
+    return cross_section_get_active_spline_point_range(curve_obj, settings)
 
 
 def add_cross_section_vertex_after_all(settings, idx, point_range=None):
-    start, end = point_range or (0, len(settings.point_settings))
-    active_idx = min(settings.active_point_index, len(settings.point_settings) - 1)
-    for point_idx in range(start, end):
-        point_setting = settings.point_settings[point_idx]
-        add_cross_section_vertex_after(point_setting, idx, point_idx != active_idx)
+    return cross_section_add_cross_section_vertex_after_all(settings, idx, point_range)
 
 
 def remove_cross_section_vertex_all(settings, idx, point_range=None):
-    start, end = point_range or (0, len(settings.point_settings))
-    point_settings = settings.point_settings[start:end]
-    if any(len(point_setting.cross_section_verts) <= 3 for point_setting in point_settings):
-        return False
-    for point_setting in point_settings:
-        csv = point_setting.cross_section_verts
-        remove_idx = max(0, min(idx, len(csv) - 1))
-        csv.remove(remove_idx)
-        point_setting.active_vert_index = min(remove_idx, len(csv) - 1)
-    return True
+    return cross_section_remove_cross_section_vertex_all(settings, idx, point_range)
 
 
 def normalize_cross_section_topology(settings, curve_obj=None):
-    if len(settings.point_settings) == 0:
-        return
-    ranges = get_curve_spline_point_ranges(curve_obj) if curve_obj is not None else [(0, len(settings.point_settings))]
-    for start, end in ranges:
-        if start >= len(settings.point_settings):
-            continue
-        end = min(end, len(settings.point_settings))
-        target_count = len(settings.point_settings[start].cross_section_verts)
-        if target_count < 3:
-            continue
-        for point_idx in range(start, end):
-            point_setting = settings.point_settings[point_idx]
-            csv = point_setting.cross_section_verts
-            while len(csv) < target_count and len(csv) >= 2:
-                insert_idx = max(0, len(csv) - 1)
-                add_cross_section_vertex_after(point_setting, insert_idx)
-            while len(csv) > target_count and len(csv) > 3:
-                csv.remove(len(csv) - 1)
-            if point_setting.active_vert_index >= len(csv):
-                point_setting.active_vert_index = len(csv) - 1
+    return cross_section_normalize_cross_section_topology(settings, curve_obj)
 
 
 def generate_pipe_mesh(curve_obj, settings):
@@ -5132,168 +4977,6 @@ def _delete_generated_for_curve(curve_obj):
         bpy.data.objects.remove(generated, do_unlink=True)
 
 
-class HAIRPIPE_OT_merge_hair_curves(bpy.types.Operator):
-    bl_idname = "hair_pipe.merge_hair_curves"
-    bl_label = "合并选中头发"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        return context.mode == 'OBJECT' and len([
-            obj for obj in context.selected_objects
-            if obj.type == 'CURVE' and hasattr(obj, 'hair_pipe_settings')
-        ]) >= 2
-
-    def execute(self, context):
-        curves = [obj for obj in context.selected_objects
-                  if obj.type == 'CURVE' and hasattr(obj, 'hair_pipe_settings')]
-        active = context.view_layer.objects.active
-        if active not in curves:
-            active = curves[0]
-        for curve in curves:
-            try:
-                curve.update_from_editmode()
-            except Exception:
-                pass
-            sync_point_settings(curve)
-
-        active_matrix = active.matrix_world.copy()
-        merged_settings = [
-            _point_setting_to_data(item)
-            for item in active.hair_pipe_settings.point_settings
-        ]
-        source_splines = []
-        active_data = active.data.copy()
-        target_data = active_data
-        active_spline_count = len(active_data.splines)
-        for curve in curves:
-            if curve is active:
-                continue
-            source_settings = curve.hair_pipe_settings
-            point_offset = 0
-            transform = active_matrix.inverted_safe() @ curve.matrix_world
-            for spline in curve.data.splines:
-                count = len(spline.bezier_points) if spline.type == 'BEZIER' else len(spline.points)
-                source_splines.append((spline, transform))
-                for idx in range(point_offset, point_offset + count):
-                    if idx < len(source_settings.point_settings):
-                        merged_settings.append(_point_setting_to_data(source_settings.point_settings[idx]))
-                    else:
-                        merged_settings.append(None)
-                point_offset += count
-
-        # Remove every preview belonging to the selected sources before
-        # replacing the curve data. The active preview must not remain tied to
-        # the pre-merge curve datablock.
-        for curve in curves:
-            _delete_generated_for_curve(curve)
-
-        for spline, transform in source_splines:
-            _copy_spline_to_curve(spline, target_data, transform)
-        for curve in curves:
-            if curve is active:
-                continue
-            data = curve.data
-            bpy.data.objects.remove(curve, do_unlink=True)
-            if data.users == 0:
-                bpy.data.curves.remove(data)
-
-        old_active_data = active.data
-        active.data = active_data
-        if old_active_data.users == 0:
-            bpy.data.curves.remove(old_active_data)
-        _replace_point_settings_from_data(active.hair_pipe_settings, merged_settings)
-        active.hair_pipe_settings.auto_update = False
-        ensure_figuhair_root(active)
-        sync_point_settings(active)
-        for obj in context.selected_objects:
-            obj.select_set(False)
-        active.select_set(True)
-        context.view_layer.objects.active = active
-        result = bpy.ops.hair_pipe.generate_pipe()
-        if 'FINISHED' not in result:
-            self.report({'ERROR'}, "合并后管线生成失败")
-            return {'CANCELLED'}
-        self.report({'INFO'}, f"已合并选中的 {len(curves)} 根头发")
-        return {'FINISHED'}
-
-
-class HAIRPIPE_OT_separate_hair_splines(bpy.types.Operator):
-    bl_idname = "hair_pipe.separate_hair_splines"
-    bl_label = "分离选中头发"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        curve = get_context_curve_object(context)
-        return curve is not None and is_curve_edit_mode(curve)
-
-    def execute(self, context):
-        curve = get_context_curve_object(context)
-        try:
-            curve.update_from_editmode()
-        except Exception:
-            pass
-        sync_point_settings(curve)
-        settings = curve.hair_pipe_settings
-        selected = []
-        offset = 0
-        for spline in curve.data.splines:
-            points = spline.bezier_points if spline.type == 'BEZIER' else spline.points
-            flags = [p.select_control_point if spline.type == 'BEZIER' else p.select for p in points]
-            if flags and all(flags):
-                selected.append((spline, offset, len(points)))
-            offset += len(points)
-        if not selected or len(selected) == len(curve.data.splines):
-            self.report({'ERROR'}, "请选中部分完整头发后再分离")
-            return {'CANCELLED'}
-
-        _delete_generated_for_curve(curve)
-        new_data = bpy.data.curves.new(curve.name + " 分离Curve", 'CURVE')
-        new_data.dimensions = curve.data.dimensions
-        new_data.resolution_u = curve.data.resolution_u
-        new_data.render_resolution_u = curve.data.render_resolution_u
-        new_obj = bpy.data.objects.new(curve.name + " 分离", new_data)
-        collection = curve.users_collection[0] if curve.users_collection else context.scene.collection
-        collection.objects.link(new_obj)
-        new_obj.matrix_world = curve.matrix_world.copy()
-        new_obj["hair_pipe_base_name"] = get_next_figuhair_base_name()
-        new_settings = new_obj.hair_pipe_settings
-        new_settings.plugin_enabled = True
-        new_settings.auto_update = False
-        new_point_data = []
-        for spline, start, count in selected:
-            _copy_spline_to_curve(spline, new_data, Matrix.Identity(4))
-            for idx in range(start, start + count):
-                if idx < len(settings.point_settings):
-                    new_point_data.append(_point_setting_to_data(settings.point_settings[idx]))
-        _replace_point_settings_from_data(new_settings, new_point_data)
-
-        for spline, _start, _count in reversed(selected):
-            curve.data.splines.remove(spline)
-        sync_point_settings(curve)
-        ensure_figuhair_root(new_obj)
-        sync_point_settings(new_obj)
-
-        for obj in context.selected_objects:
-            obj.select_set(False)
-        curve.select_set(True)
-        context.view_layer.objects.active = curve
-        with context.temp_override(active_object=curve, object=curve):
-            bpy.ops.object.mode_set(mode='OBJECT')
-            bpy.ops.hair_pipe.generate_pipe()
-        new_obj.select_set(True)
-        context.view_layer.objects.active = new_obj
-        with context.temp_override(active_object=new_obj, object=new_obj):
-            bpy.ops.hair_pipe.generate_pipe()
-        curve.select_set(True)
-        context.view_layer.objects.active = curve
-        with context.temp_override(active_object=curve, object=curve):
-            bpy.ops.object.mode_set(mode='EDIT')
-        self.report({'INFO'}, f"已分离选中的 {len(selected)} 根头发")
-        return {'FINISHED'}
-
-
 class HAIRPIPE_OT_merge_hair_for_export(bpy.types.Operator):
     """\u5c06\u6240\u6709\u5934\u53d1\u7f51\u683c\u5408\u5e76\u4e3a\u5355\u4e00\u7f51\u683c\u7528\u4e8e\u5bfc\u51fa\uff0c\u5e76\u9690\u85cf\u539f\u59cb\u5934\u53d1"""
     bl_idname = "hair_pipe.merge_hair_for_export"
@@ -5839,8 +5522,6 @@ classes = (
     HAIRPIPE_OT_family_local_view,
     HAIRPIPE_OT_delete_hair,
     HAIRPIPE_OT_duplicate_hair,
-    HAIRPIPE_OT_merge_hair_curves,
-    HAIRPIPE_OT_separate_hair_splines,
     HAIRPIPE_OT_merge_hair_for_export,
 )
 

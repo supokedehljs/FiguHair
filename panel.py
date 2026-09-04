@@ -68,13 +68,9 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         box.label(text="通用", icon='MESH_CYLINDER')
         row = box.row(align=True)
         row.enabled = curve_obj is not None
-        row.scale_y = 1.35
-        row.operator("hair_pipe.generate_pipe", text="生成 / 更新管线")
-        row2 = box.row(align=True)
-        row2.enabled = curve_obj is not None
-        row2.scale_y = 1.2
-        row2.operator("hair_pipe.duplicate_hair", text="复制头发", icon='DUPLICATE')
-        row2.operator("hair_pipe.delete_hair", text="删除头发", icon='TRASH')
+        row.scale_y = 1.2
+        row.operator("hair_pipe.duplicate_hair", text="复制头发", icon='DUPLICATE')
+        row.operator("hair_pipe.delete_hair", text="删除头发", icon='TRASH')
         row3 = box.row(align=True)
         row3.enabled = curve_obj is not None
         row3.scale_y = 1.2
@@ -83,15 +79,6 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         row.scale_y = 1.2
         row.operator("hair_pipe.mesh_to_hair_curve", text="管状网格转头发曲线", icon='CURVE_DATA')
 
-        edit_mode = curve_obj is not None and is_curve_edit_mode(curve_obj)
-        action_box = layout.box()
-        action_box.label(text="合并与分离", icon='CURVE_DATA')
-        merge_row = action_box.row(align=True)
-        merge_row.enabled = context.mode == 'OBJECT'
-        merge_row.operator("hair_pipe.merge_hair_curves", text="合并选中头发", icon='AUTOMERGE_ON')
-        separate_row = action_box.row(align=True)
-        separate_row.enabled = edit_mode
-        separate_row.operator("hair_pipe.separate_hair_splines", text="分离选中头发", icon='UNLINKED')
         if curve_obj is None:
             layout.label(text="未选择 FiguHair 头发；设置暂不可编辑", icon='INFO')
             settings = None
@@ -120,15 +107,7 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         icon = 'HIDE_OFF' if settings.default_subdiv else 'HIDE_ON'
         row.prop(settings, "default_subdiv", text="", icon=icon, toggle=True)
 
-        action_box = layout.box()
-        action_box.label(text="合并与分离", icon='CURVE_DATA')
-        merge_row = action_box.row(align=True)
-        merge_row.enabled = context.mode == 'OBJECT'
-        merge_row.operator("hair_pipe.merge_hair_curves", text="合并选中头发", icon='AUTOMERGE_ON')
-        separate_row = action_box.row(align=True)
-        separate_row.enabled = edit_mode
-        separate_row.operator("hair_pipe.separate_hair_splines", text="分离选中头发", icon='UNLINKED')
-
+        edit_mode = curve_obj is not None and is_curve_edit_mode(curve_obj)
         header_box = layout.box()
         auto_update_row = header_box.row()
         auto_update_row.enabled = edit_mode

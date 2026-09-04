@@ -9,8 +9,12 @@ bl_info = {
 }
 
 from . import (
+    cross_section,
     curve_data,
+    ghost,
     hair_lifecycle,
+    interp,
+    math_utils,
     operators,
     panel,
     properties,

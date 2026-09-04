@@ -64,13 +64,17 @@
 
 ```
 hair_curve_pipe/
-├── __init__.py      # 插件入口
-├── properties.py    # 属性（横截面顶点、逐点设置、全局设置）
-├── operators.py     # 核心算法与操作符
-├── panel.py         # UI 面板
-├── handler.py       # 自动更新处理器
-├── curve_data.py    # 曲线读取、控制点选择与基础曲线数据
-├── hair_lifecycle.py # 头发对象、预览网格与生命周期管理
+├── __init__.py       # 插件入口
+├── properties.py     # 属性（横截面顶点、逐点设置、全局设置）
+├── operators.py      # 操作符（现阶段保留兼容层，逐步瘦身）
+├── panel.py          # 右栏 UI 面板
+├── handler.py        # 自动更新与可见性同步
+├── curve_data.py     # 曲线读取与控制点选择
+├── hair_lifecycle.py # 头发对象族与预览网格管理
+├── cross_section.py  # 横截面拓扑（添加/删除/对齐与 spline 范围）
+├── math_utils.py     # 向量/切线/横截面坐标系/插值数学
+├── interp.py         # 数值插值（ease/lerp/hermite/section）
+├── ghost.py          # 幽灵点插值与同步
 └── README.md
 ```
 
@@ -129,32 +133,13 @@ hair_curve_pipe/
 
 后续还有 **4 个主要模块阶段**，每个阶段仍然会拆成多个小轮次，并在每轮后进行 Blender 测试。
 
-- [ ] 第二阶段：头发生命周期正式切换
+- [x] 第二阶段：头发生命周期正式切换
 
-目标：让头发对象相关代码不再由 `operators.py` 实现。
+已完成：`get_figuhair_root / ensure_figuhair_root`、管线与尾部网格查找、源曲线反查、预览网格父子关系与变换、头发对象族查找与清理已迁移到 `hair_lifecycle.py`，`operators.py` 保留兼容层，上层模块已切换到新入口；旧版末端网格功能已停用。
 
-计划迁移：
+- [ ] 第三阶段：管线生成核心（进行中）
 
-- `get_figuhair_root` 和 `ensure_figuhair_root`；
-- 管线、尾部网格的查找；
-- 源曲线反查；
-- 预览网格父子关系和变换；
-- 创建、删除、隐藏和清理头发对象的公共服务。
-
-迁移完成后，`operators.py` 只保留兼容转发，所有实际调用改用 `hair_lifecycle.py`。
-
-- [ ] 第三阶段：管线生成核心
-
-目标：从 `operators.py` 中拆出不属于 Operator 的几何计算。
-
-计划拆成：
-
-- `pipe_sampling.py`：Bezier、NURBS、Poly 曲线采样；
-- `cross_section.py`：横截面插值、ghost 点和过渡；
-- `frames.py`：切向量、法线、binormal 和滚转；
-- `pipe_mesh.py`：ring、vertex、face 生成。
-
-这一阶段会优先迁移纯计算函数，不立即改变 Blender 对象创建流程，风险最低。
+已完成：`cross_section.py` 已独立；`math_utils.py` 已独立（`safe_normalized / get_cross_section_frame / Catmull-Rom`）；`ghost.py` 已独立；`interp.py` 已独立（数值插值与段插值）；`operators.py` 中多头发合并/分离已移除，右栏通用区已隐藏 `生成 / 更新管线`，`添加头发` 为创建入口，主线保持小步迁移与可测试策略。
 
 - [ ] 第四阶段：生成与对象服务
 

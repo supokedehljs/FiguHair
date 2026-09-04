@@ -9,27 +9,31 @@ from bpy_extras import view3d_utils
 from bpy.props import IntProperty, FloatProperty, BoolProperty
 from bpy.types import PropertyGroup
 from mathutils import Vector
-from .operators import (
-    generate_pipe_mesh,
-    get_curve_points_data,
-    get_effective_point_setting,
-    interpolate_cross_sections_smooth,
-    get_pipe_source_curve,
-    get_pipe_object_for_curve,
-    is_transition_point,
-    is_curve_edit_mode,
-    get_selected_curve_point_indices,
-    sync_active_point_from_selection,
-    sync_point_settings,
-    catmull_rom_2d,
-    update_ghost_vertices,
-    update_all_ghost_vertices,
-    safe_normalized,
-    get_cross_section_frame,
+from .cross_section import (
     add_cross_section_vertex_after,
     remove_cross_section_vertex_all,
     get_curve_spline_point_ranges,
     get_active_spline_point_range,
+)
+from .curve_data import (
+    get_curve_points_data,
+    is_curve_edit_mode,
+    get_selected_curve_point_indices,
+)
+from .hair_lifecycle import get_pipe_object_for_curve, get_pipe_source_curve
+from .ghost import update_all_ghost_vertices, update_ghost_vertices
+from .math_utils import (
+    catmull_rom_2d,
+    get_cross_section_frame,
+    safe_normalized,
+)
+from .operators import (
+    generate_pipe_mesh,
+    get_effective_point_setting,
+    interpolate_cross_sections_smooth,
+    is_transition_point,
+    sync_active_point_from_selection,
+    sync_point_settings,
     get_uncontrolled_roll_diagnostics,
 )
 
@@ -80,6 +84,10 @@ def set_solo_display_enabled(self, enabled):
     set_widget_solo_state(bpy.context, self, bool(enabled))
 
 
+_WIDGET_MESH_THROTTLE = 0.035
+_last_widget_mesh_time = 0.0
+
+
 def get_cached_pipe_mesh(obj):
     """Reuse generated geometry while the curve and cross-section data are unchanged."""
     if obj is None:
@@ -108,11 +116,19 @@ def get_cached_pipe_mesh(obj):
     cached = _pipe_mesh_cache.get(cache_key)
     if cached is not None and cached[0] == signature:
         return cached[1]
+    global _last_widget_mesh_time
+    now = time.perf_counter()
+    if cached is not None and now - _last_widget_mesh_time < _WIDGET_MESH_THROTTLE:
+        return cached[1]
     try:
         mesh = generate_pipe_mesh(obj, settings)
     except Exception:
         mesh = (None, None)
+    if len(_pipe_mesh_cache) > 64:
+        oldest = next(iter(_pipe_mesh_cache))
+        _pipe_mesh_cache.pop(oldest, None)
     _pipe_mesh_cache[cache_key] = (signature, mesh)
+    _last_widget_mesh_time = now
     return mesh
 
 
@@ -1187,6 +1203,32 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
         (item for item in spline_ranges if item[0] <= active_idx < item[1]),
         None,
     )
+    all_spline_ring_ranges = []
+    for idx, spline_data in enumerate(get_curve_points_data(obj)):
+        point_count = len(spline_data.get('points', []))
+        if point_count < 2:
+            all_spline_ring_ranges.append(((0, 0), segments))
+        else:
+            # sampled ring count per spline; segments for display ring may differ
+            segment_count = point_count if spline_data.get('cyclic', False) else point_count - 1
+            sample_steps = segment_count * max(1, int(getattr(obj.hair_pipe_settings, 'pipe_resolution', 0)) + 1)
+            ring_count_for_spline = sample_steps if spline_data.get('cyclic', False) else sample_steps + 1
+            start_ring = all_spline_ring_ranges[-1][0][1] if all_spline_ring_ranges else 0
+            end_ring = start_ring + ring_count_for_spline
+            ps_seg = len(obj.hair_pipe_settings.point_settings[spline_ranges[idx][0]].cross_section_verts) if idx < len(spline_ranges) and spline_ranges[idx][0] < len(obj.hair_pipe_settings.point_settings) and len(obj.hair_pipe_settings.point_settings[spline_ranges[idx][0]].cross_section_verts) >= 3 else segments
+            all_spline_ring_ranges.append(((start_ring, end_ring), ps_seg))
+        start_ring = all_spline_ring_ranges[-1][0][1] if all_spline_ring_ranges else 0
+        end_ring = start_ring + (all_spline_ring_ranges[-1][0][1] - all_spline_ring_ranges[-1][0][0]) if all_spline_ring_ranges else 0
+    ring_counts_for_segments = {}
+    for idx, (s_start, s_end) in enumerate(spline_ranges):
+        ring_range = all_spline_ring_ranges[idx][0] if idx < len(all_spline_ring_ranges) else (0, 0)
+        if ring_range[1] > ring_range[0]:
+            ring_counts_for_segments[(s_start, s_end)] = ring_range
+    active_spline_ring_range = None
+    for idx, spline_range in enumerate(spline_ranges):
+        if spline_range[0] <= active_idx < spline_range[1]:
+            active_spline_ring_range = all_spline_ring_ranges[idx][0] if idx < len(all_spline_ring_ranges) else None
+            break
     ring_candidates = []
     for start in range(0, len(mesh_verts) - segments + 1, segments):
         ring = mesh_verts[start:start + segments]
@@ -1195,6 +1237,10 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
 
     selected_ring_starts = []
     used_starts = set()
+    candidate_slice = ring_candidates
+    if active_spline_ring_range is not None:
+        r0, r1 = active_spline_ring_range
+        candidate_slice = [item for item in ring_candidates if r0 * segments <= item[0] < r1 * segments]
     for point_idx in selected_curve_indices:
         if not (0 <= point_idx < len(control_positions)):
             continue
@@ -1204,7 +1250,7 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
         world_center = control_positions[point_idx]
         best_start = None
         best_dist = None
-        for start, ring_center_world in ring_candidates:
+        for start, ring_center_world in candidate_slice:
             dist = (ring_center_world - world_center).length
             if best_dist is None or dist < best_dist:
                 best_dist = dist
@@ -1226,6 +1272,7 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
     for spline_data in get_curve_points_data(obj):
         point_count = len(spline_data.get('points', []))
         if point_count < 2:
+            spline_ring_ranges.append((0, 0))
             continue
         segment_count = point_count if spline_data.get('cyclic', False) else point_count - 1
         sample_steps = segment_count * max(1, int(getattr(obj.hair_pipe_settings, 'pipe_resolution', 0)) + 1)
@@ -1262,10 +1309,34 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
         front_masks.append([(world_pos - ring_center).dot(camera_dir) >= 0.0 for world_pos in ring_world])
 
     bridge_offsets = [None] * max(0, ring_count - 1)
+    ring_to_point = {}
+    if active_spline_range is not None and active_spline_ring_range is not None:
+        s_start, s_end = active_spline_range
+        r_start, r_end = active_spline_ring_range
+        local_ring_count = max(1, r_end - r_start)
+        for ring_idx in range(ring_count):
+            if r_start <= ring_idx < r_end:
+                t = (ring_idx - r_start) / max(1, local_ring_count - 1)
+                mapped = int(round(s_start + t * (s_end - s_start - 1)))
+                mapped = max(s_start, min(s_end - 1, mapped))
+                ring_to_point[ring_idx] = mapped
     for ring_idx in range(len(bridge_offsets)):
+        if ring_idx in ring_to_point and ring_idx + 1 in ring_to_point:
+            src = ring_to_point[ring_idx]
+            dst = ring_to_point[ring_idx + 1]
+            src_spline = active_spline_range is not None and active_spline_range[0] <= src < active_spline_range[1]
+            dst_spline = active_spline_range is not None and active_spline_range[0] <= dst < active_spline_range[1]
+            if src_spline and dst_spline:
+                bridge_offsets[ring_idx] = int(
+                    getattr(obj.hair_pipe_settings.point_settings[dst], 'bridge_offset', 0)
+                ) if dst < len(obj.hair_pipe_settings.point_settings) else 0
+            else:
+                bridge_offsets[ring_idx] = None
+            continue
         next_start = (ring_idx + 1) * segments
         next_ring = mesh_verts[next_start:next_start + segments]
         if len(next_ring) != segments or not control_positions:
+            bridge_offsets[ring_idx] = None
             continue
         next_center = sum((Vector(vertex) for vertex in next_ring), Vector((0.0, 0.0, 0.0))) / segments
         next_center_world = obj.matrix_world @ next_center
@@ -1278,6 +1349,8 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
             bridge_offsets[ring_idx] = int(
                 getattr(obj.hair_pipe_settings.point_settings[target_idx], 'bridge_offset', 0)
             )
+        else:
+            bridge_offsets[ring_idx] = None
 
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
     gpu.state.blend_set('ALPHA')
@@ -1392,7 +1465,7 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
     gpu.state.blend_set('NONE')
 
 
-def get_pipe_control_vertices_in_screen_rect(context, x0, y0, x1, y1):
+def get_pipe_control_vertices_in_screen_rect(context, x0, y0, x1, y1, spline_filter=None):
     region = context.region
     region_data = context.region_data
     obj = context.active_object
@@ -1414,6 +1487,23 @@ def get_pipe_control_vertices_in_screen_rect(context, x0, y0, x1, y1):
     if segments < 3 or len(mesh_verts) < segments:
         return []
 
+    spline_ranges = get_curve_spline_point_ranges_bypass(obj) if 'get_curve_spline_point_ranges_bypass' in globals() else []
+    if not spline_ranges:
+        offset = 0
+        for spline in obj.data.splines:
+            count = len(spline.bezier_points) if spline.type == 'BEZIER' else len(spline.points)
+            spline_ranges.append((offset, offset + count))
+            offset += count
+    allowed = set()
+    if spline_filter is not None:
+        allowed.add(spline_filter)
+    else:
+        active_idx = settings.active_point_index
+        for start, end in spline_ranges:
+            if start <= active_idx < end:
+                allowed.add((start, end))
+                break
+
     control_positions = []
     for spline_data in get_curve_points_data(obj):
         for point in spline_data.get('points', []):
@@ -1430,6 +1520,9 @@ def get_pipe_control_vertices_in_screen_rect(context, x0, y0, x1, y1):
     hits = []
     used_starts = set()
     for point_idx, control_world in enumerate(control_positions[:len(settings.point_settings)]):
+        point_in_allowed = any(start <= point_idx < end for start, end in allowed) if allowed else True
+        if not point_in_allowed:
+            continue
         if is_transition_point(settings.point_settings[point_idx]):
             continue
         best_start = None
