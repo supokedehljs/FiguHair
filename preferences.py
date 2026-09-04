@@ -152,11 +152,18 @@ classes = (HairPipePreferences,)
 
 def register():
     for cls in classes:
-        bpy.utils.register_class(cls)
+        try:
+            bpy.utils.register_class(cls)
+        except ValueError as e:
+            if "already registered" not in str(e):
+                raise
     register_keymaps()
 
 
 def unregister():
     unregister_keymaps()
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+        try:
+            bpy.utils.unregister_class(cls)
+        except (RuntimeError, ValueError):
+            pass

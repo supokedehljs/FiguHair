@@ -29,7 +29,21 @@ from . import (
 )
 
 
+def _force_unregister_stale():
+    # Blender leaves classes registered if previous register() raised; clean them before re-register.
+    for mod_name in ("preferences", "properties", "widget_operator", "widget_state", "widget_interact", "operators", "panel"):
+        try:
+            mod = __import__(f"hair_curve_pipe.{mod_name}", fromlist=["unregister"])
+            # Only attempt if the classes are still registered; unregister is made tolerant.
+            try:
+                mod.unregister()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
 def register():
+    _force_unregister_stale()
     preferences.register()
     properties.register()
     widget_operator.register()

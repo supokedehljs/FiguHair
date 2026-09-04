@@ -4899,7 +4899,11 @@ def unregister_keymaps():
 
 def register():
     for cls in classes:
-        bpy.utils.register_class(cls)
+        try:
+            bpy.utils.register_class(cls)
+        except ValueError as e:
+            if "already registered" not in str(e):
+                raise
     bpy.types.VIEW3D_MT_add.prepend(draw_hair_add_menu)
     register_keymaps()
 
@@ -4911,4 +4915,7 @@ def unregister():
     except (AttributeError, ValueError):
         pass
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+        try:
+            bpy.utils.unregister_class(cls)
+        except (RuntimeError, ValueError):
+            pass
