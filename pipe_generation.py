@@ -7,15 +7,47 @@ from .math_utils import catmull_rom_vector, catmull_rom_tangent_vector, safe_nor
 from .sampling import evaluate_bezier_segment, evaluate_bezier_tangent, distribute_steps_by_lengths, invert_bezier_arc_length
 from .transition import get_effective_point_setting, get_point_setting, interpolate_cross_sections_smooth, update_transition_point_values
 
+
 def _get_start_roll_normal(curve_obj, start_tangent):
-    # mirror logic from frames._get_start_roll_normal without circular import
     from .frames import _get_start_roll_normal as _fn
     try:
         return _fn(curve_obj, start_tangent)
     except Exception:
         from .math_utils import get_cross_section_frame
-        n,_ = get_cross_section_frame(start_tangent)
+        n, _ = get_cross_section_frame(start_tangent)
         return n
+
+
+def _estimate_avg_radius(point_setting, point_dict, default_radius):
+    try:
+        verts = point_setting.cross_section_verts
+        if verts and len(verts) > 0:
+            scale = float(getattr(point_setting, 'scale', 1.0))
+            curve_radius = float(point_dict.get('radius', 1.0)) if isinstance(point_dict, dict) else 1.0
+            total = 0.0
+            for v in verts:
+                total += math.hypot(float(v.offset_x), float(v.offset_y))
+            avg = total / max(1, len(verts))
+            if avg > 1e-6:
+                return max(1e-4, avg * scale * curve_radius)
+    except Exception:
+        pass
+    try:
+        return max(1e-4, float(default_radius) * float(getattr(point_setting, 'scale', 1.0)))
+    except Exception:
+        return max(1e-4, float(default_radius) if default_radius else 0.05)
+
+
+def _adaptive_steps_for_segment(seg_length, r0, r1, segments, max_steps):
+    avg_radius = max(1e-4, (r0 + r1) * 0.5)
+    seg_circum = max(1e-4, 2.0 * math.pi * avg_radius)
+    circum_edge = seg_circum / max(3, segments)
+    # 仅在用户显式开启自适应时调用：目标纵向边长 ≈ 周向边长 * 1.15
+    target_longitudinal = max(circum_edge * 1.15, avg_radius * 1.8, 1e-4)
+    steps = int(math.ceil(seg_length / target_longitudinal))
+    steps = max(1, min(int(max_steps), steps))
+    return steps
+
 
 def generate_pipe_mesh(curve_obj, settings):
     update_transition_point_values(curve_obj, settings)
@@ -30,9 +62,14 @@ def generate_pipe_mesh(curve_obj, settings):
     point_settings = settings.point_settings
     global_point_idx = 0
 
+    # 默认关闭：6点只出6环，不插过渡环，保持与旧版一致
+    adaptive_enabled = bool(getattr(settings, 'adaptive_resolution', False))
+    adaptive_max = int(getattr(settings, 'adaptive_max_steps', 4))
+    adaptive_max = max(1, min(32, adaptive_max))
+
     for spline_index, spline_data in enumerate(splines_data):
         points = spline_data['points']
-        resolution = max(0, settings.pipe_resolution)
+        resolution = max(0, int(getattr(settings, 'pipe_resolution', 0)))
         is_cyclic = spline_data['cyclic']
         num_points = len(points)
         if num_points < 2:
@@ -42,17 +79,15 @@ def generate_pipe_mesh(curve_obj, settings):
         ring_specs = []
         if spline_data['type'] == 'BEZIER':
             seg_count = num_points if is_cyclic else num_points - 1
-
-            # ── Step 1: estimate arc length of every segment ──────────────
             ARC_SUBDIV = 8
             seg_lengths = []
             for seg_idx in range(seg_count):
                 idx0 = seg_idx
                 idx1 = (seg_idx + 1) % num_points
-                p0_  = points[idx0]['co']
+                p0_ = points[idx0]['co']
                 h0r_ = points[idx0]['handle_right']
                 h1l_ = points[idx1]['handle_left']
-                p1_  = points[idx1]['co']
+                p1_ = points[idx1]['co']
                 length = 0.0
                 prev = evaluate_bezier_segment(p0_, h0r_, h1l_, p1_, 0.0)
                 for k in range(1, ARC_SUBDIV + 1):
@@ -60,14 +95,27 @@ def generate_pipe_mesh(curve_obj, settings):
                     length += (cur - prev).length
                     prev = cur
                 seg_lengths.append(max(length, 1e-8))
-            total_length = sum(seg_lengths)
 
-            # ── Step 2: distribute sample steps proportionally ────────────
-            # Total samples across the whole spline (same budget as before)
-            total_steps = seg_count * max(1, resolution + 1)
-            seg_steps = distribute_steps_by_lengths(seg_lengths, total_steps)
+            if resolution == 0 and adaptive_enabled:
+                seg_steps = []
+                for seg_idx in range(seg_count):
+                    idx0 = seg_idx
+                    idx1 = (seg_idx + 1) % num_points
+                    ps0 = get_effective_point_setting(point_settings, global_point_idx + idx0, settings)
+                    ps1 = get_effective_point_setting(point_settings, global_point_idx + idx1, settings)
+                    segments = max(len(ps0.cross_section_verts), len(ps1.cross_section_verts), int(getattr(settings, 'default_segments', 8)))
+                    segments = max(3, segments)
+                    r0 = _estimate_avg_radius(ps0, points[idx0], settings.default_radius)
+                    r1 = _estimate_avg_radius(ps1, points[idx1], settings.default_radius)
+                    steps = _adaptive_steps_for_segment(seg_lengths[seg_idx], r0, r1, segments, adaptive_max)
+                    seg_steps.append(steps)
+            elif resolution == 0:
+                # 严格 1点=1环：每段恰好1个步进，末段由后处理补终点，总环数 == 控制点数
+                seg_steps = [1] * seg_count
+            else:
+                total_steps = seg_count * max(1, resolution + 1)
+                seg_steps = distribute_steps_by_lengths(seg_lengths, total_steps)
 
-            # ── Step 3: sample each segment ───────────────────────────────
             for seg_idx in range(seg_count):
                 idx0 = seg_idx
                 idx1 = (seg_idx + 1) % num_points
@@ -101,6 +149,7 @@ def generate_pipe_mesh(curve_obj, settings):
                         settings.transition_mode, settings.transition_strength
                     )
                     ring_specs.append((pos, tan, interp))
+
         elif spline_data['type'] == 'NURBS':
             seg_count = num_points if is_cyclic else num_points - 1
             seg_lengths = []
@@ -109,8 +158,23 @@ def generate_pipe_mesh(curve_obj, settings):
                 idx1 = (seg_idx + 1) % num_points
                 seg_lengths.append(max((points[idx1]['co'] - points[idx0]['co']).length, 1e-8))
 
-            total_steps = seg_count * max(1, resolution + 1)
-            seg_steps = distribute_steps_by_lengths(seg_lengths, total_steps)
+            if resolution == 0 and adaptive_enabled:
+                seg_steps = []
+                for seg_idx in range(seg_count):
+                    idx0 = seg_idx
+                    idx1 = (seg_idx + 1) % num_points
+                    ps0 = get_effective_point_setting(point_settings, global_point_idx + idx0, settings)
+                    ps1 = get_effective_point_setting(point_settings, global_point_idx + idx1, settings)
+                    segments = max(len(ps0.cross_section_verts), len(ps1.cross_section_verts), int(getattr(settings, 'default_segments', 8)))
+                    segments = max(3, segments)
+                    r0 = _estimate_avg_radius(ps0, points[idx0], settings.default_radius)
+                    r1 = _estimate_avg_radius(ps1, points[idx1], settings.default_radius)
+                    seg_steps.append(_adaptive_steps_for_segment(seg_lengths[seg_idx], r0, r1, segments, adaptive_max))
+            elif resolution == 0:
+                seg_steps = [1] * seg_count
+            else:
+                total_steps = seg_count * max(1, resolution + 1)
+                seg_steps = distribute_steps_by_lengths(seg_lengths, total_steps)
 
             for seg_idx in range(seg_count):
                 idx0 = seg_idx
@@ -137,17 +201,32 @@ def generate_pipe_mesh(curve_obj, settings):
                         settings.transition_mode, settings.transition_strength,
                     )
                     ring_specs.append((pos, tan, interp))
+
         elif spline_data['type'] == 'POLY':
             seg_count = num_points if is_cyclic else num_points - 1
-
-            # Arc lengths for POLY are just straight-line distances
             seg_lengths = []
             for seg_idx in range(seg_count):
                 idx0 = seg_idx
                 idx1 = (seg_idx + 1) % num_points
                 seg_lengths.append(max((points[idx1]['co'] - points[idx0]['co']).length, 1e-8))
-            total_steps = seg_count * max(1, resolution + 1)
-            seg_steps = distribute_steps_by_lengths(seg_lengths, total_steps)
+
+            if resolution == 0 and adaptive_enabled:
+                seg_steps = []
+                for seg_idx in range(seg_count):
+                    idx0 = seg_idx
+                    idx1 = (seg_idx + 1) % num_points
+                    ps0 = get_point_setting(point_settings, global_point_idx + idx0, settings)
+                    ps1 = get_point_setting(point_settings, global_point_idx + idx1, settings)
+                    segments = max(len(ps0.cross_section_verts), len(ps1.cross_section_verts), int(getattr(settings, 'default_segments', 8)))
+                    segments = max(3, segments)
+                    r0 = _estimate_avg_radius(ps0, points[idx0], settings.default_radius)
+                    r1 = _estimate_avg_radius(ps1, points[idx1], settings.default_radius)
+                    seg_steps.append(_adaptive_steps_for_segment(seg_lengths[seg_idx], r0, r1, segments, adaptive_max))
+            elif resolution == 0:
+                seg_steps = [1] * seg_count
+            else:
+                total_steps = seg_count * max(1, resolution + 1)
+                seg_steps = distribute_steps_by_lengths(seg_lengths, total_steps)
 
             for seg_idx in range(seg_count):
                 idx0 = seg_idx
@@ -172,6 +251,7 @@ def generate_pipe_mesh(curve_obj, settings):
                         settings.transition_mode, settings.transition_strength
                     )
                     ring_specs.append((pos, tan, interp))
+
         if settings.strong_smoothing:
             ring_specs = smooth_ring_offsets(
                 ring_specs,
@@ -215,5 +295,3 @@ def generate_pipe_mesh(curve_obj, settings):
         vert_offset += num_rings * segments
 
     return all_verts, all_faces
-
-

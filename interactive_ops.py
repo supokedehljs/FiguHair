@@ -6,8 +6,8 @@ from gpu_extras.batch import batch_for_shader
 from bpy.props import IntProperty, FloatProperty, BoolProperty, StringProperty
 from bpy_extras import view3d_utils
 from .hair_lifecycle import get_next_figuhair_base_name, ensure_figuhair_root, get_context_curve_object
-from .curve_data import ensure_curve_defaults as curve_ensure_curve_defaults, is_curve_edit_mode as curve_is_curve_edit_mode, get_selected_curve_point_indices as curve_get_selected_curve_point_indices
-from .point_data import sync_point_settings as point_sync_point_settings, _point_setting_to_data as point__point_setting_to_data, _apply_point_setting_data as point__apply_point_setting_data
+from .curve_data import ensure_curve_defaults, is_curve_edit_mode, get_selected_curve_point_indices
+from .point_data import sync_point_settings, _point_setting_to_data, _apply_point_setting_data
 from .ghost import update_ghost_vertices, update_all_ghost_vertices
 
 
@@ -309,9 +309,66 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
             obj.select_set(False)
         curve_obj.select_set(not preview)
         if not preview:
-            context.view_layer.objects.active = curve_obj
+            try:
+                context.view_layer.objects.active = curve_obj
+            except Exception:
+                pass
         if not preview:
-            bpy.ops.hair_pipe.generate_pipe()
+            # 模态内不可调 bpy.ops（poll 需特定上下文）→ 直调生成逻辑，与 HAIRPIPE_OT_generate_pipe 一致
+            try:
+                from .pipe_generation import generate_pipe_mesh as _gen_pipe_mesh
+                from .hair_lifecycle import generated_pipe_vertices as _gen_pipe_verts, get_pipe_mesh_name as _get_pipe_name, get_pipe_object_for_curve as _get_pipe_obj, set_generated_object_transform as _set_gen_xform
+                from .pipe_ops import configure_pipe_object as _configure_pipe
+                settings_for_pipe = curve_obj.hair_pipe_settings
+                verts, faces = _gen_pipe_mesh(curve_obj, settings_for_pipe)
+                if verts is not None:
+                    verts = _gen_pipe_verts(verts, curve_obj)
+                    mesh_name = _get_pipe_name(curve_obj)
+                    existing_obj = _get_pipe_obj(curve_obj)
+                    if existing_obj is not None:
+                        mesh = existing_obj.data
+                        try:
+                            mesh.clear_geometry()
+                        except Exception:
+                            pass
+                        mesh.from_pydata(verts, [], faces)
+                        mesh.update()
+                        pipe_obj = existing_obj
+                    else:
+                        mesh = bpy.data.meshes.new(mesh_name)
+                        mesh.from_pydata(verts, [], faces)
+                        mesh.update()
+                        pipe_obj = bpy.data.objects.new(mesh_name, mesh)
+                        try:
+                            context.collection.objects.link(pipe_obj)
+                        except Exception:
+                            try:
+                                context.scene.collection.objects.link(pipe_obj)
+                            except Exception:
+                                bpy.context.scene.collection.objects.link(pipe_obj)
+                    if getattr(settings_for_pipe, 'smooth_shading', True):
+                        try:
+                            for poly in mesh.polygons:
+                                poly.use_smooth = True
+                        except Exception:
+                            pass
+                    try:
+                        _configure_pipe(pipe_obj, curve_obj)
+                    except Exception:
+                        try:
+                            _set_gen_xform(pipe_obj, curve_obj)
+                        except Exception:
+                            pass
+                    try:
+                        context.view_layer.update()
+                    except Exception:
+                        pass
+            except Exception as exc:
+                print(f"[FiguHair] draw: 直接生成管线失败: {exc}")
+                import traceback as _tb
+                _tb.print_exc()
+                # 曲线已创建，仍视为成功，避免 modal 因 poll 失败整体取消
+                pass
         return curve_obj
 
     def cleanup_preview(self):

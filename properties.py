@@ -163,11 +163,23 @@ class HairPipeSettings(PropertyGroup):
         max=64,
     )
     pipe_resolution: IntProperty(
-        name="Pipe Resolution",
-        description="Intermediate rings between neighboring cross-sections. 0 = sections connect directly, 1 = one ring in between, etc.",
+        name="管线细分",
+        description="相邻控制点之间的中间环数。0 = 1个控制点对应1个横截面（6点=6环），不插入过渡环。增大仅在需要时手补环",
         default=0,
         min=0,
-        max=0,
+        max=12,
+    )
+    adaptive_resolution: BoolProperty(
+        name="自适应补环（可选）",
+        description="关闭时严格 1点=1环。开启时才按段长/半径自动在长段中插入过渡环以改善长宽比（会改变环数，仅在长段鼓包严重时开启）",
+        default=False,
+    )
+    adaptive_max_steps: IntProperty(
+        name="自适应单段上限",
+        description="开启自适应补环时，单段最多补多少环",
+        default=4,
+        min=1,
+        max=32,
     )
     transition_mode: EnumProperty(
         name="Transition Mode",

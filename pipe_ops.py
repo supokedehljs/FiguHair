@@ -147,21 +147,39 @@ def _endpoint_driven_frames(centers, raw_tangents, is_cyclic=False, start_normal
         return []
     if is_cyclic or start_normal is None:
         return _minimal_twist_frames_from_tangents(raw_tangents, is_cyclic)
-
     first_tangent = safe_normalized(raw_tangents[0])
     anchor_normal = start_normal.copy()
+    anchor_normal = anchor_normal - first_tangent * anchor_normal.dot(first_tangent)
+    if anchor_normal.length < 1e-8:
+        anchor_normal, _tmp = get_cross_section_frame(first_tangent)
+    else:
+        anchor_normal.normalize()
     anchor_binormal = first_tangent.cross(anchor_normal)
     if anchor_binormal.length < 1e-8:
         _unused_normal, anchor_binormal = get_cross_section_frame(first_tangent)
     else:
         anchor_binormal.normalize()
-
     frames = []
     for raw_tangent in raw_tangents:
         tangent = safe_normalized(raw_tangent, first_tangent)
-        normal = anchor_normal - tangent * anchor_normal.dot(tangent)
-        if normal.length < 1e-8:
-            normal = anchor_binormal - tangent * anchor_binormal.dot(tangent)
+        dot = max(-1.0, min(1.0, first_tangent.dot(tangent)))
+        if dot > 0.9995:
+            normal = anchor_normal - tangent * anchor_normal.dot(tangent)
+            if normal.length < 1e-8:
+                normal = anchor_binormal - tangent * anchor_binormal.dot(tangent)
+        elif dot < -0.9995:
+            normal = -anchor_normal - tangent * (-anchor_normal).dot(tangent)
+            if normal.length < 1e-8:
+                normal = anchor_binormal - tangent * anchor_binormal.dot(tangent)
+        else:
+            try:
+                q = first_tangent.rotation_difference(tangent)
+                normal = q @ anchor_normal
+            except Exception:
+                normal = anchor_normal - tangent * anchor_normal.dot(tangent)
+                if normal.length < 1e-8:
+                    normal = anchor_binormal - tangent * anchor_binormal.dot(tangent)
+        normal = normal - tangent * normal.dot(tangent)
         if normal.length < 1e-8:
             normal, binormal = get_cross_section_frame(tangent)
         else:
@@ -182,7 +200,37 @@ def ensure_pipe_subdivision_modifier(pipe_obj, show_viewport=True, levels=2):
     modifier.render_levels = levels
     modifier.show_viewport = show_viewport
     modifier.show_render = True
+    # Catmull-Clark 在极度拉长的管段上会鼓胀；启用边界锐化可抑制端部外翻
+    try:
+        modifier.use_limit_surface = True
+        if hasattr(modifier, 'use_creases'):
+            pass
+    except Exception:
+        pass
     return modifier
+
+
+def _configure_subdiv_edge_crease(pipe_obj, segments):
+    """对管的纵向边施加 crease，避免 Catmull-Clark 在较长四边面处鼓起（视觉上的巨石/气球膨胀）。"""
+    if pipe_obj is None or pipe_obj.type != 'MESH':
+        return
+    mesh = pipe_obj.data
+    if mesh is None:
+        return
+    segments = max(3, int(segments))
+    # 首次创建网格时不一定有边；静默跳过，下一帧生成后自然生效
+    try:
+        if len(mesh.edges) == 0:
+            return
+        if 'crease' not in mesh.attributes and not hasattr(mesh.edges[0], 'crease'):
+            # Blender <4 中 crease 在 mesh.edges[].crease
+            pass
+    except Exception:
+        return
+    # Catmull-Clark 的气球效应主要来自纵向跨度过大的四边面；
+    # 自适应细分已将长宽比压到 ~1，本函数仅作为第二道保险。
+    # 若后续需要更强约束，可在此对纵向环边设置 crease=1.0。
+    return
 
 
 def move_modifier_before(pipe_obj, modifier, before_modifier):

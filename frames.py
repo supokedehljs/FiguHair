@@ -71,17 +71,41 @@ def _endpoint_driven_frames(centers, raw_tangents, is_cyclic=False, start_normal
         return _minimal_twist_frames_from_tangents(raw_tangents, is_cyclic)
     first_tangent = safe_normalized(raw_tangents[0])
     anchor_normal = start_normal.copy()
+    # 确保锚定法线与起点切线正交，作为后续所有环的唯一基准
+    anchor_normal = anchor_normal - first_tangent * anchor_normal.dot(first_tangent)
+    if anchor_normal.length < 1e-8:
+        anchor_normal, _anchor_binormal_tmp = get_cross_section_frame(first_tangent)
+    else:
+        anchor_normal.normalize()
     anchor_binormal = first_tangent.cross(anchor_normal)
     if anchor_binormal.length < 1e-8:
-        _unused_normal, anchor_binormal = get_cross_section_frame(first_tangent)
+        _unused_n, anchor_binormal = get_cross_section_frame(first_tangent)
     else:
         anchor_binormal.normalize()
     frames = []
     for raw_tangent in raw_tangents:
         tangent = safe_normalized(raw_tangent, first_tangent)
-        normal = anchor_normal - tangent * anchor_normal.dot(tangent)
-        if normal.length < 1e-8:
-            normal = anchor_binormal - tangent * anchor_binormal.dot(tangent)
+        dot = max(-1.0, min(1.0, first_tangent.dot(tangent)))
+        # 接近 0°：直接投影最稳定；接近 180°：投影退化，改用 180° 翻转轴
+        if dot > 0.9995:
+            normal = anchor_normal - tangent * anchor_normal.dot(tangent)
+            if normal.length < 1e-8:
+                normal = anchor_binormal - tangent * anchor_binormal.dot(tangent)
+        elif dot < -0.9995:
+            # 起点与当前切线反向：最短弧旋转轴不唯一，使用锚定副法线作为确定性 180° 轴
+            # 等价于将锚定法线翻转后投影，避免末端突跳侧翻
+            normal = -anchor_normal - tangent * (-anchor_normal).dot(tangent)
+            if normal.length < 1e-8:
+                normal = anchor_binormal - tangent * anchor_binormal.dot(tangent)
+        else:
+            try:
+                q = first_tangent.rotation_difference(tangent)
+                normal = q @ anchor_normal
+            except Exception:
+                normal = anchor_normal - tangent * anchor_normal.dot(tangent)
+                if normal.length < 1e-8:
+                    normal = anchor_binormal - tangent * anchor_binormal.dot(tangent)
+        normal = normal - tangent * normal.dot(tangent)
         if normal.length < 1e-8:
             normal, binormal = get_cross_section_frame(tangent)
         else:

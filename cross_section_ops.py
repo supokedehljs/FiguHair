@@ -3,15 +3,15 @@ import math
 from mathutils import Vector
 from bpy.props import IntProperty, FloatProperty
 from .cross_section import (
-    add_cross_section_vertex_after_all as cross_section_add_cross_section_vertex_after_all,
-    remove_cross_section_vertex_all as cross_section_remove_cross_section_vertex_all,
-    get_active_spline_point_range as cross_section_get_active_spline_point_range,
+    add_cross_section_vertex_after_all,
+    remove_cross_section_vertex_all,
+    get_active_spline_point_range,
 )
 from .hair_lifecycle import get_context_curve_object
-from .curve_data import is_curve_edit_mode as curve_is_curve_edit_mode, get_selected_curve_point_indices as curve_get_selected_curve_point_indices
-from .ghost import update_all_ghost_vertices as ghost_update_all_ghost_vertices
+from .curve_data import is_curve_edit_mode, get_selected_curve_point_indices
+from .ghost import update_all_ghost_vertices
 from .transition import find_previous_editable_point_index, find_next_editable_point_index, update_transition_point_values
-from .point_data import sync_point_settings as point_sync_point_settings, init_cross_section_circle as point_init_cross_section_circle
+from .point_data import sync_point_settings, init_cross_section_circle
 
 
 def copy_point_cross_section(src, dst, rotation_offset=0.0):

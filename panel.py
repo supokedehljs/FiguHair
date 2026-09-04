@@ -107,6 +107,15 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         icon = 'HIDE_OFF' if settings.default_subdiv else 'HIDE_ON'
         row.prop(settings, "default_subdiv", text="", icon=icon, toggle=True)
 
+        boulder_box = plugin_controls.box()
+        boulder_box.label(text="细分（默认 1点=1环）", icon='MOD_SUBSURF')
+        boulder_box.prop(settings, "pipe_resolution", text="中间环数")
+        col = boulder_box.column(align=True)
+        col.prop(settings, "adaptive_resolution", text="仅长段自适应补环（关闭=严格 1点1环）")
+        sub = col.column(align=True)
+        sub.enabled = settings.adaptive_resolution and settings.pipe_resolution == 0
+        sub.prop(settings, "adaptive_max_steps", text="单段上限")
+
         edit_mode = curve_obj is not None and is_curve_edit_mode(curve_obj)
         header_box = layout.box()
         auto_update_row = header_box.row()

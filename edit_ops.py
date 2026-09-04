@@ -3,13 +3,13 @@ import math
 from mathutils import Vector
 from bpy.props import EnumProperty, FloatProperty
 from .hair_lifecycle import get_context_curve_object, get_curve_from_figuhair_root, get_figuhair_root, get_pipe_object_for_curve, get_tail_object_for_curve, get_pipe_source_curve, get_tail_source_curve, get_hair_root_object, ensure_figuhair_root
-from .curve_data import is_curve_edit_mode as curve_is_curve_edit_mode, get_selected_curve_point_indices as curve_get_selected_curve_point_indices, get_curve_points_data as curve_get_curve_points_data
-from .point_data import sync_point_settings as point_sync_point_settings, _point_setting_to_data as point__point_setting_to_data, _apply_point_setting_data as point__apply_point_setting_data, _curve_point_position_signatures as point__curve_point_position_signatures, _store_curve_point_signatures as point__store_curve_point_signatures
-from .edit_utils import apply_edge_flow_to_target_indices as edit_apply_edge_flow_to_target_indices, get_curve_point_by_global_index as edit_get_curve_point_by_global_index
-from .sampling import get_bezier_control_tangent as sampling_get_bezier_control_tangent
-from .ghost import update_all_ghost_vertices as ghost_update_all_ghost_vertices
-from .math_utils import safe_normalized as math_safe_normalized, lerp_angle as math_lerp_angle
-from .cross_section import normalize_cross_section_topology as cross_section_normalize_cross_section_topology
+from .curve_data import is_curve_edit_mode, get_selected_curve_point_indices, get_curve_points_data
+from .point_data import sync_point_settings, _point_setting_to_data, _apply_point_setting_data, _curve_point_position_signatures, _store_curve_point_signatures
+from .edit_utils import apply_edge_flow_to_target_indices, get_curve_point_by_global_index
+from .sampling import get_bezier_control_tangent
+from .ghost import update_all_ghost_vertices
+from .math_utils import safe_normalized, lerp_angle
+from .cross_section import normalize_cross_section_topology
 
 
 class HAIRPIPE_OT_apply_edge_flow(bpy.types.Operator):
@@ -176,7 +176,7 @@ class HAIRPIPE_OT_reverse_curve_direction(bpy.types.Operator):
             first_spline = splines_data[0]
             first_points = first_spline["points"]
             if first_spline["type"] == 'BEZIER':
-                new_start_tangent = sampling_get_bezier_control_tangent(first_points, 0, first_spline["cyclic"])
+                new_start_tangent = get_bezier_control_tangent(first_points, 0, first_spline["cyclic"])
             else:
                 new_start_tangent = safe_normalized(first_points[1]["co"] - first_points[0]["co"])
             curve_obj["hair_pipe_start_roll_anchor_tangent"] = tuple(new_start_tangent)

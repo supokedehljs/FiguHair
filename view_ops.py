@@ -1,15 +1,15 @@
 import bpy
 from .hair_lifecycle import get_context_curve_object, get_curve_from_figuhair_root, get_figuhair_root, get_pipe_object_for_curve, get_tail_object_for_curve, get_pipe_source_curve, get_tail_source_curve, get_hair_root_object, get_pipe_source_curve as _get_pipe_source_curve_for_sync
-from .curve_data import ensure_curve_defaults as curve_ensure_curve_defaults, get_selected_curve_point_indices as curve_get_selected_curve_point_indices, is_curve_edit_mode as curve_is_curve_edit_mode
-from .point_data import sync_point_settings as point_sync_point_settings
-from .pipe_generation import generate_pipe_mesh as pipe_generate_pipe_mesh
-from .hair_lifecycle import generated_pipe_vertices as lifecycle_generated_pipe_vertices
-from .hair_ops import _is_tail_mesh_only_obj as hair_ops_is_tail_mesh_only_obj
+from .curve_data import ensure_curve_defaults, get_selected_curve_point_indices, is_curve_edit_mode
+from .point_data import sync_point_settings
+from .pipe_generation import generate_pipe_mesh
+from .hair_lifecycle import generated_pipe_vertices
+from .hair_ops import _is_tail_mesh_only_obj
 from .pipe_ops import ensure_tail_modifier_stack
 from .tail_utils import update_tail_mesh_for_curve
-from .selection import sync_selected_curve_visibility as selection_sync_selected_curve_visibility
+from .selection import sync_selected_curve_visibility
 
-_is_tail_mesh_only_obj = hair_ops_is_tail_mesh_only_obj
+_is_tail_mesh_only_obj = _is_tail_mesh_only_obj
 
 
 def sync_global_redirect_selection(curve_obj=None):
