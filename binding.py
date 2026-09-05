@@ -498,10 +498,15 @@ def create_binding(context):
         target, target_index, slave, slave_index, slave_ps.rotation,
     )
     plane_data = _binding_plane_data(target, target_index)
+    plane = _stored_binding_plane(plane_data)
+    display_world_per_unit = _world_per_profile_unit(
+        target, target_index, target_ps, plane,
+    )
     data = {
         'source_curve': target.name,
         'source_point': int(target_index),
         'source_tilt': _point_tilt(target, target_index),
+        'display_world_per_unit': float(display_world_per_unit),
         'slave_point': int(slave_index),
         'scale_ratio': float(slave_ps.scale) / max(1.0e-6, float(target_ps.scale)),
         # Calibrate orientation once at bind time. Recomputing this from the
@@ -572,6 +577,32 @@ def _find_binding_record(target_obj, target_point_index, slave_obj, slave_point_
     return None
 
 
+def _world_per_profile_unit(curve_obj, point_index, point_setting, plane):
+    pipe = get_pipe_object_for_curve(curve_obj)
+    ring = _nearest_pipe_ring(
+        pipe, curve_obj, int(point_index), len(point_setting.cross_section_verts),
+    )
+    if not ring or plane is None:
+        return 1.0
+    center, u, v, _normal = plane
+    numerator = 0.0
+    denominator = 0.0
+    for index, vertex in enumerate(point_setting.cross_section_verts):
+        if index >= len(ring):
+            break
+        raw_x = float(vertex.offset_x)
+        raw_y = float(vertex.offset_y)
+        radial = ring[index] - center
+        actual_x = radial.dot(u)
+        actual_y = radial.dot(v)
+        numerator += raw_x * actual_x + raw_y * actual_y
+        denominator += raw_x * raw_x + raw_y * raw_y
+    if denominator <= 1.0e-10:
+        return 1.0
+    value = numerator / denominator
+    return abs(value) if abs(value) > 1.0e-8 else 1.0
+
+
 def get_bound_section_display_offsets(target_obj, target_point_index, slave_obj, slave_point_index):
     """Project the real slave 3D ring into the source section's 2D space."""
     source_ps = _point_setting(target_obj, int(target_point_index))
@@ -592,25 +623,20 @@ def get_bound_section_display_offsets(target_obj, target_point_index, slave_obj,
         return []
 
     _captured_center, source_u, source_v, _normal = basis
-    source_center = sum(source_ring, Vector()) / len(source_ring)
-    slave_center = sum(slave_ring, Vector()) / len(slave_ring)
-
-    # Calibrate the source editor's raw 2D units against its actual 3D ring.
-    # The widget draws source offsets directly, so this scalar converts world
-    # distances in the fixed source plane back to widget coordinates.
-    raw_pairs = min(len(source_ps.cross_section_verts), len(source_ring))
-    numerator = 0.0
-    denominator = 0.0
-    for index in range(raw_pairs):
-        raw_x = float(source_ps.cross_section_verts[index].offset_x)
-        raw_y = float(source_ps.cross_section_verts[index].offset_y)
-        actual = source_ring[index] - source_center
-        actual_x = actual.dot(source_u)
-        actual_y = actual.dot(source_v)
-        numerator += raw_x * actual_x + raw_y * actual_y
-        denominator += raw_x * raw_x + raw_y * raw_y
-    world_per_widget = numerator / denominator if denominator > 1.0e-10 else 1.0
-    world_per_widget = abs(world_per_widget) if abs(world_per_widget) > 1.0e-8 else 1.0
+    # The 2D anchor is the bound curve point, not the ring centroid. A profile
+    # edit changes the shape and may change the ring's average vertex position;
+    # using that average would make the entire child appear to drift/scale.
+    source_center = _world_point(target_obj, int(target_point_index))
+    if source_center is None:
+        source_center = _captured_center
+    # The conversion scale is captured at bind time. Recomputing it from the
+    # edited source shape makes one moved vertex resize the whole child overlay.
+    world_per_widget = float(data.get('display_world_per_unit', 1.0))
+    if abs(world_per_widget) < 1.0e-8:
+        world_per_widget = 1.0
+    # Project around the target ring center, not the child's current centroid.
+    # The target center is the binding anchor in both 3D and 2D.
+    slave_center = source_center
 
     # Project the actual slave ring, not its ungenerated profile data. This is
     # what makes 2D overlap exactly reflect 3D overlap.
