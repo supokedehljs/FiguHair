@@ -412,7 +412,7 @@ def get_selected_curve_highlight_targets(context, active_obj):
     return targets
 
 
-def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=None, selection_indices=None, is_active=True):
+def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=None, selection_indices=None, is_active=True, hollow_indices=None):
     region = context.region
     region_data = context.region_data
     obj = curve_obj or context.active_object
@@ -702,12 +702,16 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
             batch.draw(shader)
 
         point_setting = obj.hair_pipe_settings.point_settings[point_idx] if point_idx < len(obj.hair_pipe_settings.point_settings) else ps
+        hollow_set = set(hollow_indices or ())
         normal_points = []
         selected_points = []
+        hollow_points = []
         for idx, point in enumerate(projected):
             if idx >= len(point_setting.cross_section_verts) or getattr(point_setting.cross_section_verts[idx], 'is_ghost', False):
                 continue
-            if is_active_ring and idx in widget_selected_indices:
+            if idx in hollow_set:
+                hollow_points.append(point)
+            elif is_active_ring and idx in widget_selected_indices:
                 selected_points.append(point)
             else:
                 normal_points.append(point)
@@ -716,6 +720,8 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
             draw_circle_points(shader, normal_points, normal_color, 3.4 if is_active_ring else 3.0, segments=18)
         if selected_points:
             draw_circle_points(shader, selected_points, (1.0, 0.5, 0.0, 1.0), 4.2, segments=18)
+        for point in hollow_points:
+            draw_hollow_snap_marker(shader, point, (0.15, 0.9, 1.0, 1.0), 7.0, segments=24)
 
     gpu.state.point_size_set(1.0)
     gpu.state.line_width_set(1.0)
@@ -1175,25 +1181,17 @@ def draw_widget_callback():
                 getattr(wd, 'bound_edit_curve_name', '') == child_obj.name
                 and int(getattr(wd, 'bound_edit_point_index', -1)) == int(child_idx)
             )
+            from .binding import _find_binding_record
+            snap_record = _find_binding_record(
+                obj, settings.active_point_index, child_obj, child_idx,
+            ) or {}
+            snap_vertices = snap_record.get('vertex_snaps', {})
             draw_active_pipe_cross_section_ring(
                 context, child_ps, child_obj, child_idx,
                 is_active=child_active,
                 selection_indices=get_bound_selected_widget_verts(wd, child_obj, child_idx),
+                hollow_indices={int(i) for i in snap_vertices.keys()},
             )
-            if getattr(wd, 'snap_bound_points', False) and child_active:
-                shader = gpu.shader.from_builtin('UNIFORM_COLOR')
-                gpu.state.blend_set('ALPHA')
-                from .binding import _find_binding_record
-                snap_record = _find_binding_record(obj, settings.active_point_index, child_obj, child_idx) or {}
-                snap_vertices = snap_record.get('vertex_snaps', {})
-                for vertex_index in (int(i) for i in snap_vertices.keys()):
-                    world = get_bound_vertex_world(child_obj, child_idx, vertex_index)
-                    screen = view3d_utils.location_3d_to_region_2d(
-                        context.region, context.region_data, world,
-                    ) if world is not None else None
-                    if screen is not None:
-                        draw_hollow_snap_marker(shader, (screen.x, screen.y))
-                gpu.state.blend_set('NONE')
     cy = wd.widget_center_y
     size = wd.widget_size
     if size < 10:
