@@ -10,6 +10,7 @@ from .hair_lifecycle import (
 )
 from .pipe_generation import generate_pipe_mesh
 from .point_data import sync_point_settings, sync_active_point_from_selection
+from .widget_cache import invalidate_pipe_mesh_cache
 def _clear_all_existing_crease_once():
     try:
         from .pipe_ops import clear_boulder_crease
@@ -38,6 +39,8 @@ _visibility_guard = False
 _root_visibility_states = {}
 _last_selection_signature = None
 _last_visibility_sync_time = 0.0
+_pending_rebuilds = set()
+_last_rebuild_queue_time = 0.0
 
 
 def update_mesh_data_in_place(mesh, verts, faces, smooth_shading):
@@ -121,6 +124,8 @@ def rebuild_existing_pipe(curve_obj, fast=False):
         return
 
     settings = curve_obj.hair_pipe_settings
+    if not bool(getattr(settings, 'auto_update', True)) and not fast:
+        return
     if len(settings.point_settings) == 0:
         return
 
@@ -139,6 +144,8 @@ def rebuild_existing_pipe(curve_obj, fast=False):
         verts = generated_pipe_vertices(verts, curve_obj)
 
         update_mesh_data_in_place(pipe_obj.data, verts, faces, settings.smooth_shading)
+        curve_obj['hair_pipe_mesh_revision'] = int(curve_obj.get('hair_pipe_mesh_revision', 0)) + 1
+        invalidate_pipe_mesh_cache(curve_obj)
         # 重建后若细分被意外移除则补回
         try:
             from .pipe_ops import ensure_pipe_subdivision_modifier
@@ -194,9 +201,9 @@ def selection_redirect_callback(scene):
 
 @persistent
 def update_pipe_callback(scene):
-    """Depsgraph update handler for auto-updating pipes"""
+    """Queue changed curves; mesh generation is merged by the timer below."""
     depsgraph = bpy.context.evaluated_depsgraph_get()
-    rebuilt = set()
+    queued = set()
 
     for update in depsgraph.updates:
         update_id = update.id
@@ -211,14 +218,28 @@ def update_pipe_callback(scene):
                     curve_obj = obj
                     break
 
-        if curve_obj is None or curve_obj.name in rebuilt:
+        if curve_obj is None or curve_obj.name in queued:
             continue
+        settings = getattr(curve_obj, 'hair_pipe_settings', None)
+        if settings is None or not bool(getattr(settings, 'auto_update', True)):
+            continue
+        _pending_rebuilds.add(curve_obj.name)
+        queued.add(curve_obj.name)
 
+
+def rebuild_queue_timer():
+    """Perform at most one expensive rebuild per tick after rapid depsgraph updates."""
+    global _last_rebuild_queue_time
+    if not _pending_rebuilds:
+        return 0.08
+    name = _pending_rebuilds.pop()
+    curve_obj = bpy.data.objects.get(name)
+    if curve_obj is not None and curve_obj.type == 'CURVE':
         if is_curve_edit_mode(curve_obj):
             sync_active_point_from_selection(curve_obj)
-
         rebuild_existing_pipe(curve_obj)
-        rebuilt.add(curve_obj.name)
+        _last_rebuild_queue_time = time.perf_counter()
+    return 0.08
 
 
 _handler_registered = False
@@ -264,14 +285,14 @@ def selection_sync_timer():
             finally:
                 _is_redirecting_selection = False
         elif obj is not None and obj.type == 'CURVE' and is_curve_edit_mode(obj):
+            # Selection changes do not alter generated geometry. Rebuilding here
+            # duplicated the depsgraph queue and caused periodic viewport stalls.
             sync_active_point_from_selection(obj)
-            if time.perf_counter() - _last_rebuild_time > 0.35:
-                rebuild_existing_pipe(obj)
-                screen = getattr(context, 'screen', None)
-                if screen is not None:
-                    for area in screen.areas:
-                        if area.type == 'VIEW_3D':
-                            area.tag_redraw()
+            screen = getattr(context, 'screen', None)
+            if screen is not None:
+                for area in screen.areas:
+                    if area.type == 'VIEW_3D':
+                        area.tag_redraw()
 
         now = time.perf_counter()
         if selection_changed or now - _last_visibility_sync_time > 0.5:
@@ -301,6 +322,8 @@ def register_handler():
 
     if not bpy.app.timers.is_registered(selection_sync_timer):
         bpy.app.timers.register(selection_sync_timer, persistent=True)
+    if not bpy.app.timers.is_registered(rebuild_queue_timer):
+        bpy.app.timers.register(rebuild_queue_timer, persistent=True, first_interval=0.08)
     try:
         if not bpy.app.timers.is_registered(_clear_all_existing_crease_once):
             bpy.app.timers.register(_clear_all_existing_crease_once, first_interval=0.5)
@@ -325,4 +348,10 @@ def unregister_handler():
             bpy.app.timers.unregister(selection_sync_timer)
         except ValueError:
             pass
+    if bpy.app.timers.is_registered(rebuild_queue_timer):
+        try:
+            bpy.app.timers.unregister(rebuild_queue_timer)
+        except ValueError:
+            pass
+    _pending_rebuilds.clear()
     _timer_registered = False

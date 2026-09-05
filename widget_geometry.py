@@ -11,6 +11,7 @@ from .hair_lifecycle import get_pipe_object_for_curve, get_pipe_source_curve
 from .ghost import update_all_ghost_vertices, update_ghost_vertices
 from .math_utils import catmull_rom_2d, get_cross_section_frame, safe_normalized
 from .pipe_generation import generate_pipe_mesh
+from .widget_cache import get_cached_pipe_mesh
 from .point_data import sync_point_settings
 
 def fit_widget_scale_to_cross_section(wd, verts, half, alignment_angle, flip_h):
@@ -346,7 +347,7 @@ def get_active_view_cross_section_projection(context, ps):
         return []
 
     try:
-        mesh_verts, _faces = generate_pipe_mesh(obj, obj.hair_pipe_settings)
+        mesh_verts, _faces = get_cached_pipe_mesh(obj)
     except Exception:
         return []
     if not mesh_verts or len(mesh_verts) < segments:

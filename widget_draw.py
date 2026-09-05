@@ -788,7 +788,7 @@ def find_nearest_pipe_control_vertex(context, mx, my, max_dist=16.0):
         return -1, -1
 
     try:
-        mesh_verts, _faces = generate_pipe_mesh(obj, settings)
+        mesh_verts, _faces = get_cached_pipe_mesh(obj)
     except Exception:
         return -1, -1
     if not mesh_verts:

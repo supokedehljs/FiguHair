@@ -23,6 +23,19 @@ from .selection import ensure_selected_curve_visible as selection_ensure_selecte
 # 兼容旧体内直接写 safe_normalized / get_cross_section_frame 的历史代码
 safe_normalized = math_safe_normalized
 get_cross_section_frame = math_get_cross_section_frame
+# Keep the historical local name used by older operator code. The lifecycle
+# function is imported with a prefixed name to avoid import collisions.
+ensure_figuhair_root = lifecycle_ensure_figuhair_root
+get_pipe_mesh_name = lifecycle_get_pipe_mesh_name
+get_pipe_object_for_curve = lifecycle_get_pipe_object_for_curve
+get_context_curve_object = lifecycle_get_context_curve_object
+set_generated_object_transform = lifecycle_set_generated_object_transform
+generated_pipe_vertices = lifecycle_generated_pipe_vertices
+ensure_curve_defaults = curve_ensure_curve_defaults
+sync_point_settings = point_sync_point_settings
+normalize_cross_section_topology = cross_section_normalize_cross_section_topology
+update_all_ghost_vertices = ghost_update_all_ghost_vertices
+generate_pipe_mesh = pipe_generate_pipe_mesh
 
 # tail modifier stack is defined in this module (previously erroneously imported from tail_utils)
 
@@ -842,6 +855,39 @@ def make_hair_curve_from_tube_mesh(context, mesh_obj):
         bpy.data.meshes.remove(mesh)
 
 
+def generate_pipe_for_curve(context, curve_obj):
+    """Generate/update a pipe for an explicit curve without relying on UI context."""
+    if curve_obj is None or curve_obj.type != 'CURVE':
+        return None, "无效的头发曲线", 0
+    settings = curve_obj.hair_pipe_settings
+    ensure_curve_defaults(curve_obj)
+    sync_point_settings(curve_obj)
+    verts, faces = generate_pipe_mesh(curve_obj, settings)
+    if verts is None:
+        return None, "无法从曲线生成管线", 0
+    verts = generated_pipe_vertices(verts, curve_obj)
+    mesh_name = get_pipe_mesh_name(curve_obj)
+    existing_obj = get_pipe_object_for_curve(curve_obj)
+    if existing_obj:
+        mesh = existing_obj.data
+        mesh.clear_geometry()
+        mesh.from_pydata(verts, [], faces)
+        mesh.update()
+        pipe_obj = existing_obj
+    else:
+        mesh = bpy.data.meshes.new(mesh_name)
+        mesh.from_pydata(verts, [], faces)
+        mesh.update()
+        pipe_obj = bpy.data.objects.new(mesh_name, mesh)
+        target_collection = curve_obj.users_collection[0] if curve_obj.users_collection else context.scene.collection
+        target_collection.objects.link(pipe_obj)
+    if settings.smooth_shading:
+        for poly in mesh.polygons:
+            poly.use_smooth = True
+    configure_pipe_object(pipe_obj, curve_obj)
+    return pipe_obj, None, len(verts)
+
+
 class HAIRPIPE_OT_mesh_to_hair_curve(bpy.types.Operator):
     """Convert selected quad tube meshes back into FiguHair curves"""
     bl_idname = "hair_pipe.mesh_to_hair_curve"
@@ -870,9 +916,9 @@ class HAIRPIPE_OT_mesh_to_hair_curve(bpy.types.Operator):
                 obj.select_set(False)
             curve_obj.select_set(True)
             context.view_layer.objects.active = curve_obj
-            result = bpy.ops.hair_pipe.generate_pipe()
-            if 'FINISHED' not in result:
-                errors.append(f"{mesh_obj.name}: 生成 FiguHair 管线失败")
+            pipe_obj, generation_error, _vert_count = generate_pipe_for_curve(context, curve_obj)
+            if pipe_obj is None:
+                errors.append(f"{mesh_obj.name}: {generation_error or '生成 FiguHair 管线失败'}")
                 curve_data = curve_obj.data
                 bpy.data.objects.remove(curve_obj, do_unlink=True)
                 if curve_data.users == 0:
@@ -918,33 +964,11 @@ class HAIRPIPE_OT_generate_pipe(bpy.types.Operator):
         if curve_obj is None:
             self.report({'ERROR'}, "Select a curve or its FiguHair preview mesh")
             return {'CANCELLED'}
-        settings = curve_obj.hair_pipe_settings
-        ensure_curve_defaults(curve_obj)
-        sync_point_settings(curve_obj)
-        verts, faces = generate_pipe_mesh(curve_obj, settings)
-        if verts is None:
-            self.report({'ERROR'}, "Could not generate pipe from curve")
+        pipe_obj, error, vert_count = generate_pipe_for_curve(context, curve_obj)
+        if pipe_obj is None:
+            self.report({'ERROR'}, error or "Could not generate pipe from curve")
             return {'CANCELLED'}
-        verts = generated_pipe_vertices(verts, curve_obj)
-        mesh_name = get_pipe_mesh_name(curve_obj)
-        existing_obj = get_pipe_object_for_curve(curve_obj)
-        if existing_obj:
-            mesh = existing_obj.data
-            mesh.clear_geometry()
-            mesh.from_pydata(verts, [], faces)
-            mesh.update()
-            pipe_obj = existing_obj
-        else:
-            mesh = bpy.data.meshes.new(mesh_name)
-            mesh.from_pydata(verts, [], faces)
-            mesh.update()
-            pipe_obj = bpy.data.objects.new(mesh_name, mesh)
-            context.collection.objects.link(pipe_obj)
-        if settings.smooth_shading:
-            for poly in mesh.polygons:
-                poly.use_smooth = True
-        configure_pipe_object(pipe_obj, curve_obj)
-        self.report({'INFO'}, f"Generated pipe with {len(verts)} vertices")
+        self.report({'INFO'}, f"Generated pipe with {vert_count} vertices")
         return {'FINISHED'}
 
 

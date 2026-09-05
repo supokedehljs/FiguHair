@@ -5,30 +5,25 @@ _WIDGET_MESH_THROTTLE = 0.035
 _last_widget_mesh_time = 0.0
 _pipe_mesh_cache = {}
 
+
+def invalidate_pipe_mesh_cache(obj=None):
+    """Invalidate one object's preview cache, or all caches when obj is omitted."""
+    if obj is None:
+        _pipe_mesh_cache.clear()
+        return
+    _pipe_mesh_cache.pop(obj.as_pointer(), None)
+
 def get_cached_pipe_mesh(obj):
     """Reuse generated geometry while the curve and cross-section data are unchanged."""
     if obj is None:
         return None, None
     settings = obj.hair_pipe_settings
-    signature = [len(settings.point_settings), tuple(value for row in obj.matrix_world for value in row)]
-    for spline in obj.data.splines:
-        points = spline.bezier_points if spline.type == 'BEZIER' else spline.points
-        signature.extend(
-            (tuple(point.co), getattr(point, 'radius', 1.0), getattr(point, 'tilt', 0.0))
-            for point in points
-        )
-    for point_setting in settings.point_settings:
-        signature.extend((
-            len(point_setting.cross_section_verts),
-            point_setting.scale,
-            point_setting.rotation,
-            getattr(point_setting, 'bridge_offset', 0),
-        ))
-        signature.extend(
-            (vertex.offset_x, vertex.offset_y, bool(getattr(vertex, 'is_ghost', False)))
-            for vertex in point_setting.cross_section_verts
-        )
-    signature = hash(repr(signature))
+    # The handler increments this only after a real curve/settings update. This avoids
+    # rebuilding the full signature on every POST_PIXEL draw call.
+    revision = int(obj.get('hair_pipe_mesh_revision', 0))
+    # Curve edits and property updates are observed by the depsgraph handler. The
+    # revision replaces a full scan of every hair point on every viewport redraw.
+    signature = hash((revision, tuple(value for row in obj.matrix_world for value in row)))
     cache_key = obj.as_pointer()
     cached = _pipe_mesh_cache.get(cache_key)
     if cached is not None and cached[0] == signature:
