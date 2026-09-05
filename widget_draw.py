@@ -21,7 +21,7 @@ from .widget_cache import get_cached_pipe_mesh
 from .pipe_generation import generate_pipe_mesh
 from .transition import is_transition_point
 from .roll_diagnostics import get_uncontrolled_roll_diagnostics
-from .binding import get_bound_sections_for_target, get_bound_section_display_offsets
+from .binding import get_bound_sections_for_target, get_bound_section_display_offsets, get_bound_vertex_world
 
 _draw_handle = None
 
@@ -34,6 +34,20 @@ def draw_cross_section_delete_menu(self, context):
         text="删除横截面顶点",
         icon='REMOVE',
     )
+
+
+def draw_hollow_snap_marker(shader, center, color=(0.2, 0.95, 1.0, 1.0), radius=7.0, segments=24):
+    if center is None:
+        return
+    points = []
+    for i in range(segments):
+        a = 2.0 * math.pi * i / segments
+        b = 2.0 * math.pi * ((i + 1) % segments) / segments
+        points.extend(((center[0] + math.cos(a) * radius, center[1] + math.sin(a) * radius),
+                       (center[0] + math.cos(b) * radius, center[1] + math.sin(b) * radius)))
+    shader.bind()
+    shader.uniform_float('color', color)
+    batch_for_shader(shader, 'LINES', {'pos': points}).draw(shader)
 
 
 def draw_circle_points(shader, points, color, radius, segments=20):
@@ -1157,11 +1171,29 @@ def draw_widget_callback():
     ):
         key = (child_obj.as_pointer(), int(child_idx))
         if key not in drawn_sections:
+            child_active = (
+                getattr(wd, 'bound_edit_curve_name', '') == child_obj.name
+                and int(getattr(wd, 'bound_edit_point_index', -1)) == int(child_idx)
+            )
             draw_active_pipe_cross_section_ring(
                 context, child_ps, child_obj, child_idx,
-                is_active=(getattr(wd, 'bound_edit_curve_name', '') == child_obj.name and int(getattr(wd, 'bound_edit_point_index', -1)) == int(child_idx)),
+                is_active=child_active,
                 selection_indices=get_bound_selected_widget_verts(wd, child_obj, child_idx),
             )
+            if getattr(wd, 'snap_bound_points', False) and child_active:
+                shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+                gpu.state.blend_set('ALPHA')
+                from .binding import _find_binding_record
+                snap_record = _find_binding_record(obj, settings.active_point_index, child_obj, child_idx) or {}
+                snap_vertices = snap_record.get('vertex_snaps', {})
+                for vertex_index in (int(i) for i in snap_vertices.keys()):
+                    world = get_bound_vertex_world(child_obj, child_idx, vertex_index)
+                    screen = view3d_utils.location_3d_to_region_2d(
+                        context.region, context.region_data, world,
+                    ) if world is not None else None
+                    if screen is not None:
+                        draw_hollow_snap_marker(shader, (screen.x, screen.y))
+                gpu.state.blend_set('NONE')
     cy = wd.widget_center_y
     size = wd.widget_size
     if size < 10:

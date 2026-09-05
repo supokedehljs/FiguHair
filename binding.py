@@ -51,6 +51,77 @@ def _get_bindings(slave_obj):
     return [data] if isinstance(data, dict) else []
 
 
+def get_bound_vertex_world(slave_obj, slave_point_index, slave_vertex_index):
+    ps = _point_setting(slave_obj, int(slave_point_index))
+    data = _get_binding(slave_obj)
+    if ps is None or data is None:
+        return None
+    source = bpy.data.objects.get(data.get('source_curve', ''))
+    if source is None:
+        return None
+    source_center = _world_point(source, int(data.get('source_point', -1)))
+    basis = _stored_binding_plane(data)
+    if source_center is None or basis is None or not (0 <= int(slave_vertex_index) < len(ps.cross_section_verts)):
+        return None
+    _, u, v, _ = basis
+    scale = max(1.0e-8, float(data.get('display_world_per_unit', 1.0)))
+    vertex = ps.cross_section_verts[int(slave_vertex_index)]
+    return source_center + u * float(vertex.offset_x) * scale + v * float(vertex.offset_y) * scale
+
+
+def set_bound_vertex_world(slave_obj, slave_point_index, slave_vertex_index, world_position):
+    ps = _point_setting(slave_obj, int(slave_point_index))
+    data = _get_binding(slave_obj)
+    if ps is None or data is None:
+        return False
+    source = bpy.data.objects.get(data.get('source_curve', ''))
+    center = _world_point(source, int(data.get('source_point', -1))) if source is not None else None
+    basis = _stored_binding_plane(data)
+    if center is None or basis is None or not (0 <= int(slave_vertex_index) < len(ps.cross_section_verts)):
+        return False
+    _, u, v, _ = basis
+    scale = max(1.0e-8, float(data.get('display_world_per_unit', 1.0)))
+    radial = Vector(world_position) - center
+    vertex = ps.cross_section_verts[int(slave_vertex_index)]
+    vertex.offset_x = radial.dot(u) / scale
+    vertex.offset_y = radial.dot(v) / scale
+    return True
+
+
+def find_nearest_source_vertex_world(source_obj, source_point_index, world_position):
+    source_ps = _point_setting(source_obj, int(source_point_index))
+    if source_ps is None:
+        return -1, None
+    ring = _nearest_pipe_ring(
+        get_pipe_object_for_curve(source_obj), source_obj, int(source_point_index),
+        len(source_ps.cross_section_verts),
+    )
+    if not ring:
+        return -1, None
+    index = min(range(len(ring)), key=lambda i: (ring[i] - world_position).length_squared)
+    return index, ring[index]
+
+
+def set_binding_vertex_snap(slave_obj, slave_point_index, slave_vertex_index, source_vertex_index, enabled=True):
+    """Persist a vertex-to-vertex snap relationship on a binding record."""
+    bindings = _get_bindings(slave_obj)
+    changed = False
+    for record in bindings:
+        if int(record.get('slave_point', -1)) == int(slave_point_index):
+            snaps = record.get('vertex_snaps', {})
+            if not isinstance(snaps, dict):
+                snaps = {}
+            if enabled:
+                snaps[str(int(slave_vertex_index))] = int(source_vertex_index)
+            else:
+                snaps.pop(str(int(slave_vertex_index)), None)
+            record['vertex_snaps'] = snaps
+            changed = True
+    if changed:
+        _set_bindings(slave_obj, bindings)
+    return changed
+
+
 def _set_bindings(slave_obj, bindings):
     if bindings:
         slave_obj[_BINDING_KEY] = json.dumps(
@@ -276,7 +347,7 @@ def _apply_binding_record(slave_obj, data):
         # per-binding rotation offset: it made the 2D overlay disagree with
         # the generated 3D ring whenever the two curves had different values.
         new_rotation = float(data.get('slave_rotation', slave_ps.rotation))
-        settings_changed = (
+        settings_changed = settings_changed or (
             abs(float(slave_ps.scale) - new_scale) > 1.0e-9 or
             abs(float(slave_ps.rotation) - new_rotation) > 1.0e-7
         )
@@ -479,6 +550,18 @@ def align_binding_ring_planes(slave_obj):
             x = raw_x * cos_r - raw_y * sin_r
             y = raw_x * sin_r + raw_y * cos_r
             desired = source_center + source_u * x + source_v * y
+            snap_map = data.get('vertex_snaps', {})
+            target_vertex = snap_map.get(str(offset)) if isinstance(snap_map, dict) else None
+            if target_vertex is not None:
+                try:
+                    target_vertex = int(target_vertex)
+                    if source_ring and 0 <= target_vertex < len(source_ring):
+                        # Write the exact target mesh vertex world position.
+                        # This includes depth and remains exact when the source
+                        # profile, frame, or curve point moves.
+                        desired = source_ring[target_vertex]
+                except (TypeError, ValueError):
+                    pass
             vertex.co = inv_matrix @ desired
         changed = True
     if binding_data_changed:

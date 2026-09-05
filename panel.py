@@ -139,6 +139,9 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         display_options.prop(widget_options, "subdiv_preview_enabled", text="细分显示")
         display_options.prop(widget_options, "solo_display_enabled", text="单独显示")
         display_options.prop(widget_options, "preview_in_front", text="显示在最前")
+        display_options.prop(widget_options, "snap_bound_points", text="绑定点3D吸附", icon='SNAP_ON')
+        if widget_options.snap_bound_points:
+            display_options.prop(widget_options, "snap_distance", text="吸附距离")
 
         controls = box.column()
         controls.enabled = edit_controls_enabled

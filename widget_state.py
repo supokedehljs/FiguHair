@@ -114,6 +114,8 @@ class HairPipeWidgetSettings(PropertyGroup):
     multi_transform_initial: bpy.props.StringProperty(default="{}")
     active_section_curve_name: bpy.props.StringProperty(default="")
     active_section_point_index: IntProperty(default=-1)
+    snap_bound_points: BoolProperty(default=False, name="绑定点3D吸附")
+    snap_distance: FloatProperty(default=0.025, min=0.001, max=0.5, name="吸附距离")
     # Non-empty while the read-only overlay of a bound slave is being edited.
     bound_edit_curve_name: bpy.props.StringProperty(default="")
     bound_edit_point_index: IntProperty(default=-1)

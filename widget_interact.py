@@ -18,7 +18,8 @@ from .point_data import sync_point_settings, sync_active_point_from_selection
 from .cross_section import get_active_spline_point_range
 from .binding import (
     is_bound_slave_point, get_bound_edit_target, get_bound_sections_for_target,
-    get_bound_section_display_offsets,
+    get_bound_section_display_offsets, set_binding_vertex_snap,
+    find_nearest_source_vertex_world, get_bound_vertex_world, set_bound_vertex_world,
 )
 
 class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
@@ -462,6 +463,23 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type == 'MOUSEMOVE':
+            if getattr(wd, 'snap_bound_points', False) and getattr(wd, 'bound_edit_curve_name', ''):
+                active_bound = bpy.data.objects.get(wd.bound_edit_curve_name)
+                bound_idx = int(getattr(wd, 'bound_edit_point_index', -1))
+                if active_bound is not None and sel:
+                    source_ps = settings.point_settings[settings.active_point_index]
+                    slave_ps = active_bound.hair_pipe_settings.point_settings[bound_idx]
+                    # Use the actual source mesh ring through the binding helper.
+                    for slave_vertex in sel:
+                        world = get_bound_vertex_world(active_bound, bound_idx, slave_vertex)
+                        if world is None:
+                            continue
+                        source_vertex, target_world = find_nearest_source_vertex_world(
+                            obj, settings.active_point_index, world,
+                        )
+                        if source_vertex >= 0 and target_world is not None and (target_world - world).length <= wd.snap_distance:
+                            set_binding_vertex_snap(active_bound, bound_idx, slave_vertex, source_vertex, enabled=True)
+                            set_bound_vertex_world(active_bound, bound_idx, slave_vertex, target_world)
             dx, dy = widget_to_effective(mx, my, cx, cy, sf, alignment_angle, flip_h)
             sx, sy = widget_to_effective(wd.move_start_x, wd.move_start_y, cx, cy, sf, alignment_angle, flip_h)
             delta_x = dx - sx
@@ -949,6 +967,12 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 wd.bound_edit_curve_name = bound_obj.name
                 wd.bound_edit_point_index = bound_point
                 set_bound_selected_widget_verts(wd, {closest_idx}, bound_obj, bound_point)
+                if getattr(wd, 'snap_bound_points', False):
+                    source_ps = settings.point_settings[settings.active_point_index]
+                    source_vertex = min(closest_idx, len(source_ps.cross_section_verts) - 1)
+                    set_binding_vertex_snap(
+                        bound_obj, bound_point, closest_idx, source_vertex, enabled=True,
+                    )
                 ps = bound_ps
                 verts = ps.cross_section_verts
             else:
