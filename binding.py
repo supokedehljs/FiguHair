@@ -64,9 +64,15 @@ def get_bound_vertex_world(slave_obj, slave_point_index, slave_vertex_index):
     if source_center is None or basis is None or not (0 <= int(slave_vertex_index) < len(ps.cross_section_verts)):
         return None
     _, u, v, _ = basis
-    scale = max(1.0e-8, float(data.get('display_world_per_unit', 1.0)))
-    vertex = ps.cross_section_verts[int(slave_vertex_index)]
-    return source_center + u * float(vertex.offset_x) * scale + v * float(vertex.offset_y) * scale
+    scale = float(ps.scale)
+    rotation = math.radians(float(data.get('profile_rotation', 0.0)))
+    raw_x = float(ps.cross_section_verts[int(slave_vertex_index)].offset_x) * scale
+    raw_y = float(ps.cross_section_verts[int(slave_vertex_index)].offset_y) * scale
+    cos_r = math.cos(rotation)
+    sin_r = math.sin(rotation)
+    x = raw_x * cos_r - raw_y * sin_r
+    y = raw_x * sin_r + raw_y * cos_r
+    return source_center + u * x + v * y
 
 
 def set_bound_vertex_world(slave_obj, slave_point_index, slave_vertex_index, world_position):
@@ -80,11 +86,16 @@ def set_bound_vertex_world(slave_obj, slave_point_index, slave_vertex_index, wor
     if center is None or basis is None or not (0 <= int(slave_vertex_index) < len(ps.cross_section_verts)):
         return False
     _, u, v, _ = basis
-    scale = max(1.0e-8, float(data.get('display_world_per_unit', 1.0)))
+    scale = max(1.0e-8, float(ps.scale))
+    rotation = math.radians(float(data.get('profile_rotation', 0.0)))
     radial = Vector(world_position) - center
+    x = radial.dot(u)
+    y = radial.dot(v)
+    cos_r = math.cos(rotation)
+    sin_r = math.sin(rotation)
     vertex = ps.cross_section_verts[int(slave_vertex_index)]
-    vertex.offset_x = radial.dot(u) / scale
-    vertex.offset_y = radial.dot(v) / scale
+    vertex.offset_x = (x * cos_r + y * sin_r) / scale
+    vertex.offset_y = (-x * sin_r + y * cos_r) / scale
     return True
 
 
