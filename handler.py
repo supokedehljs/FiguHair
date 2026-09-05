@@ -40,6 +40,7 @@ _root_visibility_states = {}
 _last_selection_signature = None
 _last_visibility_sync_time = 0.0
 _pending_rebuilds = set()
+_REBUILD_TIMER_INTERVAL = 0.025
 _last_rebuild_queue_time = 0.0
 
 
@@ -228,18 +229,33 @@ def update_pipe_callback(scene):
 
 
 def rebuild_queue_timer():
-    """Perform at most one expensive rebuild per tick after rapid depsgraph updates."""
+    """Rebuild the active edit curve quickly, then drain other changed curves."""
     global _last_rebuild_queue_time
     if not _pending_rebuilds:
-        return 0.08
-    name = _pending_rebuilds.pop()
+        return _REBUILD_TIMER_INTERVAL
+
+    # During a drag, the active curve is the only object that must be updated
+    # immediately. Processing it first removes the visible 80 ms "step" effect.
+    active = getattr(bpy.context, 'active_object', None)
+    active_name = getattr(active, 'name', None)
+    name = active_name if active_name in _pending_rebuilds else _pending_rebuilds.pop()
+    _pending_rebuilds.discard(name)
     curve_obj = bpy.data.objects.get(name)
     if curve_obj is not None and curve_obj.type == 'CURVE':
-        if is_curve_edit_mode(curve_obj):
+        editing = is_curve_edit_mode(curve_obj)
+        if editing:
+            # Curve coordinates are already supplied by the depsgraph. Avoid
+            # the expensive edit-mode sync on every mouse-move update.
             sync_active_point_from_selection(curve_obj)
-        rebuild_existing_pipe(curve_obj)
+        rebuild_existing_pipe(curve_obj, fast=editing)
         _last_rebuild_queue_time = time.perf_counter()
-    return 0.08
+        if editing:
+            screen = getattr(bpy.context, 'screen', None)
+            if screen is not None:
+                for area in screen.areas:
+                    if area.type == 'VIEW_3D':
+                        area.tag_redraw()
+    return _REBUILD_TIMER_INTERVAL
 
 
 _handler_registered = False
@@ -323,7 +339,7 @@ def register_handler():
     if not bpy.app.timers.is_registered(selection_sync_timer):
         bpy.app.timers.register(selection_sync_timer, persistent=True)
     if not bpy.app.timers.is_registered(rebuild_queue_timer):
-        bpy.app.timers.register(rebuild_queue_timer, persistent=True, first_interval=0.08)
+        bpy.app.timers.register(rebuild_queue_timer, persistent=True, first_interval=_REBUILD_TIMER_INTERVAL)
     try:
         if not bpy.app.timers.is_registered(_clear_all_existing_crease_once):
             bpy.app.timers.register(_clear_all_existing_crease_once, first_interval=0.5)
