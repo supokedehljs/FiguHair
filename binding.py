@@ -324,6 +324,48 @@ def _nearest_pipe_ring(pipe_obj, curve_obj, point_index, count):
     return best
 
 
+def _ring_plane_normal(ring, fallback=None):
+    """Stable normal from every edge; independent of one edited vertex."""
+    if not ring or len(ring) < 3:
+        return fallback.copy() if fallback is not None else None
+    center = sum(ring, Vector()) / len(ring)
+    normal = Vector()
+    for index, point in enumerate(ring):
+        a = point - center
+        b = ring[(index + 1) % len(ring)] - center
+        normal += a.cross(b)
+    if normal.length < 1.0e-10:
+        return fallback.copy() if fallback is not None else None
+    normal.normalize()
+    if fallback is not None and normal.dot(fallback) < 0.0:
+        normal.negate()
+    return normal
+
+
+def _basis_on_current_source_plane(source_ring, stored_basis):
+    """Use the live source plane normal with stable stored in-plane roll."""
+    if not source_ring:
+        return stored_basis
+    old_center, old_u, old_v, old_normal = stored_basis if stored_basis else (None, None, None, None)
+    normal = _ring_plane_normal(source_ring, old_normal)
+    if normal is None:
+        return stored_basis
+    center = sum(source_ring, Vector()) / len(source_ring)
+    u = old_u - normal * old_u.dot(normal) if old_u is not None else None
+    if u is None or u.length < 1.0e-8:
+        u = source_ring[0] - center
+        u = u - normal * u.dot(normal)
+    if u.length < 1.0e-8:
+        u, _ = get_cross_section_frame(normal)
+    else:
+        u.normalize()
+    v = normal.cross(u).normalized()
+    if old_v is not None and v.dot(old_v) < 0.0:
+        u.negate()
+        v.negate()
+    return center, u, v, normal
+
+
 def _orthogonal_ring_basis(ring):
     if not ring or len(ring) < 3:
         return None
@@ -380,33 +422,21 @@ def align_binding_ring_planes(slave_obj):
         # the stored 3D basis. This cleanly separates shape edits from roll.
         current_tilt = _point_tilt(source, int(data.get('source_point', -1)))
         stored_tilt = data.get('source_tilt')
-        source_basis = _stored_binding_plane(data)
-        tilt_changed = (
-            stored_tilt is not None and
-            abs(current_tilt - float(stored_tilt)) > 1.0e-7
-        )
-        if source_basis is None or tilt_changed:
-            live_basis = _orthogonal_ring_basis(source_ring)
-            if live_basis is not None:
-                source_basis = live_basis
-                data.update({
-                    'plane_center': list(live_basis[0]),
-                    'plane_u': list(live_basis[1]),
-                    'plane_v': list(live_basis[2]),
-                    'plane_normal': list(live_basis[3]),
-                    'source_tilt': current_tilt,
-                })
-                binding_data_changed = True
-        elif stored_tilt is None:
-            # Upgrade old bindings without changing their existing orientation.
-            data['source_tilt'] = current_tilt
-            binding_data_changed = True
+        stored_basis = _stored_binding_plane(data)
+        source_basis = _basis_on_current_source_plane(source_ring, stored_basis)
         if source_basis is None:
             continue
-        _captured_center, source_u, source_v, _source_normal = source_basis
-        source_center = _world_point(source, int(data.get('source_point', -1)))
-        if source_center is None:
-            source_center = _captured_center
+        source_center, source_u, source_v, source_normal = source_basis
+        # Persist the live plane normal and transported axes. Shape edits can
+        # change the plane, but cannot choose the in-plane roll from one vertex.
+        data.update({
+            'plane_center': list(source_center),
+            'plane_u': list(source_u),
+            'plane_v': list(source_v),
+            'plane_normal': list(source_normal),
+            'source_tilt': current_tilt,
+        })
+        binding_data_changed = True
         # The final ring is generated directly from the slave profile's 2D
         # coordinates in the frozen source axes. Never derive axes from the
         # current slave ring: moving one profile vertex would rotate that basis.
@@ -463,6 +493,17 @@ def align_bound_dependents(source_obj):
             continue
         if any(item.get('source_curve') == source_obj.name for item in _get_bindings(obj)):
             changed = align_binding_ring_planes(obj) or changed
+    return changed
+
+
+def repair_all_binding_planes():
+    """Repair loaded scenes whose binding rings were not finalized on load."""
+    changed = []
+    for obj in list(bpy.data.objects):
+        if obj.type != 'CURVE' or not _get_bindings(obj):
+            continue
+        if align_binding_ring_planes(obj):
+            changed.append(obj)
     return changed
 
 

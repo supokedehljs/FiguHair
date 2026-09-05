@@ -11,7 +11,7 @@ from .hair_lifecycle import (
 from .pipe_generation import generate_pipe_mesh
 from .point_data import sync_point_settings, sync_active_point_from_selection
 from .widget_cache import invalidate_pipe_mesh_cache
-from .binding import apply_all_bindings, align_binding_ring_planes
+from .binding import apply_all_bindings, align_binding_ring_planes, repair_all_binding_planes
 def _clear_all_existing_crease_once():
     try:
         from .pipe_ops import clear_boulder_crease
@@ -341,9 +341,27 @@ def selection_sync_timer():
     return 0.25
 
 
+def repair_bindings_after_load():
+    try:
+        changed = apply_all_bindings()
+        repaired = repair_all_binding_planes()
+        for obj in changed + repaired:
+            invalidate_pipe_mesh_cache(obj)
+        screen = getattr(bpy.context, 'screen', None)
+        if screen is not None:
+            for area in screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+    except (AttributeError, RuntimeError):
+        pass
+    return None
+
+
 @persistent
 def ensure_handlers_after_load(scene):
     register_handler()
+    if not bpy.app.timers.is_registered(repair_bindings_after_load):
+        bpy.app.timers.register(repair_bindings_after_load, first_interval=0.5)
 
 
 def register_handler():
