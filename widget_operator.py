@@ -6,7 +6,8 @@ from .widget_state import (
     get_subdiv_preview_enabled, set_subdiv_preview_enabled,
     get_solo_display_enabled, set_solo_display_enabled,
     push_widget_undo, pop_widget_undo,
-    redraw_view3d, get_selected_widget_verts, set_selected_widget_verts,
+    redraw_view3d, get_selected_widget_verts, get_current_selected_widget_verts,
+    set_selected_widget_verts, set_current_selected_widget_verts,
     serialize_cross_section_undo_state, restore_cross_section_undo_state,
     get_widget_undo_stack, set_widget_undo_stack,
 )

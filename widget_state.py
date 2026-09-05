@@ -110,9 +110,12 @@ class HairPipeWidgetSettings(PropertyGroup):
     idx_button_y1: FloatProperty(default=0.0)
     flip_horizontal: BoolProperty(default=False)
     selected_verts: bpy.props.StringProperty(default="")
+    bound_selected_verts: bpy.props.StringProperty(default="")
+    multi_transform_initial: bpy.props.StringProperty(default="{}")
     # Non-empty while the read-only overlay of a bound slave is being edited.
     bound_edit_curve_name: bpy.props.StringProperty(default="")
     bound_edit_point_index: IntProperty(default=-1)
+    active_section_layer: IntProperty(default=0)
     source_curve_name: bpy.props.StringProperty(default="")
     context_menu_point_index: IntProperty(default=-1)
     box_select_active: BoolProperty(default=False)
@@ -252,6 +255,125 @@ def get_proportional_vertex_weights(context, verts, selected, cx, cy, sf, alignm
         if weight > 0.0:
             weights[idx] = weight
     return weights
+
+
+def _bound_selection_key(obj=None, point_index=None):
+    if obj is None:
+        return 'active'
+    return f'{obj.name}:{int(point_index)}'
+
+
+def get_bound_selected_widget_verts(wd, obj=None, point_index=None):
+    raw = getattr(wd, 'bound_selected_verts', '').strip()
+    if not raw:
+        return set()
+    try:
+        value = json.loads(raw)
+        if isinstance(value, dict):
+            values = value.get(_bound_selection_key(obj, point_index), [])
+            return {int(x) for x in values}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return {int(x) for x in raw.split(',') if x.strip().isdigit()}
+
+
+def set_bound_selected_widget_verts(wd, indices, obj=None, point_index=None):
+    key = _bound_selection_key(obj, point_index)
+    try:
+        value = json.loads(getattr(wd, 'bound_selected_verts', '') or '{}')
+        if not isinstance(value, dict):
+            value = {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        value = {}
+    value[key] = sorted(int(i) for i in indices)
+    wd.bound_selected_verts = json.dumps(value, separators=(',', ':'))
+
+
+def set_current_selected_widget_verts(wd, indices):
+    if getattr(wd, 'bound_edit_curve_name', ''):
+        set_bound_selected_widget_verts(
+            wd, indices,
+            getattr(wd, 'bound_edit_curve_name', '') and
+            bpy.data.objects.get(wd.bound_edit_curve_name),
+            getattr(wd, 'bound_edit_point_index', -1),
+        )
+    else:
+        set_selected_widget_verts(wd, indices)
+
+
+def clear_bound_edit_selection(wd):
+    # Clear only the active child context. Keep its selection so source and
+    # child selections can coexist in the same editor.
+    wd.bound_edit_curve_name = ''
+    wd.bound_edit_point_index = -1
+
+
+def get_multi_transform_initial(wd):
+    try:
+        value = json.loads(getattr(wd, 'multi_transform_initial', '{}'))
+        return value if isinstance(value, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def set_multi_transform_initial(wd, value):
+    wd.multi_transform_initial = json.dumps(value, separators=(',', ':'))
+
+
+def get_current_selected_widget_verts(wd):
+    if getattr(wd, 'bound_edit_curve_name', ''):
+        return get_bound_selected_widget_verts(
+            wd, getattr(wd, 'bound_edit_curve_name', '') and
+            bpy.data.objects.get(wd.bound_edit_curve_name),
+            getattr(wd, 'bound_edit_point_index', -1),
+        )
+    return get_selected_widget_verts(wd)
+
+
+def get_selected_widget_layers(wd, obj, settings):
+    """Return independently selected source/child profile layers."""
+    layers = [(obj, settings.active_point_index,
+               settings.point_settings[settings.active_point_index],
+               get_selected_widget_verts(wd), False)]
+    bound_name = getattr(wd, 'bound_edit_curve_name', '')
+    bound_idx = int(getattr(wd, 'bound_edit_point_index', -1))
+    if bound_name:
+        bound_obj = bpy.data.objects.get(bound_name)
+        if bound_obj is not None and bound_obj.type == 'CURVE':
+            bound_ps = _point_setting_for_widget(bound_obj, bound_idx)
+            if bound_ps is not None:
+                layers.append((bound_obj, bound_idx, bound_ps,
+                               get_bound_selected_widget_verts(wd), True))
+    return [layer for layer in layers if layer[3]]
+
+
+def _point_setting_for_widget(obj, index):
+    settings = getattr(obj, 'hair_pipe_settings', None)
+    if settings is None or not (0 <= index < len(settings.point_settings)):
+        return None
+    return settings.point_settings[index]
+
+
+def store_multi_transform_initial(wd, layers):
+    state = {}
+    for obj, point_idx, ps, selected, is_bound in layers:
+        key = 'bound:' + obj.name + ':' + str(point_idx) if is_bound else 'source'
+        state[key] = {
+            'object': obj.name,
+            'point': int(point_idx),
+            'bound': bool(is_bound),
+            'selected': sorted(int(i) for i in selected),
+            'offsets': {
+                str(i): [float(ps.cross_section_verts[i].offset_x),
+                         float(ps.cross_section_verts[i].offset_y)]
+                for i in selected if 0 <= i < len(ps.cross_section_verts)
+            },
+        }
+    set_multi_transform_initial(wd, state)
+
+
+def get_multi_transform_layers(wd):
+    return get_multi_transform_initial(wd)
 
 
 def get_selected_widget_verts(wd):
@@ -947,6 +1069,10 @@ def setup_widget(context):
     wd.source_curve_name = obj.name
     wd.bound_edit_curve_name = ''
     wd.bound_edit_point_index = -1
+    wd.active_section_layer = 0
+    wd.selected_verts = ''
+    wd.bound_selected_verts = ''
+    wd.multi_transform_initial = '{}'
     wd.is_active = True
     wd.show_full_mesh_grid = False
     wd.auto_alignment_initialized = False

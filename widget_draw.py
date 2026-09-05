@@ -12,7 +12,11 @@ from .hair_lifecycle import get_pipe_object_for_curve, get_pipe_source_curve
 from .ghost import update_all_ghost_vertices, update_ghost_vertices
 from .math_utils import catmull_rom_2d, get_cross_section_frame, safe_normalized
 from .widget_geometry import get_raw_offset, effective_to_widget, chaikin_closed, make_smooth_preview_lines, get_stable_widget_alignment, fit_widget_scale_to_cross_section
-from .widget_state import get_selected_widget_verts, get_widget_source_curve, get_active_curve_point, redraw_view3d, get_curve_point_by_index, select_curve_point_by_index, proportional_edit_enabled, get_lasso_points, context_matches_widget_view
+from .widget_state import (get_selected_widget_verts, get_bound_selected_widget_verts,
+    get_current_selected_widget_verts,
+    get_widget_source_curve, get_active_curve_point, redraw_view3d,
+    get_curve_point_by_index, select_curve_point_by_index,
+    proportional_edit_enabled, get_lasso_points, context_matches_widget_view)
 from .widget_cache import get_cached_pipe_mesh
 from .pipe_generation import generate_pipe_mesh
 from .transition import is_transition_point
@@ -103,7 +107,7 @@ def draw_circle_outline(shader, points, color, radius, segments=24, line_width=1
 
 def draw_single_cross_section(shader, verts, ps, settings,
                                panel_cx, panel_cy, panel_sf, alignment_angle,
-                               flip_h, panel_half, is_active, wd=None):
+                               flip_h, panel_half, is_active, wd=None, selection_indices=None):
     """Draw one cross-section panel using raw offsets (uniform size)."""
     n = len(verts)
     if n < 3:
@@ -159,7 +163,7 @@ def draw_single_cross_section(shader, verts, ps, settings,
 
     if is_active:
         if wd is not None:
-            sel_indices = get_selected_widget_verts(wd)
+            sel_indices = set(selection_indices) if selection_indices is not None else get_current_selected_widget_verts(wd)
             if sel_indices:
                 sel_pts = []
                 selected_ghost_pts = []
@@ -394,7 +398,7 @@ def get_selected_curve_highlight_targets(context, active_obj):
     return targets
 
 
-def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=None):
+def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=None, selection_indices=None, is_active=True):
     region = context.region
     region_data = context.region_data
     obj = curve_obj or context.active_object
@@ -587,6 +591,7 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
 
     shader = gpu.shader.from_builtin('UNIFORM_COLOR')
     gpu.state.blend_set('ALPHA')
+    inactive_alpha = 0.22 if not is_active else 1.0
 
     if show_full_grid or show_roll_grid or show_section_grid:
         grid_lines = []
@@ -618,7 +623,10 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
             shader.uniform_float("color", (0.2, 0.85, 1.0, 0.72))
             batch.draw(shader)
 
-    selected_indices = {idx for idx in get_selected_widget_verts(wd) if 0 <= idx < segments}
+    selected_indices = {
+        idx for idx in (selection_indices if selection_indices is not None else get_current_selected_widget_verts(wd))
+        if 0 <= idx < segments
+    }
     if selected_indices and any(ring is not None for ring in projected_rings):
         active_ring_idx = selected_ring_starts[0][1] // segments if selected_ring_starts else ring_count // 2
         fade_distance = max(3, min(12, int(math.ceil(ring_count * 0.18))))
@@ -655,7 +663,9 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
                 shader.uniform_float("color", (1.0, 0.55, 0.0, alpha))
                 batch.draw(shader)
 
-    widget_selected_indices = get_selected_widget_verts(wd)
+    widget_selected_indices = set(
+        selection_indices if selection_indices is not None else get_current_selected_widget_verts(wd)
+    )
     for point_idx, ring_start in selected_ring_starts:
         ring_idx = ring_start // segments
         if ring_idx >= len(projected_rings):
@@ -674,7 +684,7 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
             gpu.state.line_width_set(1.65 if is_active_ring else 1.3)
             batch = batch_for_shader(shader, 'LINES', {"pos": lines})
             shader.bind()
-            shader.uniform_float("color", (1.0, 0.55, 0.0, 1.0) if is_active_ring else (1.0, 0.78, 0.05, 0.78))
+            shader.uniform_float("color", (1.0, 0.55, 0.0, inactive_alpha) if is_active else (1.0, 0.78, 0.05, 0.78 * inactive_alpha))
             batch.draw(shader)
 
         point_setting = obj.hair_pipe_settings.point_settings[point_idx] if point_idx < len(obj.hair_pipe_settings.point_settings) else ps
@@ -688,7 +698,7 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
             else:
                 normal_points.append(point)
         if normal_points:
-            normal_color = (1.0, 1.0, 1.0, 0.92) if is_active_ring else (1.0, 0.78, 0.05, 0.72)
+            normal_color = (1.0, 1.0, 1.0, 0.92 * inactive_alpha) if is_active else (1.0, 0.78, 0.05, 0.72 * inactive_alpha)
             draw_circle_points(shader, normal_points, normal_color, 3.4 if is_active_ring else 3.0, segments=18)
         if selected_points:
             draw_circle_points(shader, selected_points, (1.0, 0.5, 0.0, 1.0), 4.2, segments=18)
@@ -980,6 +990,11 @@ def draw_widget_callback():
                 section_settings.point_settings[highlight_idx],
                 section_obj,
                 highlight_idx,
+                selection_indices=(
+                    get_selected_widget_verts(wd)
+                    if section_obj == obj and highlight_idx == settings.active_point_index
+                    else set()
+                ),
             )
             drawn_sections.add((section_obj.as_pointer(), int(highlight_idx)))
 
@@ -995,6 +1010,8 @@ def draw_widget_callback():
         if key not in drawn_sections:
             draw_active_pipe_cross_section_ring(
                 context, child_ps, child_obj, child_idx,
+                is_active=(getattr(wd, 'bound_edit_curve_name', '') == child_obj.name and int(getattr(wd, 'bound_edit_point_index', -1)) == int(child_idx)),
+                selection_indices=get_bound_selected_widget_verts(wd, child_obj, child_idx),
             )
     cy = wd.widget_center_y
     size = wd.widget_size
@@ -1032,8 +1049,11 @@ def draw_widget_callback():
         (0.18, 0.18, 0.18, 0.88),
         (0.0, 0.0, 0.0, 0.45),
     )
-    draw_single_cross_section(shader, verts, ps, settings,
-                               cx, cy, sf, alignment_angle, flip_h, half, True, wd)
+    draw_single_cross_section(
+        shader, verts, ps, settings, cx, cy, sf, alignment_angle, flip_h,
+        half, not bool(getattr(wd, 'bound_edit_curve_name', '')), wd,
+        get_selected_widget_verts(wd) if not getattr(wd, 'bound_edit_curve_name', '') else set(),
+    )
 
     # Read-only slave profiles controlled by this target. Profiles remain
     # topologically independent, so no cross-hair bridge faces are introduced.
@@ -1055,7 +1075,10 @@ def draw_widget_callback():
                 })())
             draw_single_cross_section(
                 shader, proxy_verts, slave_ps, settings,
-                cx, cy, sf, alignment_angle, flip_h, half, False, None,
+                cx, cy, sf, alignment_angle, flip_h, half,
+                getattr(wd, 'bound_edit_curve_name', '') == _slave_obj.name
+                and int(getattr(wd, 'bound_edit_point_index', -1)) == int(_slave_idx),
+                wd, get_bound_selected_widget_verts(wd, _slave_obj, _slave_idx),
             )
 
     if proportional_edit_enabled(context) and wd.move_active:

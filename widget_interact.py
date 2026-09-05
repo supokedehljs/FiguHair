@@ -16,7 +16,10 @@ from .pipe_generation import generate_pipe_mesh
 from .transition import is_transition_point, get_effective_point_setting
 from .point_data import sync_point_settings, sync_active_point_from_selection
 from .cross_section import get_active_spline_point_range
-from .binding import is_bound_slave_point, get_bound_edit_target, get_bound_sections_for_target
+from .binding import (
+    is_bound_slave_point, get_bound_edit_target, get_bound_sections_for_target,
+    get_bound_section_display_offsets,
+)
 
 class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
     """Open interactive cross-section editor overlay in the 3D viewport"""
@@ -280,11 +283,39 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         return {'RUNNING_MODAL'}
 
     if not wd.move_active and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.value == 'PRESS':
+        if event.shift and not event.ctrl:
+            sections = [(None, settings.active_point_index)]
+            sections.extend(
+                (child_obj, child_idx)
+                for child_obj, child_idx, _child_ps in get_bound_sections_for_target(
+                    obj, settings.active_point_index
+                )
+            )
+            if sections:
+                current = (bpy.data.objects.get(wd.bound_edit_curve_name),
+                           int(wd.bound_edit_point_index)) if wd.bound_edit_curve_name else (None, settings.active_point_index)
+                try:
+                    current_index = next(i for i, item in enumerate(sections) if item == current)
+                except StopIteration:
+                    current_index = 0
+                step = 1 if event.type == 'WHEELDOWNMOUSE' else -1
+                next_obj, next_point = sections[(current_index + step) % len(sections)]
+                if next_obj is None:
+                    clear_bound_edit_selection(wd)
+                    settings.active_point_index = next_point
+                else:
+                    wd.bound_edit_curve_name = next_obj.name
+                    wd.bound_edit_point_index = int(next_point)
+                wd.box_select_active = False
+                wd.left_drag_pending = False
+                wd.drag_vert_index = -1
+                redraw_view3d(context)
+            return {'RUNNING_MODAL'}
         if not event.ctrl:
             return {'PASS_THROUGH'}
         total_points = len(settings.point_settings)
         if total_points > 0:
-            previous_selection = get_selected_widget_verts(wd)
+            previous_selection = get_current_selected_widget_verts(wd)
             previous_point_idx = settings.active_point_index
             step = -1 if event.type == 'WHEELUPMOUSE' else 1
             new_idx = (previous_point_idx + step) % total_points
@@ -309,7 +340,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             wd.left_drag_pending = False
             wd.left_drag_active = False
             wd.left_drag_vert_index = -1
-            set_selected_widget_verts(wd, preserved_selection)
+            set_current_selected_widget_verts(wd, preserved_selection)
             redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
@@ -336,16 +367,16 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 closest_idx = wd.left_drag_vert_index
                 ps.active_vert_index = closest_idx
                 if event.shift:
-                    sel = get_selected_widget_verts(wd)
+                    sel = get_current_selected_widget_verts(wd)
                     if closest_idx in sel:
                         sel.discard(closest_idx)
                     else:
                         sel.add(closest_idx)
-                    set_selected_widget_verts(wd, sel)
+                    set_current_selected_widget_verts(wd, sel)
                 else:
-                    set_selected_widget_verts(wd, {closest_idx})
+                    set_current_selected_widget_verts(wd, {closest_idx})
             else:
-                set_selected_widget_verts(wd, set())
+                set_current_selected_widget_verts(wd, set())
             wd.left_drag_pending = False
             wd.left_drag_vert_index = -1
             redraw_view3d(context)
@@ -357,7 +388,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             return {'RUNNING_MODAL'}
 
     if wd.move_active:
-        sel = sorted(get_selected_widget_verts(wd))
+        sel = sorted(get_current_selected_widget_verts(wd))
         initial = get_rotate_offsets(wd)
         if proportional_edit_enabled(context) and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.value == 'PRESS':
             step = -0.5 if event.type == 'WHEELUPMOUSE' else 0.5
@@ -454,7 +485,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         return {'RUNNING_MODAL'}
 
     if wd.scale_active:
-        sel = sorted(get_selected_widget_verts(wd))
+        sel = sorted(get_current_selected_widget_verts(wd))
         initial = get_rotate_offsets(wd)
         if event.type == 'MOUSEMOVE':
             ctr_x = wd.transform_pivot_x
@@ -495,7 +526,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
 
     # Rotate mode active
     if wd.rotate_active:
-        sel = sorted(get_selected_widget_verts(wd))
+        sel = sorted(get_current_selected_widget_verts(wd))
         initial = get_rotate_offsets(wd)
         if event.type == 'MOUSEMOVE':
             mouse_pivot_x, mouse_pivot_y = get_transform_mouse_pivot(context, cx, cy)
@@ -574,15 +605,44 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 else:
                     selected = set()
             else:
-                selected = set()
-                for i, v in enumerate(verts):
-                    ox, oy = get_raw_offset(v)
+                # Box-select both visible section layers independently. The
+                # selection identity includes the section; equal vertex
+                # numbers in source/child rings must never alias each other.
+                main_selected = set()
+                bound_selected = set()
+                for i, vertex in enumerate(settings.point_settings[settings.active_point_index].cross_section_verts):
+                    ox, oy = get_raw_offset(vertex)
                     px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
                     if bx0 <= px <= bx1 and by0 <= py <= by1:
-                        selected.add(i)
-            if event.shift:
-                selected = selected | get_selected_widget_verts(wd)
-            set_selected_widget_verts(wd, selected)
+                        main_selected.add(i)
+                for child_obj, child_idx, child_ps in get_bound_sections_for_target(
+                    obj, settings.active_point_index
+                ):
+                    offsets = get_bound_section_display_offsets(
+                        obj, settings.active_point_index, child_obj, child_idx,
+                    )
+                    for i, (ox, oy) in enumerate(offsets):
+                        px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
+                        if bx0 <= px <= bx1 and by0 <= py <= by1:
+                            bound_selected.add(i)
+                if event.shift:
+                    main_selected |= get_selected_widget_verts(wd)
+                    for existing_obj, existing_idx, _existing_ps in get_bound_sections_for_target(
+                        obj, settings.active_point_index
+                    ):
+                        bound_selected |= get_bound_selected_widget_verts(
+                            wd, existing_obj, existing_idx,
+                        )
+                set_selected_widget_verts(wd, main_selected)
+                for child_obj, child_idx, _child_ps in get_bound_sections_for_target(
+                    obj, settings.active_point_index
+                ):
+                    set_bound_selected_widget_verts(
+                        wd, bound_selected, child_obj, child_idx,
+                    )
+                selected = get_current_selected_widget_verts(wd)
+            if wd.box_select_3d:
+                set_current_selected_widget_verts(wd, selected)
             if wd.box_select_3d and hits:
                 for point_idx, point_hits in hits_by_point.items():
                     if point_idx < len(settings.point_settings) and point_hits:
@@ -609,15 +669,26 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         if event.type == 'RIGHTMOUSE' and event.value == 'RELEASE':
             polygon = get_lasso_points(wd)
             selected = set()
+            display_offsets = None
+            if getattr(wd, 'bound_edit_curve_name', ''):
+                bound_obj = bpy.data.objects.get(wd.bound_edit_curve_name)
+                if bound_obj is not None:
+                    display_offsets = get_bound_section_display_offsets(
+                        obj, settings.active_point_index, bound_obj,
+                        int(getattr(wd, 'bound_edit_point_index', -1)),
+                    )
             if len(polygon) >= 3:
                 for i, v in enumerate(verts):
-                    ox, oy = get_raw_offset(v)
+                    if display_offsets is not None and i < len(display_offsets):
+                        ox, oy = display_offsets[i]
+                    else:
+                        ox, oy = get_raw_offset(v)
                     px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
                     if point_in_polygon(px, py, polygon):
                         selected.add(i)
             if event.shift:
-                selected = selected | get_selected_widget_verts(wd)
-            set_selected_widget_verts(wd, selected)
+                selected = selected | get_current_selected_widget_verts(wd)
+            set_current_selected_widget_verts(wd, selected)
             wd.lasso_select_active = False
             wd.lasso_points = ""
             redraw_view3d(context)
@@ -665,7 +736,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if inside_toggle_button:
-            selected = {idx for idx in get_selected_widget_verts(wd) if 0 <= idx < len(verts)}
+            selected = {idx for idx in get_current_selected_widget_verts(wd) if 0 <= idx < len(verts)}
             if len(selected) == 2:
                 push_widget_undo(context, "解除横截面幽灵线段")
                 if toggle_ghost_between_selected_edge_points(ps, selected):
@@ -716,21 +787,21 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 target_ps = settings.point_settings[point_idx]
                 target_ps.active_vert_index = ring_idx
                 if event.shift and point_idx == settings.active_point_index:
-                    sel = get_selected_widget_verts(wd)
+                    sel = get_current_selected_widget_verts(wd)
                     if ring_idx in sel:
                         sel.discard(ring_idx)
                     else:
                         sel.add(ring_idx)
-                    set_selected_widget_verts(wd, sel)
+                    set_current_selected_widget_verts(wd, sel)
                 else:
-                    set_selected_widget_verts(wd, {ring_idx})
+                    set_current_selected_widget_verts(wd, {ring_idx})
                 wd.left_drag_vert_index = ring_idx
                 wd.drag_vert_index = ring_idx
                 redraw_view3d(context)
                 return {'RUNNING_MODAL'}
 
             if not event.shift:
-                set_selected_widget_verts(wd, set())
+                set_current_selected_widget_verts(wd, set())
                 ps.active_vert_index = -1
                 redraw_view3d(context)
             return {'RUNNING_MODAL'}
@@ -740,17 +811,19 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             return {'RUNNING_MODAL'}
 
         if inside_widget:
-            bound_hit = get_bound_edit_target(
-                obj, settings.active_point_index, mx, my, cx, cy,
-                sf, alignment_angle, flip_h,
-            )
-            if bound_hit is not None:
-                bound_obj, bound_point, closest_idx, bound_ps = bound_hit
-                wd.bound_edit_curve_name = bound_obj.name
-                wd.bound_edit_point_index = bound_point
-                set_selected_widget_verts(wd, {closest_idx})
-                ps = bound_ps
-                verts = ps.cross_section_verts
+            # Only the explicitly active layer is interactive. Other bound
+            # sections are visual references and must never steal a click.
+            if getattr(wd, 'bound_edit_curve_name', ''):
+                bound_obj = bpy.data.objects.get(wd.bound_edit_curve_name)
+                display_offsets = get_bound_section_display_offsets(
+                    obj, settings.active_point_index, bound_obj,
+                    int(getattr(wd, 'bound_edit_point_index', -1)),
+                ) if bound_obj is not None else []
+                candidates = []
+                for index, (ox, oy) in enumerate(display_offsets):
+                    px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
+                    candidates.append(((px - mx) ** 2 + (py - my) ** 2, index))
+                closest_idx = min(candidates)[1] if candidates else -1
             else:
                 closest_idx = find_nearest_raw_vertex(verts, mx, my, cx, cy, sf, alignment_angle, flip_h)
             wd.left_drag_pending = True
@@ -777,11 +850,11 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         return {'RUNNING_MODAL'}
 
     if event.type == 'G' and event.value == 'PRESS':
-        sel = get_selected_widget_verts(wd)
+        sel = get_current_selected_widget_verts(wd)
         sel = {vi for vi in sel if 0 <= vi < len(verts) and not getattr(verts[vi], 'is_ghost', False)}
         if sel:
             push_widget_undo(context, "移动横截面顶点")
-            set_selected_widget_verts(wd, sel)
+            set_current_selected_widget_verts(wd, sel)
             wd.move_active = True
             wd.move_start_x = mx
             wd.move_start_y = my
@@ -791,11 +864,11 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         return {'RUNNING_MODAL'}
 
     if event.type == 'R' and event.value == 'PRESS':
-        sel = get_selected_widget_verts(wd)
+        sel = get_current_selected_widget_verts(wd)
         sel = {vi for vi in sel if 0 <= vi < len(verts) and not getattr(verts[vi], 'is_ghost', False)}
         if sel:
             push_widget_undo(context, "旋转横截面顶点")
-            set_selected_widget_verts(wd, sel)
+            set_current_selected_widget_verts(wd, sel)
             wd.rotate_active = True
             wd.rotate_start_x = mx
             wd.rotate_start_y = my
@@ -814,11 +887,11 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
     if event.type == 'S' and event.value == 'PRESS':
         if getattr(wd, 'bound_edit_curve_name', ''):
             return {'RUNNING_MODAL'}
-        sel = get_selected_widget_verts(wd)
+        sel = get_current_selected_widget_verts(wd)
         sel = {vi for vi in sel if 0 <= vi < len(verts) and not getattr(verts[vi], 'is_ghost', False)}
         if sel:
             push_widget_undo(context, "缩放横截面顶点")
-            set_selected_widget_verts(wd, sel)
+            set_current_selected_widget_verts(wd, sel)
             wd.scale_active = True
             wd.scale_start_x = mx
             wd.scale_start_y = my
@@ -828,11 +901,11 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
 
     # A - Select All / Deselect All
     if event.type == 'A' and event.value == 'PRESS':
-        sel = get_selected_widget_verts(wd)
+        sel = get_current_selected_widget_verts(wd)
         if len(sel) == len(verts):
-            set_selected_widget_verts(wd, set())
+            set_current_selected_widget_verts(wd, set())
         else:
-            set_selected_widget_verts(wd, set(range(len(verts))))
+            set_current_selected_widget_verts(wd, set(range(len(verts))))
         redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
@@ -853,14 +926,15 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 bound_obj, bound_point, closest_idx, bound_ps = bound_hit
                 wd.bound_edit_curve_name = bound_obj.name
                 wd.bound_edit_point_index = bound_point
-                set_selected_widget_verts(wd, {closest_idx})
+                set_bound_selected_widget_verts(wd, {closest_idx}, bound_obj, bound_point)
                 ps = bound_ps
                 verts = ps.cross_section_verts
             else:
+                clear_bound_edit_selection(wd)
                 closest_idx = find_nearest_raw_vertex(verts, mx, my, cx, cy, sf, alignment_angle, flip_h)
             if closest_idx >= 0:
                 ps.active_vert_index = closest_idx
-                set_selected_widget_verts(wd, {closest_idx})
+                set_bound_selected_widget_verts(wd, {closest_idx}, bound_obj, bound_point)
                 redraw_view3d(context)
         bpy.ops.wm.call_menu(name="HAIRPIPE_MT_widget_context_menu")
         settings.active_point_index = target_point_index
@@ -986,7 +1060,7 @@ class HAIRPIPE_OT_widget_smooth_selected_vertices(bpy.types.Operator):
         verts = ps.cross_section_verts
         wd = context.window_manager.hair_pipe_widget
         selected = {
-            idx for idx in get_selected_widget_verts(wd)
+            idx for idx in get_current_selected_widget_verts(wd)
             if 0 <= idx < len(verts) and not getattr(verts[idx], 'is_ghost', False)
         }
         if not selected:
@@ -1045,19 +1119,19 @@ class HAIRPIPE_OT_widget_delete_selected_vertices(bpy.types.Operator):
             and ps is not None
             and wd is not None
             and wd.is_active
-            and bool(get_selected_widget_verts(wd))
+            and bool(get_current_selected_widget_verts(wd))
         )
 
     def execute(self, context):
         obj, settings, ps, wd = get_widget_edit_context(context)
-        selected = get_selected_widget_verts(wd)
+        selected = get_current_selected_widget_verts(wd)
         if ps is None or len(ps.cross_section_verts) - len(selected) < 3:
             self.report({'WARNING'}, "横截面至少需要保留三个顶点")
             return {'CANCELLED'}
         push_widget_undo(context, "删除横截面顶点")
         if not remove_selected_cross_section_vertices(settings, ps, selected):
             return {'CANCELLED'}
-        set_selected_widget_verts(wd, set())
+        set_current_selected_widget_verts(wd, set())
         wd.drag_vert_index = -1
         redraw_view3d(context)
         return {'FINISHED'}
@@ -1174,7 +1248,7 @@ class HAIRPIPE_OT_widget_toggle_ghost(bpy.types.Operator):
         if ps is None:
             return {'CANCELLED'}
         verts = ps.cross_section_verts
-        selected = {idx for idx in get_selected_widget_verts(wd) if 0 <= idx < len(verts)} if wd is not None else set()
+        selected = {idx for idx in get_current_selected_widget_verts(wd) if 0 <= idx < len(verts)} if wd is not None else set()
         if not selected and 0 <= ps.active_vert_index < len(verts):
             selected = {ps.active_vert_index}
         if not selected:
@@ -1189,7 +1263,7 @@ class HAIRPIPE_OT_widget_toggle_ghost(bpy.types.Operator):
             update_ghost_vertices(ps)
             sync_active_cross_section_to_selected_points(context)
         if wd is not None:
-            set_selected_widget_verts(wd, selected)
+            set_current_selected_widget_verts(wd, selected)
             wd.drag_vert_index = -1
         redraw_view3d(context)
         return {'FINISHED'}
@@ -1204,7 +1278,7 @@ class HAIRPIPE_OT_widget_make_normal(bpy.types.Operator):
         if ps is None:
             return {'CANCELLED'}
         verts = ps.cross_section_verts
-        selected = {idx for idx in get_selected_widget_verts(wd) if 0 <= idx < len(verts)} if wd is not None else set()
+        selected = {idx for idx in get_current_selected_widget_verts(wd) if 0 <= idx < len(verts)} if wd is not None else set()
         selected_ghosts = {idx for idx in selected if getattr(verts[idx], 'is_ghost', False)}
         if not selected_ghosts:
             return {'CANCELLED'}
@@ -1221,7 +1295,7 @@ class HAIRPIPE_OT_widget_make_normal(bpy.types.Operator):
         if changed:
             update_all_ghost_vertices(settings)
         if wd is not None:
-            set_selected_widget_verts(wd, {idx for idx in selected_ghosts if 0 <= idx < len(verts)})
+            set_current_selected_widget_verts(wd, {idx for idx in selected_ghosts if 0 <= idx < len(verts)})
             wd.drag_vert_index = -1
         redraw_view3d(context)
         return {'FINISHED'}
