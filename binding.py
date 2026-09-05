@@ -426,9 +426,15 @@ def align_binding_ring_planes(slave_obj):
         source_basis = _basis_on_current_source_plane(source_ring, stored_basis)
         if source_basis is None:
             continue
-        source_center, source_u, source_v, source_normal = source_basis
-        # Persist the live plane normal and transported axes. Shape edits can
-        # change the plane, but cannot choose the in-plane roll from one vertex.
+        _ring_center, source_u, source_v, source_normal = source_basis
+        # The ring centroid changes when a single profile vertex is edited.
+        # It is valid for estimating the plane, but never as the binding
+        # anchor. The anchor is the source curve control point itself.
+        source_center = _world_point(source, int(data.get('source_point', -1)))
+        if source_center is None:
+            source_center = _ring_center
+        # Persist the live plane axes, while storing the stable curve-point
+        # anchor separately from the shape-dependent ring centroid.
         data.update({
             'plane_center': list(source_center),
             'plane_u': list(source_u),
