@@ -110,6 +110,9 @@ class HairPipeWidgetSettings(PropertyGroup):
     idx_button_y1: FloatProperty(default=0.0)
     flip_horizontal: BoolProperty(default=False)
     selected_verts: bpy.props.StringProperty(default="")
+    # Non-empty while the read-only overlay of a bound slave is being edited.
+    bound_edit_curve_name: bpy.props.StringProperty(default="")
+    bound_edit_point_index: IntProperty(default=-1)
     source_curve_name: bpy.props.StringProperty(default="")
     context_menu_point_index: IntProperty(default=-1)
     box_select_active: BoolProperty(default=False)
@@ -867,7 +870,18 @@ def set_pipe_basemesh_preview(context, curve_obj, enabled):
             mesh.update()
         for modifier in pipe_obj.modifiers:
             if modifier.type == 'SUBSURF':
-                modifier.show_viewport = not disable_subdiv
+                modifier.show_viewport = bool(preview_mode == 'SUBDIV')
+        # Explicitly tag the object so Blender 5.0 invalidates the evaluated
+        # modifier stack immediately when switching BASE/SUBDIV preview.
+        try:
+            pipe_obj.update_tag(refresh={'DATA'})
+            if mesh is not None:
+                mesh.update_tag()
+        except (AttributeError, RuntimeError, TypeError):
+            try:
+                pipe_obj.update_tag()
+            except (AttributeError, RuntimeError):
+                pass
     else:
         raw_state = pipe_obj.get(_PIPE_BASEMESH_STATE_KEY)
         if raw_state:
@@ -931,6 +945,8 @@ def setup_widget(context):
     wd.widget_scale_factor = 0.0
     wd.fitted_point_index = -1
     wd.source_curve_name = obj.name
+    wd.bound_edit_curve_name = ''
+    wd.bound_edit_point_index = -1
     wd.is_active = True
     wd.show_full_mesh_grid = False
     wd.auto_alignment_initialized = False

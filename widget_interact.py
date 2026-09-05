@@ -16,6 +16,7 @@ from .pipe_generation import generate_pipe_mesh
 from .transition import is_transition_point, get_effective_point_setting
 from .point_data import sync_point_settings, sync_active_point_from_selection
 from .cross_section import get_active_spline_point_range
+from .binding import is_bound_slave_point, get_bound_edit_target, get_bound_sections_for_target
 
 class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
     """Open interactive cross-section editor overlay in the 3D viewport"""
@@ -35,6 +36,8 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
         if s.active_point_index >= len(s.point_settings):
             return False
         ps = s.point_settings[s.active_point_index]
+        if is_bound_slave_point(obj, s.active_point_index):
+            return False
         return not is_transition_point(ps) and len(ps.cross_section_verts) >= 3
 
     def invoke(self, context, event):
@@ -90,6 +93,8 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
         cleanup_widget_display_state(context, wd)
         wd.is_active = False
         wd.drag_vert_index = -1
+        wd.bound_edit_curve_name = ''
+        wd.bound_edit_point_index = -1
         redraw_view3d(context)
 
 
@@ -128,6 +133,8 @@ class HAIRPIPE_OT_widget_hold(bpy.types.Operator):
         wd.scale_active = False
         wd.transform_mouse_pivot_valid = False
         wd.display_scale_active = False
+        wd.bound_edit_curve_name = ''
+        wd.bound_edit_point_index = -1
         wd.hold_key_mode = False
         redraw_view3d(context)
 
@@ -161,6 +168,16 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         return {'CANCELLED'}
 
     ps = settings.point_settings[settings.active_point_index]
+    bound_name = getattr(wd, 'bound_edit_curve_name', '')
+    bound_point = int(getattr(wd, 'bound_edit_point_index', -1))
+    if bound_name:
+        bound_obj = bpy.data.objects.get(bound_name)
+        if bound_obj is not None and bound_obj.type == 'CURVE':
+            bound_sections = get_bound_sections_for_target(obj, settings.active_point_index)
+            for candidate_obj, candidate_idx, candidate_ps in bound_sections:
+                if candidate_obj == bound_obj and candidate_idx == bound_point:
+                    ps = candidate_ps
+                    break
     if is_transition_point(ps):
         operator._finish(context)
         return {'CANCELLED'}
@@ -723,7 +740,19 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             return {'RUNNING_MODAL'}
 
         if inside_widget:
-            closest_idx = find_nearest_raw_vertex(verts, mx, my, cx, cy, sf, alignment_angle, flip_h)
+            bound_hit = get_bound_edit_target(
+                obj, settings.active_point_index, mx, my, cx, cy,
+                sf, alignment_angle, flip_h,
+            )
+            if bound_hit is not None:
+                bound_obj, bound_point, closest_idx, bound_ps = bound_hit
+                wd.bound_edit_curve_name = bound_obj.name
+                wd.bound_edit_point_index = bound_point
+                set_selected_widget_verts(wd, {closest_idx})
+                ps = bound_ps
+                verts = ps.cross_section_verts
+            else:
+                closest_idx = find_nearest_raw_vertex(verts, mx, my, cx, cy, sf, alignment_angle, flip_h)
             wd.left_drag_pending = True
             wd.left_drag_active = False
             wd.left_drag_start_x = mx
@@ -783,6 +812,8 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         return {'RUNNING_MODAL'}
 
     if event.type == 'S' and event.value == 'PRESS':
+        if getattr(wd, 'bound_edit_curve_name', ''):
+            return {'RUNNING_MODAL'}
         sel = get_selected_widget_verts(wd)
         sel = {vi for vi in sel if 0 <= vi < len(verts) and not getattr(verts[vi], 'is_ghost', False)}
         if sel:
@@ -814,7 +845,19 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         target_point_index = settings.active_point_index
         wd.context_menu_point_index = target_point_index
         if inside_widget:
-            closest_idx = find_nearest_raw_vertex(verts, mx, my, cx, cy, sf, alignment_angle, flip_h)
+            bound_hit = get_bound_edit_target(
+                obj, settings.active_point_index, mx, my, cx, cy,
+                sf, alignment_angle, flip_h,
+            )
+            if bound_hit is not None:
+                bound_obj, bound_point, closest_idx, bound_ps = bound_hit
+                wd.bound_edit_curve_name = bound_obj.name
+                wd.bound_edit_point_index = bound_point
+                set_selected_widget_verts(wd, {closest_idx})
+                ps = bound_ps
+                verts = ps.cross_section_verts
+            else:
+                closest_idx = find_nearest_raw_vertex(verts, mx, my, cx, cy, sf, alignment_angle, flip_h)
             if closest_idx >= 0:
                 ps.active_vert_index = closest_idx
                 set_selected_widget_verts(wd, {closest_idx})

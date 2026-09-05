@@ -17,6 +17,7 @@ from .widget_cache import get_cached_pipe_mesh
 from .pipe_generation import generate_pipe_mesh
 from .transition import is_transition_point
 from .roll_diagnostics import get_uncontrolled_roll_diagnostics
+from .binding import get_bound_sections_for_target, get_bound_section_display_offsets
 
 _draw_handle = None
 
@@ -403,8 +404,14 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
         return
 
     try:
-        mesh_verts, _faces = get_cached_pipe_mesh(obj)
-    except Exception:
+        # IMPORTANT: use the current pipe object's base mesh, not the
+        # generate_pipe_mesh preview cache. Bound rings are corrected in-place
+        # after generation, so the cache can describe a different plane.
+        pipe_obj = get_pipe_object_for_curve(obj)
+        if pipe_obj is None or pipe_obj.type != 'MESH':
+            return
+        mesh_verts = [vertex.co.copy() for vertex in pipe_obj.data.vertices]
+    except (AttributeError, RuntimeError):
         mesh_verts = None
     if not mesh_verts:
         return
@@ -459,7 +466,7 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
     for start in range(0, len(mesh_verts) - segments + 1, segments):
         ring = mesh_verts[start:start + segments]
         ring_center = sum((Vector(v) for v in ring), Vector((0.0, 0.0, 0.0))) / segments
-        ring_candidates.append((start, obj.matrix_world @ ring_center))
+        ring_candidates.append((start, pipe_obj.matrix_world @ ring_center))
 
     selected_ring_starts = []
     used_starts = set()
@@ -514,7 +521,7 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
     front_masks = []
     for ring_idx in range(ring_count):
         start = ring_idx * segments
-        ring_world = [obj.matrix_world @ Vector(vert) for vert in mesh_verts[start:start + segments]]
+        ring_world = [pipe_obj.matrix_world @ Vector(vert) for vert in mesh_verts[start:start + segments]]
         if len(ring_world) != segments:
             projected_rings.append(None)
             front_masks.append(None)
@@ -565,7 +572,7 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
             bridge_offsets[ring_idx] = None
             continue
         next_center = sum((Vector(vertex) for vertex in next_ring), Vector((0.0, 0.0, 0.0))) / segments
-        next_center_world = obj.matrix_world @ next_center
+        next_center_world = pipe_obj.matrix_world @ next_center
         target_idx = min(
             range(len(control_positions)),
             key=lambda idx: (control_positions[idx] - next_center_world).length_squared,
@@ -964,6 +971,7 @@ def draw_widget_callback():
         return
 
     draw_curve_start_marker(context, obj)
+    drawn_sections = set()
     for section_obj, highlight_idx in get_selected_curve_highlight_targets(context, obj):
         section_settings = section_obj.hair_pipe_settings
         if 0 <= highlight_idx < len(section_settings.point_settings):
@@ -973,8 +981,21 @@ def draw_widget_callback():
                 section_obj,
                 highlight_idx,
             )
+            drawn_sections.add((section_obj.as_pointer(), int(highlight_idx)))
 
+    # Also draw every bound child ring in the 3D view, even when the child
+    # curve itself is not selected. This uses the same generated mesh-ring
+    # projection as the normal highlight, so the marker cannot disagree with
+    # the actual pipe orientation.
     cx = wd.widget_center_x
+    for child_obj, child_idx, child_ps in get_bound_sections_for_target(
+        obj, settings.active_point_index
+    ):
+        key = (child_obj.as_pointer(), int(child_idx))
+        if key not in drawn_sections:
+            draw_active_pipe_cross_section_ring(
+                context, child_ps, child_obj, child_idx,
+            )
     cy = wd.widget_center_y
     size = wd.widget_size
     if size < 10:
@@ -1013,6 +1034,29 @@ def draw_widget_callback():
     )
     draw_single_cross_section(shader, verts, ps, settings,
                                cx, cy, sf, alignment_angle, flip_h, half, True, wd)
+
+    # Read-only slave profiles controlled by this target. Profiles remain
+    # topologically independent, so no cross-hair bridge faces are introduced.
+    for _slave_obj, _slave_idx, slave_ps in get_bound_sections_for_target(
+        obj, settings.active_point_index
+    ):
+        display_offsets = get_bound_section_display_offsets(
+            obj, settings.active_point_index, _slave_obj, _slave_idx,
+        )
+        if len(display_offsets) >= 3:
+            # Draw the actual generated ring in the target ring basis. This
+            # makes the 2D overlay exactly match the 3D parallel result.
+            proxy_verts = []
+            for index, (offset_x, offset_y) in enumerate(display_offsets):
+                proxy_verts.append(type('BoundVertex', (), {
+                    'offset_x': offset_x,
+                    'offset_y': offset_y,
+                    'is_ghost': bool(getattr(slave_ps.cross_section_verts[index], 'is_ghost', False)),
+                })())
+            draw_single_cross_section(
+                shader, proxy_verts, slave_ps, settings,
+                cx, cy, sf, alignment_angle, flip_h, half, False, None,
+            )
 
     if proportional_edit_enabled(context) and wd.move_active:
         circle_center, circle_radius = get_longitudinal_circle_screen_data(

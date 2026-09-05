@@ -1,6 +1,7 @@
 import bpy
 from .curve_data import is_curve_edit_mode
 from .hair_lifecycle import get_context_curve_object
+from .binding import is_bound_slave_point
 
 
 class HAIRPIPE_PT_main_panel(bpy.types.Panel):
@@ -120,7 +121,12 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         auto_update_row.enabled = edit_mode
         auto_update_row.prop(settings, "auto_update", text="编辑模式操作", icon='EDITMODE_HLT', emboss=False)
 
-        edit_controls_enabled = edit_mode and settings.auto_update and len(settings.point_settings) > 0
+        bound_slave = edit_mode and is_bound_slave_point(curve_obj, settings.active_point_index)
+        edit_controls_enabled = (
+            edit_mode and settings.auto_update and len(settings.point_settings) > 0 and not bound_slave
+        )
+        if bound_slave:
+            layout.label(text="当前横截面由另一条头发控制", icon='CONSTRAINT')
         active_idx = min(settings.active_point_index, len(settings.point_settings) - 1) if settings.point_settings else -1
         active_ps = settings.point_settings[active_idx] if active_idx >= 0 else None
         widget_data = getattr(context.window_manager, "hair_pipe_widget", None)
@@ -153,11 +159,17 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         slider_controls.prop(settings, "neighbor_smooth_slider", text="普通平滑", icon='MOD_SMOOTH', slider=True)
         slider_controls.prop(settings, "circular_smooth_slider", text="圆形平滑", icon='MESH_CIRCLE', slider=True)
 
+        # A bound cross-section follows the target point and is intentionally
+        # read-only on the slave curve; keep both pipes as separate meshes.
+        bind_row = controls.row(align=True)
+        bind_row.operator("hair_pipe.bind_cross_curve", text="绑定跨头发截面", icon='CONSTRAINT')
+        bind_row.operator("hair_pipe.unbind_cross_curve", text="解除绑定", icon='UNLINKED')
+
         row = box.row(align=True)
         row.operator("hair_pipe.copy_cross_section", text="复制", icon='COPYDOWN')
         row.operator("hair_pipe.paste_cross_section", text="粘贴", icon='PASTEDOWN')
 
-        widget_ready = widget_data is not None and edit_controls_enabled and active_ps is not None
+        widget_ready = widget_data is not None and edit_controls_enabled and active_ps is not None and not bound_slave
         widget_active = widget_ready and widget_data.is_active
         row = box.row(align=True)
         row.enabled = widget_ready

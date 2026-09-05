@@ -11,7 +11,7 @@ from .hair_lifecycle import get_pipe_object_for_curve, get_pipe_source_curve
 from .ghost import update_all_ghost_vertices, update_ghost_vertices
 from .math_utils import catmull_rom_2d, get_cross_section_frame, safe_normalized
 from .pipe_generation import generate_pipe_mesh
-from .widget_cache import get_cached_pipe_mesh
+from .widget_cache import get_cached_pipe_mesh, clear_pipe_mesh_cache
 from .point_data import sync_point_settings
 
 def fit_widget_scale_to_cross_section(wd, verts, half, alignment_angle, flip_h):
@@ -129,6 +129,25 @@ def copy_cross_section_shape(source_ps, target_ps):
 
 
 def sync_active_cross_section_to_selected_points(context):
+    wd = getattr(context.window_manager, 'hair_pipe_widget', None)
+    bound_name = getattr(wd, 'bound_edit_curve_name', '') if wd else ''
+    bound_idx = int(getattr(wd, 'bound_edit_point_index', -1)) if wd else -1
+    if bound_name:
+        bound_obj = bpy.data.objects.get(bound_name)
+        active_obj = context.active_object
+        if bound_obj is not None and active_obj is not None:
+            from .binding import get_bound_sections_for_target
+            sections = get_bound_sections_for_target(active_obj, active_obj.hair_pipe_settings.active_point_index)
+            if any(obj == bound_obj and idx == bound_idx for obj, idx, _ps in sections):
+                bound_obj['hair_pipe_mesh_revision'] = int(bound_obj.get('hair_pipe_mesh_revision', 0)) + 1
+                try:
+                    bound_obj.update_tag()
+                    bound_obj.data.update_tag()
+                except (AttributeError, RuntimeError):
+                    pass
+                clear_pipe_mesh_cache()
+                return
+
     obj = context.active_object
     if obj is None or obj.type != 'CURVE':
         return

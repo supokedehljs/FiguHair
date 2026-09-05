@@ -150,6 +150,10 @@ from .cross_section_ops import (
     copy_point_cross_section as cs_copy_point_cross_section,
     _HAIRPIPE_CROSS_SECTION_CLIPBOARD as cs_clipboard,
 )
+from .binding import (
+    HAIRPIPE_OT_bind_cross_curve as binding_bind_cross_curve,
+    HAIRPIPE_OT_unbind_cross_curve as binding_unbind_cross_curve,
+)
 from .pipe_ops import (
     HAIRPIPE_OT_mesh_to_hair_curve as pipe_mesh_to_hair_curve,
     HAIRPIPE_OT_generate_pipe as pipe_generate_pipe,
@@ -434,6 +438,8 @@ classes = (
     HAIRPIPE_OT_duplicate_hair,
     HAIRPIPE_OT_merge_hair_for_export,
     HAIRPIPE_OT_toggle_plugin_enabled,
+    binding_bind_cross_curve,
+    binding_unbind_cross_curve,
 )
 
 def draw_hair_add_menu(self, context):

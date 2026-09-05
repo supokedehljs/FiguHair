@@ -11,6 +11,7 @@ from .hair_lifecycle import (
 from .pipe_generation import generate_pipe_mesh
 from .point_data import sync_point_settings, sync_active_point_from_selection
 from .widget_cache import invalidate_pipe_mesh_cache
+from .binding import apply_all_bindings, align_binding_ring_planes
 def _clear_all_existing_crease_once():
     try:
         from .pipe_ops import clear_boulder_crease
@@ -156,7 +157,8 @@ def rebuild_existing_pipe(curve_obj, fast=False):
                 # 同步显隐与层级
                 m = pipe_obj.modifiers.get("FiguHair Catmull-Clark")
                 try:
-                    m.show_viewport = bool(settings.default_subdiv)
+                    if not pipe_obj.get('hair_pipe_widget_basemesh_state'):
+                        m.show_viewport = bool(settings.default_subdiv)
                     m.levels = int(settings.subdivision_levels)
                     m.render_levels = int(settings.subdivision_levels)
                 except Exception:
@@ -231,7 +233,23 @@ def update_pipe_callback(scene):
 def rebuild_queue_timer():
     """Rebuild the active edit curve quickly, then drain other changed curves."""
     global _last_rebuild_queue_time
+    # Apply source-driven bindings and rebuild each changed slave immediately.
+    # Queuing only the curve data was not enough in multi-object Edit Mode:
+    # Blender could postpone the slave object's mesh depsgraph update until it
+    # was clicked. Rebuilding here makes the preview follow the target at once.
+    bound_changed = apply_all_bindings()
+    for bound_curve in bound_changed:
+        _pending_rebuilds.discard(bound_curve.name)
+        rebuild_existing_pipe(bound_curve, fast=True)
+        align_binding_ring_planes(bound_curve)
+        invalidate_pipe_mesh_cache(bound_curve)
     if not _pending_rebuilds:
+        if bound_changed:
+            screen = getattr(bpy.context, 'screen', None)
+            if screen is not None:
+                for area in screen.areas:
+                    if area.type == 'VIEW_3D':
+                        area.tag_redraw()
         return _REBUILD_TIMER_INTERVAL
 
     # During a drag, the active curve is the only object that must be updated
@@ -248,6 +266,9 @@ def rebuild_queue_timer():
             # the expensive edit-mode sync on every mouse-move update.
             sync_active_point_from_selection(curve_obj)
         rebuild_existing_pipe(curve_obj, fast=editing)
+        from .binding import align_bound_dependents
+        align_binding_ring_planes(curve_obj)
+        align_bound_dependents(curve_obj)
         _last_rebuild_queue_time = time.perf_counter()
         if editing:
             screen = getattr(bpy.context, 'screen', None)
