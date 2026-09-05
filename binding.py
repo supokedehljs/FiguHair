@@ -573,27 +573,53 @@ def _find_binding_record(target_obj, target_point_index, slave_obj, slave_point_
 
 
 def get_bound_section_display_offsets(target_obj, target_point_index, slave_obj, slave_point_index):
-    """Return the slave ring in the target widget's actual 3D ring basis."""
+    """Project the real slave 3D ring into the source section's 2D space."""
     source_ps = _point_setting(target_obj, int(target_point_index))
     slave_ps = _point_setting(slave_obj, int(slave_point_index))
     if source_ps is None or slave_ps is None:
         return []
-    data = _find_binding_record(
-        target_obj, target_point_index, slave_obj, slave_point_index,
-    )
+    data = _find_binding_record(target_obj, target_point_index, slave_obj, slave_point_index)
     basis = _stored_binding_plane(data) if data is not None else None
     if basis is None:
         return []
-    # Keep the editor's coordinates object-local and stable. Do not derive a
-    # display center from the generated ring: that would move all untouched
-    # 2D points when only one profile vertex is edited.
-    _center, _source_u, _source_v, _normal = basis
-    scale_ratio = float(data.get('scale_ratio', 1.0)) if data else 1.0
-    return [
-        (float(vertex.offset_x) * scale_ratio,
-         float(vertex.offset_y) * scale_ratio)
-        for vertex in slave_ps.cross_section_verts
-    ]
+    source_pipe = get_pipe_object_for_curve(target_obj)
+    slave_pipe = get_pipe_object_for_curve(slave_obj)
+    source_count = len(source_ps.cross_section_verts)
+    slave_count = len(slave_ps.cross_section_verts)
+    source_ring = _nearest_pipe_ring(source_pipe, target_obj, int(target_point_index), source_count)
+    slave_ring = _nearest_pipe_ring(slave_pipe, slave_obj, int(slave_point_index), slave_count)
+    if not source_ring or not slave_ring:
+        return []
+
+    _captured_center, source_u, source_v, _normal = basis
+    source_center = sum(source_ring, Vector()) / len(source_ring)
+    slave_center = sum(slave_ring, Vector()) / len(slave_ring)
+
+    # Calibrate the source editor's raw 2D units against its actual 3D ring.
+    # The widget draws source offsets directly, so this scalar converts world
+    # distances in the fixed source plane back to widget coordinates.
+    raw_pairs = min(len(source_ps.cross_section_verts), len(source_ring))
+    numerator = 0.0
+    denominator = 0.0
+    for index in range(raw_pairs):
+        raw_x = float(source_ps.cross_section_verts[index].offset_x)
+        raw_y = float(source_ps.cross_section_verts[index].offset_y)
+        actual = source_ring[index] - source_center
+        actual_x = actual.dot(source_u)
+        actual_y = actual.dot(source_v)
+        numerator += raw_x * actual_x + raw_y * actual_y
+        denominator += raw_x * raw_x + raw_y * raw_y
+    world_per_widget = numerator / denominator if denominator > 1.0e-10 else 1.0
+    world_per_widget = abs(world_per_widget) if abs(world_per_widget) > 1.0e-8 else 1.0
+
+    # Project the actual slave ring, not its ungenerated profile data. This is
+    # what makes 2D overlap exactly reflect 3D overlap.
+    result = []
+    for world in slave_ring:
+        radial = world - slave_center
+        result.append((radial.dot(source_u) / world_per_widget,
+                       radial.dot(source_v) / world_per_widget))
+    return result
 
 
 def get_bound_edit_target(target_obj, target_point_index, screen_x, screen_y, cx, cy, sf, alignment_angle, flip_h, max_dist=14.0):
