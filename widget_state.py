@@ -112,6 +112,8 @@ class HairPipeWidgetSettings(PropertyGroup):
     selected_verts: bpy.props.StringProperty(default="")
     bound_selected_verts: bpy.props.StringProperty(default="")
     multi_transform_initial: bpy.props.StringProperty(default="{}")
+    active_section_curve_name: bpy.props.StringProperty(default="")
+    active_section_point_index: IntProperty(default=-1)
     # Non-empty while the read-only overlay of a bound slave is being edited.
     bound_edit_curve_name: bpy.props.StringProperty(default="")
     bound_edit_point_index: IntProperty(default=-1)
@@ -862,6 +864,34 @@ def context_matches_widget_view(context, wd):
         return False
 
 
+def resolve_active_section(context):
+    obj = context.active_object
+    wd = getattr(context.window_manager, 'hair_pipe_widget', None)
+    if obj is None or obj.type != 'CURVE' or wd is None:
+        return None
+    name = getattr(wd, 'active_section_curve_name', '')
+    if not name:
+        name = getattr(wd, 'bound_edit_curve_name', '')
+    curve = bpy.data.objects.get(name) if name else obj
+    point_index = int(getattr(wd, 'active_section_point_index', -1))
+    if point_index < 0:
+        point_index = int(obj.hair_pipe_settings.active_point_index)
+    if curve is not obj and getattr(wd, 'bound_edit_point_index', -1) >= 0:
+        point_index = int(wd.bound_edit_point_index)
+    settings = getattr(curve, 'hair_pipe_settings', None)
+    if settings is None or not (0 <= point_index < len(settings.point_settings)):
+        return None
+    ps = settings.point_settings[point_index]
+    pipe = get_pipe_object_for_curve(curve)
+    if pipe is None:
+        return None
+    segments = len(ps.cross_section_verts)
+    ring_start = point_index * segments
+    if ring_start + segments > len(pipe.data.vertices):
+        return None
+    return curve, point_index, ps, pipe, ring_start, segments, curve is not obj
+
+
 def get_view3d_window_region(context):
     current_area = getattr(context, 'area', None)
     current_region = getattr(context, 'region', None)
@@ -1067,6 +1097,8 @@ def setup_widget(context):
     wd.widget_scale_factor = 0.0
     wd.fitted_point_index = -1
     wd.source_curve_name = obj.name
+    wd.active_section_curve_name = ''
+    wd.active_section_point_index = int(settings.active_point_index)
     wd.bound_edit_curve_name = ''
     wd.bound_edit_point_index = -1
     wd.active_section_layer = 0

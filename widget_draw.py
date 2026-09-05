@@ -13,7 +13,7 @@ from .ghost import update_all_ghost_vertices, update_ghost_vertices
 from .math_utils import catmull_rom_2d, get_cross_section_frame, safe_normalized
 from .widget_geometry import get_raw_offset, effective_to_widget, chaikin_closed, make_smooth_preview_lines, get_stable_widget_alignment, fit_widget_scale_to_cross_section
 from .widget_state import (get_selected_widget_verts, get_bound_selected_widget_verts,
-    get_current_selected_widget_verts,
+    get_current_selected_widget_verts, resolve_active_section,
     get_widget_source_curve, get_active_curve_point, redraw_view3d,
     get_curve_point_by_index, select_curve_point_by_index,
     proportional_edit_enabled, get_lasso_points, context_matches_widget_view)
@@ -708,6 +708,41 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
     gpu.state.blend_set('NONE')
 
 
+def get_active_section_nearest_vertex(context, source_obj, source_point_index, bound_obj=None, bound_point_index=-1, mouse_x=0.0, mouse_y=0.0, max_dist=16.0):
+    """Return (point index, profile vertex index) for the active 3D layer."""
+    curve_obj = bound_obj if bound_obj is not None else source_obj
+    point_index = int(bound_point_index if bound_obj is not None else source_point_index)
+    settings = getattr(curve_obj, 'hair_pipe_settings', None)
+    if settings is None or not (0 <= point_index < len(settings.point_settings)):
+        return -1, -1
+    ps = settings.point_settings[point_index]
+    segments = len(ps.cross_section_verts)
+    pipe_obj = get_pipe_object_for_curve(curve_obj)
+    region = context.region
+    region_data = context.region_data
+    if pipe_obj is None or region is None or region_data is None or segments < 3:
+        return -1, -1
+    vertices = list(pipe_obj.data.vertices)
+    # All current scene pipes are emitted control-ring by control-ring. Use
+    # the control-point ordinal instead of searching another curve's rings.
+    ring_start = point_index * segments
+    if ring_start + segments > len(vertices):
+        return -1, -1
+    best = (float(max_dist), -1)
+    for index, vertex in enumerate(vertices[ring_start:ring_start + segments]):
+        if getattr(ps.cross_section_verts[index], 'is_ghost', False):
+            continue
+        screen = view3d_utils.location_3d_to_region_2d(
+            region, region_data, pipe_obj.matrix_world @ vertex.co,
+        )
+        if screen is None:
+            continue
+        distance = math.hypot(mouse_x - screen.x, mouse_y - screen.y)
+        if distance < best[0]:
+            best = (distance, index)
+    return (point_index, best[1]) if best[1] >= 0 else (-1, -1)
+
+
 def get_bound_section_vertices_in_screen_rect(context, source_obj, source_point_index, bound_obj, bound_point_index, x0, y0, x1, y1):
     """Return vertex indices from the active bound ring in screen rectangle."""
     region = context.region
@@ -754,8 +789,13 @@ def get_active_section_vertices_in_screen_rect(context, x0, y0, x1, y1):
     obj = context.active_object
     if region is None or region_data is None or obj is None or obj.type != 'CURVE':
         return []
+    active = resolve_active_section(context)
+    if active is None:
+        return []
+    active_obj, point_idx, ps, pipe_obj, ring_start, segments, is_bound = active
+    if is_bound:
+        obj = active_obj
     settings = obj.hair_pipe_settings
-    point_idx = int(settings.active_point_index)
     if not (0 <= point_idx < len(settings.point_settings)):
         return []
     ps = settings.point_settings[point_idx]
@@ -764,15 +804,31 @@ def get_active_section_vertices_in_screen_rect(context, x0, y0, x1, y1):
     if pipe_obj is None or segments < 3:
         return []
     vertices = list(pipe_obj.data.vertices)
-    target = obj.matrix_world @ _curve_point_coordinate(obj, point_idx)
+    # The generator emits one ring per curve control point. Resolve the ring
+    # from the spline/point ordinal directly; do not infer it from the nearest
+    # center, which can jump to another section after a profile edit.
     best_start = None
-    best_dist = None
-    for start in range(0, len(vertices) - segments + 1, segments):
-        center = sum((pipe_obj.matrix_world @ v.co for v in vertices[start:start + segments]), Vector()) / segments
-        distance = (center - target).length_squared
-        if best_dist is None or distance < best_dist:
-            best_dist = distance
-            best_start = start
+    point_offset = 0
+    ring_offset = 0
+    for spline in obj.data.splines:
+        count = len(spline.bezier_points) if spline.type == 'BEZIER' else len(spline.points)
+        if point_offset <= point_idx < point_offset + count:
+            local_index = point_idx - point_offset
+            best_start = (ring_offset + local_index) * segments
+            break
+        point_offset += count
+        ring_offset += count if getattr(spline, 'use_cyclic_u', False) else max(0, count)
+    if best_start is None or best_start + segments > len(vertices):
+        # Compatibility fallback for old meshes with extra sampled rings.
+        target = obj.matrix_world @ _curve_point_coordinate(obj, point_idx)
+        best_start = None
+        best_dist = None
+        for start in range(0, len(vertices) - segments + 1, segments):
+            center = sum((pipe_obj.matrix_world @ v.co for v in vertices[start:start + segments]), Vector()) / segments
+            distance = (center - target).length_squared
+            if best_dist is None or distance < best_dist:
+                best_dist = distance
+                best_start = start
     if best_start is None:
         return []
     hits = []

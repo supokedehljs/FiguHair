@@ -282,6 +282,10 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             return {'RUNNING_MODAL'}
         return {'RUNNING_MODAL'}
 
+    active_section = resolve_active_section(context)
+    if active_section is None:
+        return {'RUNNING_MODAL'}
+
     if not wd.move_active and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.value == 'PRESS':
         if event.shift and not event.ctrl:
             sections = [(None, settings.active_point_index)]
@@ -302,10 +306,14 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 next_obj, next_point = sections[(current_index + step) % len(sections)]
                 if next_obj is None:
                     clear_bound_edit_selection(wd)
+                    wd.active_section_curve_name = ''
+                    wd.active_section_point_index = int(next_point)
                     settings.active_point_index = next_point
                 else:
                     wd.bound_edit_curve_name = next_obj.name
                     wd.bound_edit_point_index = int(next_point)
+                    wd.active_section_curve_name = next_obj.name
+                    wd.active_section_point_index = int(next_point)
                 wd.box_select_active = False
                 wd.left_drag_pending = False
                 wd.drag_vert_index = -1
@@ -359,6 +367,34 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             return {'RUNNING_MODAL'}
         if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
             if not wd.left_drag_started_inside_widget:
+                # A click in the 3D area is resolved on release. A drag has
+                # already switched to box_select_active above, so this path
+                # is only the non-moving point-selection case.
+                if getattr(wd, 'bound_edit_curve_name', ''):
+                    active_bound = bpy.data.objects.get(wd.bound_edit_curve_name)
+                    point_idx, ring_idx = get_active_section_nearest_vertex(
+                        context, obj, settings.active_point_index, active_bound,
+                        int(wd.bound_edit_point_index), mx, my,
+                    )
+                else:
+                    point_idx, ring_idx = get_active_section_nearest_vertex(
+                        context, obj, settings.active_point_index,
+                        mouse_x=mx, mouse_y=my,
+                    )
+                if point_idx >= 0 and ring_idx >= 0:
+                    if getattr(wd, 'bound_edit_curve_name', ''):
+                        active_bound = bpy.data.objects.get(wd.bound_edit_curve_name)
+                        bound_idx = int(wd.bound_edit_point_index)
+                        if active_bound is not None:
+                            active_bound.hair_pipe_settings.point_settings[bound_idx].active_vert_index = ring_idx
+                        set_bound_selected_widget_verts(wd, {ring_idx}, active_bound, bound_idx)
+                    else:
+                        settings.active_point_index = point_idx
+                        select_curve_point_by_index(obj, point_idx)
+                        settings.point_settings[point_idx].active_vert_index = ring_idx
+                        set_selected_widget_verts(wd, {ring_idx})
+                elif not event.shift:
+                    set_current_selected_widget_verts(wd, set())
                 wd.left_drag_pending = False
                 wd.left_drag_vert_index = -1
                 redraw_view3d(context)
@@ -624,6 +660,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                         active_hits = hits_by_point[target_point_idx]
                         target_ps.active_vert_index = min(active_hits)
                         selected = set(active_hits)
+                        set_selected_widget_verts(wd, selected)
                 else:
                     selected = set()
             else:
@@ -785,29 +822,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             wd.left_drag_started_inside_widget = False
             wd.left_drag_vert_index = -1
             wd.drag_vert_index = -1
-            if point_idx >= 0 and ring_idx >= 0:
-                settings.active_point_index = point_idx
-                select_curve_point_by_index(obj, point_idx)
-                target_ps = settings.point_settings[point_idx]
-                target_ps.active_vert_index = ring_idx
-                if event.shift and point_idx == settings.active_point_index:
-                    sel = get_current_selected_widget_verts(wd)
-                    if ring_idx in sel:
-                        sel.discard(ring_idx)
-                    else:
-                        sel.add(ring_idx)
-                    set_current_selected_widget_verts(wd, sel)
-                else:
-                    set_current_selected_widget_verts(wd, {ring_idx})
-                wd.left_drag_vert_index = ring_idx
-                wd.drag_vert_index = ring_idx
-                redraw_view3d(context)
-                return {'RUNNING_MODAL'}
-
-            if not event.shift:
-                set_current_selected_widget_verts(wd, set())
-                ps.active_vert_index = -1
-                redraw_view3d(context)
+            # Do not resolve a 3D point on press. Keeping the press pending
+            # guarantees that the same gesture can become a box selection.
+            # A click is resolved on release in the pending branch above.
             return {'RUNNING_MODAL'}
 
         if not inside_widget:
