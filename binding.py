@@ -414,6 +414,10 @@ def align_binding_ring_planes(slave_obj):
         rotation = math.radians(float(data.get('profile_rotation', 0.0)))
         cos_r = math.cos(rotation)
         sin_r = math.sin(rotation)
+        # Do not recenter or redistribute the profile here. Re-centering would
+        # move every untouched vertex in the opposite direction whenever one
+        # vertex is edited. The target control point already owns the ring
+        # center; profile coordinates must be passed through independently.
         # Locate the corresponding ring again by comparing its world center.
         # The slave ring only identifies which ring to rewrite; it never
         # supplies orientation axes.
@@ -574,28 +578,21 @@ def get_bound_section_display_offsets(target_obj, target_point_index, slave_obj,
     slave_ps = _point_setting(slave_obj, int(slave_point_index))
     if source_ps is None or slave_ps is None:
         return []
-    source_ring = _nearest_pipe_ring(
-        get_pipe_object_for_curve(target_obj),
-        target_obj, int(target_point_index), len(source_ps.cross_section_verts),
-    )
-    slave_ring = _nearest_pipe_ring(
-        get_pipe_object_for_curve(slave_obj),
-        slave_obj, int(slave_point_index), len(slave_ps.cross_section_verts),
-    )
     data = _find_binding_record(
         target_obj, target_point_index, slave_obj, slave_point_index,
     )
     basis = _stored_binding_plane(data) if data is not None else None
-    if not slave_ring or basis is None:
+    if basis is None:
         return []
-    _stored_center, source_u, source_v, _normal = basis
-    slave_center = sum(slave_ring, Vector()) / len(slave_ring)
-    # Project through the immutable binding axes. Never derive widget axes
-    # from B's edited polygon vertices; moving one shape point must not rotate
-    # A's overlay or change which vertex the hit-test selects.
+    # Keep the editor's coordinates object-local and stable. Do not derive a
+    # display center from the generated ring: that would move all untouched
+    # 2D points when only one profile vertex is edited.
+    _center, _source_u, _source_v, _normal = basis
+    scale_ratio = float(data.get('scale_ratio', 1.0)) if data else 1.0
     return [
-        ((world - slave_center).dot(source_u), (world - slave_center).dot(source_v))
-        for world in slave_ring
+        (float(vertex.offset_x) * scale_ratio,
+         float(vertex.offset_y) * scale_ratio)
+        for vertex in slave_ps.cross_section_verts
     ]
 
 
