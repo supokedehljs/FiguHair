@@ -708,6 +708,92 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
     gpu.state.blend_set('NONE')
 
 
+def get_bound_section_vertices_in_screen_rect(context, source_obj, source_point_index, bound_obj, bound_point_index, x0, y0, x1, y1):
+    """Return vertex indices from the active bound ring in screen rectangle."""
+    region = context.region
+    region_data = context.region_data
+    ps = bound_obj.hair_pipe_settings.point_settings[int(bound_point_index)]
+    pipe_obj = get_pipe_object_for_curve(bound_obj)
+    if region is None or region_data is None or pipe_obj is None:
+        return []
+    segments = len(ps.cross_section_verts)
+    if segments < 3:
+        return []
+    vertices = list(pipe_obj.data.vertices)
+    source_data = get_curve_points_data(source_obj)
+    bound_data = get_curve_points_data(bound_obj)
+    source_points = [p for spline in source_data for p in spline.get('points', [])]
+    bound_points = [p for spline in bound_data for p in spline.get('points', [])]
+    if not (0 <= int(bound_point_index) < len(bound_points)):
+        return []
+    bound_point = bound_obj.matrix_world @ bound_points[int(bound_point_index)]['co']
+    best_start = None
+    best_dist = None
+    for start in range(0, len(vertices) - segments + 1, segments):
+        center = sum((pipe_obj.matrix_world @ v.co for v in vertices[start:start + segments]), Vector()) / segments
+        dist = (center - bound_point).length_squared
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best_start = start
+    if best_start is None:
+        return []
+    hits = []
+    for index, vertex in enumerate(vertices[best_start:best_start + segments]):
+        if getattr(ps.cross_section_verts[index], 'is_ghost', False):
+            continue
+        screen = view3d_utils.location_3d_to_region_2d(region, region_data, pipe_obj.matrix_world @ vertex.co)
+        if screen is not None and x0 <= screen.x <= x1 and y0 <= screen.y <= y1:
+            hits.append(index)
+    return hits
+
+
+def get_active_section_vertices_in_screen_rect(context, x0, y0, x1, y1):
+    """Hit-test only the currently active source profile ring in 3D."""
+    region = context.region
+    region_data = context.region_data
+    obj = context.active_object
+    if region is None or region_data is None or obj is None or obj.type != 'CURVE':
+        return []
+    settings = obj.hair_pipe_settings
+    point_idx = int(settings.active_point_index)
+    if not (0 <= point_idx < len(settings.point_settings)):
+        return []
+    ps = settings.point_settings[point_idx]
+    segments = len(ps.cross_section_verts)
+    pipe_obj = get_pipe_object_for_curve(obj)
+    if pipe_obj is None or segments < 3:
+        return []
+    vertices = list(pipe_obj.data.vertices)
+    target = obj.matrix_world @ _curve_point_coordinate(obj, point_idx)
+    best_start = None
+    best_dist = None
+    for start in range(0, len(vertices) - segments + 1, segments):
+        center = sum((pipe_obj.matrix_world @ v.co for v in vertices[start:start + segments]), Vector()) / segments
+        distance = (center - target).length_squared
+        if best_dist is None or distance < best_dist:
+            best_dist = distance
+            best_start = start
+    if best_start is None:
+        return []
+    hits = []
+    for index, vertex in enumerate(vertices[best_start:best_start + segments]):
+        if getattr(ps.cross_section_verts[index], 'is_ghost', False):
+            continue
+        screen = view3d_utils.location_3d_to_region_2d(region, region_data, pipe_obj.matrix_world @ vertex.co)
+        if screen is not None and x0 <= screen.x <= x1 and y0 <= screen.y <= y1:
+            hits.append((point_idx, index))
+    return hits
+
+
+def _curve_point_coordinate(curve_obj, index):
+    points = []
+    for spline in curve_obj.data.splines:
+        source = spline.bezier_points if spline.type == 'BEZIER' else spline.points
+        points.extend(source)
+    point = points[int(index)]
+    return Vector(point.co[:3]) if hasattr(point.co, '__getitem__') else Vector(point.co)
+
+
 def get_pipe_control_vertices_in_screen_rect(context, x0, y0, x1, y1, spline_filter=None):
     region = context.region
     region_data = context.region_data
@@ -990,9 +1076,16 @@ def draw_widget_callback():
                 section_settings.point_settings[highlight_idx],
                 section_obj,
                 highlight_idx,
+                is_active=(
+                    not getattr(wd, 'bound_edit_curve_name', '')
+                    and section_obj == obj
+                    and highlight_idx == settings.active_point_index
+                ),
                 selection_indices=(
                     get_selected_widget_verts(wd)
-                    if section_obj == obj and highlight_idx == settings.active_point_index
+                    if not getattr(wd, 'bound_edit_curve_name', '')
+                    and section_obj == obj
+                    and highlight_idx == settings.active_point_index
                     else set()
                 ),
             )

@@ -588,62 +588,66 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             bx1 = max(wd.box_x0, wd.box_x1)
             by1 = max(wd.box_y0, wd.box_y1)
             if wd.box_select_3d:
-                hits = get_pipe_control_vertices_in_screen_rect(context, bx0, by0, bx1, by1)
+                if getattr(wd, 'bound_edit_curve_name', ''):
+                    active_bound = bpy.data.objects.get(wd.bound_edit_curve_name)
+                    bound_hits = get_bound_section_vertices_in_screen_rect(
+                        context, obj, settings.active_point_index,
+                        active_bound, int(wd.bound_edit_point_index),
+                        bx0, by0, bx1, by1,
+                    ) if active_bound is not None else []
+                    hits = [(int(wd.bound_edit_point_index), idx) for idx in bound_hits]
+                else:
+                    hits = get_active_section_vertices_in_screen_rect(
+                        context, bx0, by0, bx1, by1,
+                    )
                 if hits:
                     hits_by_point = {}
                     for point_idx, vert_idx in hits:
                         hits_by_point.setdefault(point_idx, set()).add(vert_idx)
-                    target_point_idx = settings.active_point_index
-                    if target_point_idx not in hits_by_point:
-                        target_point_idx = next(iter(hits_by_point))
-                    settings.active_point_index = target_point_idx
-                    select_curve_point_by_index(obj, target_point_idx)
-                    target_ps = settings.point_settings[target_point_idx]
-                    active_hits = hits_by_point[target_point_idx]
-                    target_ps.active_vert_index = min(active_hits)
-                    selected = set(active_hits)
+                    if getattr(wd, 'bound_edit_curve_name', ''):
+                        # Bound 3D hits are indices in the bound profile, not
+                        # source-curve point indices. Never switch the source
+                        # active point when editing a bound section.
+                        active_bound = bpy.data.objects.get(wd.bound_edit_curve_name)
+                        bound_idx = int(wd.bound_edit_point_index)
+                        if active_bound is not None and 0 <= bound_idx < len(active_bound.hair_pipe_settings.point_settings):
+                            active_bound.hair_pipe_settings.point_settings[bound_idx].active_vert_index = min(hits_by_point.get(bound_idx, set()) or {0})
+                        selected = set(hits_by_point.get(bound_idx, set()))
+                        set_bound_selected_widget_verts(wd, selected, active_bound, bound_idx)
+                    else:
+                        target_point_idx = settings.active_point_index
+                        if target_point_idx not in hits_by_point:
+                            target_point_idx = next(iter(hits_by_point))
+                        settings.active_point_index = target_point_idx
+                        select_curve_point_by_index(obj, target_point_idx)
+                        target_ps = settings.point_settings[target_point_idx]
+                        active_hits = hits_by_point[target_point_idx]
+                        target_ps.active_vert_index = min(active_hits)
+                        selected = set(active_hits)
                 else:
                     selected = set()
             else:
-                # Box-select both visible section layers independently. The
-                # selection identity includes the section; equal vertex
-                # numbers in source/child rings must never alias each other.
-                main_selected = set()
-                bound_selected = set()
-                for i, vertex in enumerate(settings.point_settings[settings.active_point_index].cross_section_verts):
-                    ox, oy = get_raw_offset(vertex)
-                    px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
-                    if bx0 <= px <= bx1 and by0 <= py <= by1:
-                        main_selected.add(i)
-                for child_obj, child_idx, child_ps in get_bound_sections_for_target(
-                    obj, settings.active_point_index
-                ):
+                selected = set()
+                if getattr(wd, 'bound_edit_curve_name', ''):
+                    active_bound_obj = bpy.data.objects.get(wd.bound_edit_curve_name)
                     offsets = get_bound_section_display_offsets(
-                        obj, settings.active_point_index, child_obj, child_idx,
-                    )
+                        obj, settings.active_point_index, active_bound_obj,
+                        int(getattr(wd, 'bound_edit_point_index', -1)),
+                    ) if active_bound_obj is not None else []
                     for i, (ox, oy) in enumerate(offsets):
                         px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
                         if bx0 <= px <= bx1 and by0 <= py <= by1:
-                            bound_selected.add(i)
+                            selected.add(i)
+                else:
+                    for i, vertex in enumerate(verts):
+                        ox, oy = get_raw_offset(vertex)
+                        px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
+                        if bx0 <= px <= bx1 and by0 <= py <= by1:
+                            selected.add(i)
                 if event.shift:
-                    main_selected |= get_selected_widget_verts(wd)
-                    for existing_obj, existing_idx, _existing_ps in get_bound_sections_for_target(
-                        obj, settings.active_point_index
-                    ):
-                        bound_selected |= get_bound_selected_widget_verts(
-                            wd, existing_obj, existing_idx,
-                        )
-                set_selected_widget_verts(wd, main_selected)
-                for child_obj, child_idx, _child_ps in get_bound_sections_for_target(
-                    obj, settings.active_point_index
-                ):
-                    set_bound_selected_widget_verts(
-                        wd, bound_selected, child_obj, child_idx,
-                    )
-                selected = get_current_selected_widget_verts(wd)
-            if wd.box_select_3d:
+                    selected |= get_current_selected_widget_verts(wd)
                 set_current_selected_widget_verts(wd, selected)
-            if wd.box_select_3d and hits:
+            if wd.box_select_3d and not getattr(wd, 'bound_edit_curve_name', '') and hits:
                 for point_idx, point_hits in hits_by_point.items():
                     if point_idx < len(settings.point_settings) and point_hits:
                         settings.point_settings[point_idx].active_vert_index = min(point_hits)
@@ -822,8 +826,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                 candidates = []
                 for index, (ox, oy) in enumerate(display_offsets):
                     px, py = effective_to_widget(ox, oy, cx, cy, sf, alignment_angle, flip_h)
-                    candidates.append(((px - mx) ** 2 + (py - my) ** 2, index))
-                closest_idx = min(candidates)[1] if candidates else -1
+                    distance = (px - mx) ** 2 + (py - my) ** 2
+                    candidates.append((distance, index))
+                closest_idx = min(candidates)[1] if candidates and min(candidates)[0] <= 100.0 else -1
             else:
                 closest_idx = find_nearest_raw_vertex(verts, mx, my, cx, cy, sf, alignment_angle, flip_h)
             wd.left_drag_pending = True
