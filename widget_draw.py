@@ -121,7 +121,7 @@ def draw_circle_outline(shader, points, color, radius, segments=24, line_width=1
 
 def draw_single_cross_section(shader, verts, ps, settings,
                                panel_cx, panel_cy, panel_sf, alignment_angle,
-                               flip_h, panel_half, is_active, wd=None, selection_indices=None):
+                               flip_h, panel_half, is_active, wd=None, selection_indices=None, hollow_indices=None):
     """Draw one cross-section panel using raw offsets (uniform size)."""
     n = len(verts)
     if n < 3:
@@ -166,14 +166,19 @@ def draw_single_cross_section(shader, verts, ps, settings,
         shader.uniform_float("color", (0.45, 0.65, 1.0, 0.82 * alpha_mult))
         batch.draw(shader)
 
+    hollow_set = set(hollow_indices or ())
     normal_pts = []
-    for v in verts:
+    hollow_pts = []
+    for index, v in enumerate(verts):
         if getattr(v, 'is_ghost', False):
             continue
         ox, oy = get_raw_offset(v)
-        normal_pts.append(effective_to_widget(ox, oy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h))
+        point = effective_to_widget(ox, oy, panel_cx, panel_cy, panel_sf, alignment_angle, flip_h)
+        (hollow_pts if index in hollow_set else normal_pts).append(point)
     if normal_pts:
         draw_circle_points(shader, normal_pts, (1.0, 1.0, 1.0, 0.9 * alpha_mult), 5.0 if is_active else 4.0)
+    for point in hollow_pts:
+        draw_hollow_snap_marker(shader, point, (0.72, 0.82, 0.9, 0.95), 7.0, segments=24)
 
     if is_active:
         if wd is not None:
@@ -1240,10 +1245,12 @@ def draw_widget_callback():
         (0.18, 0.18, 0.18, 0.88),
         (0.0, 0.0, 0.0, 0.45),
     )
+    current_binding = get_curve_binding(obj) or {}
+    current_snaps = current_binding.get('vertex_snaps', {})
     draw_single_cross_section(
         shader, verts, ps, settings, cx, cy, sf, alignment_angle, flip_h,
-        half, not bool(getattr(wd, 'bound_edit_curve_name', '')), wd,
-        get_selected_widget_verts(wd) if not getattr(wd, 'bound_edit_curve_name', '') else set(),
+        half, True, wd, get_selected_widget_verts(wd),
+        hollow_indices={int(i) for i in current_snaps.keys()},
     )
 
     # Read-only slave profiles controlled by this target. Profiles remain
@@ -1270,6 +1277,9 @@ def draw_widget_callback():
                 getattr(wd, 'bound_edit_curve_name', '') == _slave_obj.name
                 and int(getattr(wd, 'bound_edit_point_index', -1)) == int(_slave_idx),
                 wd, get_bound_selected_widget_verts(wd, _slave_obj, _slave_idx),
+                hollow_indices=(
+                    {int(i) for i in (get_curve_binding(_slave_obj) or {}).get('vertex_snaps', {}).keys()}
+                ),
             )
 
     if proportional_edit_enabled(context) and wd.move_active:

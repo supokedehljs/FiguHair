@@ -458,27 +458,6 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type == 'MOUSEMOVE':
-            if getattr(wd, 'snap_bound_points', False) and sel:
-                # Resolve snapping from the actual editable curve. Legacy
-                # bound_edit_* state is only a display reference and may be
-                # empty when the slave curve itself is active.
-                active_bound = obj
-                binding = get_curve_binding(active_bound)
-                if binding:
-                    source_obj = bpy.data.objects.get(binding.get('source_curve', ''))
-                    bound_idx = int(binding.get('slave_point', settings.active_point_index))
-                    source_idx = int(binding.get('source_point', settings.active_point_index))
-                    if source_obj is not None:
-                        for slave_vertex in sel:
-                            world = get_bound_vertex_world(active_bound, bound_idx, slave_vertex)
-                            if world is None:
-                                continue
-                            source_vertex, target_world = find_nearest_source_vertex_world(
-                                source_obj, source_idx, world,
-                            )
-                            if source_vertex >= 0 and target_world is not None and (target_world - world).length <= wd.snap_distance:
-                                set_binding_vertex_snap(active_bound, bound_idx, slave_vertex, source_vertex, enabled=True)
-                                set_bound_vertex_world(active_bound, bound_idx, slave_vertex, target_world)
             dx, dy = widget_to_effective(mx, my, cx, cy, sf, alignment_angle, flip_h)
             sx, sy = widget_to_effective(wd.move_start_x, wd.move_start_y, cx, cy, sf, alignment_angle, flip_h)
             delta_x = dx - sx
@@ -493,6 +472,29 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
                         verts[vi].offset_x = initial_offset[0] + delta_x * weight
                         verts[vi].offset_y = initial_offset[1] + delta_y * weight
                 update_ghost_vertices(ps)
+            # Snap is one-way: only a curve that owns a binding record (the
+            # slave) may attach its profile vertices to the source.
+            binding = get_curve_binding(obj) if getattr(wd, 'snap_bound_points', False) else None
+            if binding and sel:
+                source_obj = bpy.data.objects.get(binding.get('source_curve', ''))
+                source_idx = int(binding.get('source_point', -1))
+                bound_idx = int(binding.get('slave_point', settings.active_point_index))
+                if source_obj is not None:
+                    current_map = binding.get('vertex_snaps', {})
+                    for slave_vertex in sel:
+                        world = get_bound_vertex_world(obj, bound_idx, slave_vertex)
+                        if world is None:
+                            continue
+                        source_vertex, target_world = find_nearest_source_vertex_world(source_obj, source_idx, world)
+                        if source_vertex < 0 or target_world is None:
+                            continue
+                        limit = wd.snap_distance * (2.0 if str(slave_vertex) in current_map else 1.0)
+                        if (target_world - world).length <= limit:
+                            if str(slave_vertex) not in current_map or int(current_map.get(str(slave_vertex), -1)) != source_vertex:
+                                set_binding_vertex_snap(obj, bound_idx, slave_vertex, source_vertex, enabled=True)
+                            set_bound_vertex_world(obj, bound_idx, slave_vertex, target_world)
+                        elif str(slave_vertex) in current_map:
+                            set_binding_vertex_snap(obj, bound_idx, slave_vertex, source_vertex, enabled=False)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type == 'LEFTMOUSE' and ((wd.left_drag_active and event.value == 'RELEASE') or (not wd.left_drag_active and event.value == 'PRESS')):
