@@ -21,7 +21,7 @@ from .widget_cache import get_cached_pipe_mesh
 from .pipe_generation import generate_pipe_mesh
 from .transition import is_transition_point
 from .roll_diagnostics import get_uncontrolled_roll_diagnostics
-from .binding import get_bound_sections_for_target, get_bound_section_display_offsets, get_bound_vertex_world
+from .binding import get_bound_sections_for_target, get_bound_section_display_offsets, get_bound_vertex_world, get_binding_source_curve, get_curve_binding
 
 _draw_handle = None
 
@@ -695,10 +695,10 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
 
         is_active_ring = point_idx == active_idx
         if lines:
-            gpu.state.line_width_set(1.65 if is_active_ring else 1.3)
+            gpu.state.line_width_set(2.2 if not is_active else (1.65 if is_active_ring else 1.3))
             batch = batch_for_shader(shader, 'LINES', {"pos": lines})
             shader.bind()
-            shader.uniform_float("color", (1.0, 0.55, 0.0, inactive_alpha) if is_active else (1.0, 0.78, 0.05, 0.78 * inactive_alpha))
+            shader.uniform_float("color", (1.0, 0.55, 0.0, inactive_alpha) if is_active else (0.78, 0.82, 0.88, 0.58 * inactive_alpha))
             batch.draw(shader)
 
         point_setting = obj.hair_pipe_settings.point_settings[point_idx] if point_idx < len(obj.hair_pipe_settings.point_settings) else ps
@@ -716,7 +716,7 @@ def draw_active_pipe_cross_section_ring(context, ps, curve_obj=None, point_idx=N
             else:
                 normal_points.append(point)
         if normal_points:
-            normal_color = (1.0, 1.0, 1.0, 0.92 * inactive_alpha) if is_active else (1.0, 0.78, 0.05, 0.72 * inactive_alpha)
+            normal_color = (1.0, 1.0, 1.0, 0.92 * inactive_alpha) if is_active else (0.78, 0.82, 0.88, 0.62 * inactive_alpha)
             draw_circle_points(shader, normal_points, normal_color, 3.4 if is_active_ring else 3.0, segments=18)
         if selected_points:
             draw_circle_points(shader, selected_points, (1.0, 0.5, 0.0, 1.0), 4.2, segments=18)
@@ -1166,6 +1166,18 @@ def draw_widget_callback():
                 ),
             )
             drawn_sections.add((section_obj.as_pointer(), int(highlight_idx)))
+
+    # If the active curve is a bound child, also draw its source section as
+    # a non-interactive highlighted reference.
+    source_curve = get_binding_source_curve(obj)
+    if source_curve is not None:
+        source_data = get_curve_binding(obj) or {}
+        source_idx = int(source_data.get('source_point', -1))
+        if 0 <= source_idx < len(source_curve.hair_pipe_settings.point_settings):
+            draw_active_pipe_cross_section_ring(
+                context, source_curve.hair_pipe_settings.point_settings[source_idx],
+                source_curve, source_idx, selection_indices=set(), is_active=False,
+            )
 
     # Also draw every bound child ring in the 3D view, even when the child
     # curve itself is not selected. This uses the same generated mesh-ring

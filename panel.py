@@ -121,12 +121,10 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         auto_update_row.enabled = edit_mode
         auto_update_row.prop(settings, "auto_update", text="编辑模式操作", icon='EDITMODE_HLT', emboss=False)
 
-        bound_slave = edit_mode and is_bound_slave_point(curve_obj, settings.active_point_index)
+        bound_slave = False
         edit_controls_enabled = (
-            edit_mode and settings.auto_update and len(settings.point_settings) > 0 and not bound_slave
+            edit_mode and settings.auto_update and len(settings.point_settings) > 0
         )
-        if bound_slave:
-            layout.label(text="当前横截面由另一条头发控制", icon='CONSTRAINT')
         active_idx = min(settings.active_point_index, len(settings.point_settings) - 1) if settings.point_settings else -1
         active_ps = settings.point_settings[active_idx] if active_idx >= 0 else None
         widget_data = getattr(context.window_manager, "hair_pipe_widget", None)
@@ -162,8 +160,9 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         slider_controls.prop(settings, "neighbor_smooth_slider", text="普通平滑", icon='MOD_SMOOTH', slider=True)
         slider_controls.prop(settings, "circular_smooth_slider", text="圆形平滑", icon='MESH_CIRCLE', slider=True)
 
-        # A bound cross-section follows the target point and is intentionally
-        # read-only on the slave curve; keep both pipes as separate meshes.
+        # Bound cross-sections remain independently editable. The binding
+        # controls spatial following/highlight only; it does not make either
+        # curve's own profile read-only.
         bind_row = controls.row(align=True)
         bind_row.operator("hair_pipe.bind_cross_curve", text="绑定跨头发截面", icon='CONSTRAINT')
         bind_row.operator("hair_pipe.unbind_cross_curve", text="解除绑定", icon='UNLINKED')

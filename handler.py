@@ -11,7 +11,7 @@ from .hair_lifecycle import (
 from .pipe_generation import generate_pipe_mesh
 from .point_data import sync_point_settings, sync_active_point_from_selection
 from .widget_cache import invalidate_pipe_mesh_cache
-from .binding import apply_all_bindings, align_binding_ring_planes, repair_all_binding_planes
+from .binding import apply_all_bindings, apply_bound_frames_to_generated_vertices, align_binding_ring_planes, repair_all_binding_planes
 def _clear_all_existing_crease_once():
     try:
         from .pipe_ops import clear_boulder_crease
@@ -43,6 +43,30 @@ _last_visibility_sync_time = 0.0
 _pending_rebuilds = set()
 _REBUILD_TIMER_INTERVAL = 0.025
 _last_rebuild_queue_time = 0.0
+_active_edit_signature = None
+
+
+def _curve_edit_signature(curve_obj):
+    """Cheap fingerprint for Curve Edit Mode changes.
+
+    Blender may omit depsgraph notifications for some edit drags, so the
+    active curve is checked every timer tick. The fingerprint prevents that
+    fallback check from rebuilding the mesh when nothing actually changed.
+    """
+    try:
+        values = []
+        for spline in curve_obj.data.splines:
+            points = spline.bezier_points if spline.type == 'BEZIER' else spline.points
+            for point in points:
+                co = point.co
+                values.extend((round(float(co.x), 7), round(float(co.y), 7), round(float(co.z), 7)))
+                if spline.type == 'BEZIER':
+                    for handle_name in ('handle_left', 'handle_right'):
+                        handle = getattr(point, handle_name)
+                        values.extend((round(float(handle.x), 7), round(float(handle.y), 7), round(float(handle.z), 7)))
+        return tuple(values)
+    except (AttributeError, RuntimeError, ReferenceError):
+        return None
 
 
 def update_mesh_data_in_place(mesh, verts, faces, smooth_shading):
@@ -144,6 +168,7 @@ def rebuild_existing_pipe(curve_obj, fast=False):
         if verts is None:
             return
         verts = generated_pipe_vertices(verts, curve_obj)
+        verts = apply_bound_frames_to_generated_vertices(curve_obj, verts)
 
         update_mesh_data_in_place(pipe_obj.data, verts, faces, settings.smooth_shading)
         curve_obj['hair_pipe_mesh_revision'] = int(curve_obj.get('hair_pipe_mesh_revision', 0)) + 1
@@ -231,51 +256,59 @@ def update_pipe_callback(scene):
 
 
 def rebuild_queue_timer():
-    """Rebuild the active edit curve quickly, then drain other changed curves."""
-    global _last_rebuild_queue_time
-    # Apply source-driven bindings and rebuild each changed slave immediately.
-    # Queuing only the curve data was not enough in multi-object Edit Mode:
-    # Blender could postpone the slave object's mesh depsgraph update until it
-    # was clicked. Rebuilding here makes the preview follow the target at once.
-    bound_changed = apply_all_bindings()
-    for bound_curve in bound_changed:
-        _pending_rebuilds.discard(bound_curve.name)
-        rebuild_existing_pipe(bound_curve, fast=True)
-        align_binding_ring_planes(bound_curve)
-        invalidate_pipe_mesh_cache(bound_curve)
-    if not _pending_rebuilds:
-        if bound_changed:
-            screen = getattr(bpy.context, 'screen', None)
-            if screen is not None:
-                for area in screen.areas:
-                    if area.type == 'VIEW_3D':
-                        area.tag_redraw()
-        return _REBUILD_TIMER_INTERVAL
+    """Rebuild each changed curve once, then apply bindings once.
 
-    # During a drag, the active curve is the only object that must be updated
-    # immediately. Processing it first removes the visible 80 ms "step" effect.
+    The old order applied bindings before rebuilding the edited curve and then
+    aligned the same slave again. That produced two alternating ring states
+    during every mouse move. Keep the write order deterministic.
+    """
+    global _last_rebuild_queue_time
+    global _active_edit_signature
+    rebuilt = []
     active = getattr(bpy.context, 'active_object', None)
     active_name = getattr(active, 'name', None)
-    name = active_name if active_name in _pending_rebuilds else _pending_rebuilds.pop()
-    _pending_rebuilds.discard(name)
-    curve_obj = bpy.data.objects.get(name)
-    if curve_obj is not None and curve_obj.type == 'CURVE':
+
+    # Blender does not reliably emit an object/data depsgraph update for
+    # every Curve Edit Mode drag. Always service the active edit curve as well
+    # as the queued set, otherwise the curve can appear disconnected from its
+    # generated mesh.
+    names = []
+    if active is not None and active.type == 'CURVE' and is_curve_edit_mode(active):
+        if bool(getattr(active.hair_pipe_settings, 'auto_update', True)):
+            signature = _curve_edit_signature(active)
+            if signature != _active_edit_signature:
+                names.append(active_name)
+                _active_edit_signature = signature
+    names.extend(name for name in _pending_rebuilds if name not in names)
+    for name in names:
+        _pending_rebuilds.discard(name)
+        curve_obj = bpy.data.objects.get(name)
+        if curve_obj is None or curve_obj.type != 'CURVE':
+            continue
         editing = is_curve_edit_mode(curve_obj)
         if editing:
-            # Curve coordinates are already supplied by the depsgraph. Avoid
-            # the expensive edit-mode sync on every mouse-move update.
             sync_active_point_from_selection(curve_obj)
         rebuild_existing_pipe(curve_obj, fast=editing)
-        from .binding import align_bound_dependents
-        align_binding_ring_planes(curve_obj)
-        align_bound_dependents(curve_obj)
+        rebuilt.append(curve_obj)
+
+    # Only after source geometry is current may dependent curves be updated.
+    bound_changed = apply_all_bindings()
+    for bound_curve in bound_changed:
+        if bound_curve not in rebuilt:
+            rebuild_existing_pipe(bound_curve, fast=True)
+            rebuilt.append(bound_curve)
+        invalidate_pipe_mesh_cache(bound_curve)
+
+    for curve_obj in rebuilt:
+        invalidate_pipe_mesh_cache(curve_obj)
+
+    if rebuilt:
         _last_rebuild_queue_time = time.perf_counter()
-        if editing:
-            screen = getattr(bpy.context, 'screen', None)
-            if screen is not None:
-                for area in screen.areas:
-                    if area.type == 'VIEW_3D':
-                        area.tag_redraw()
+        screen = getattr(bpy.context, 'screen', None)
+        if screen is not None:
+            for area in screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
     return _REBUILD_TIMER_INTERVAL
 
 

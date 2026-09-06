@@ -65,7 +65,7 @@ def get_bound_vertex_world(slave_obj, slave_point_index, slave_vertex_index):
         return None
     _, u, v, _ = basis
     scale = float(ps.scale)
-    rotation = math.radians(float(data.get('profile_rotation', 0.0)))
+    rotation = math.radians(float(ps.rotation))
     raw_x = float(ps.cross_section_verts[int(slave_vertex_index)].offset_x) * scale
     raw_y = float(ps.cross_section_verts[int(slave_vertex_index)].offset_y) * scale
     cos_r = math.cos(rotation)
@@ -87,7 +87,7 @@ def set_bound_vertex_world(slave_obj, slave_point_index, slave_vertex_index, wor
         return False
     _, u, v, _ = basis
     scale = max(1.0e-8, float(ps.scale))
-    rotation = math.radians(float(data.get('profile_rotation', 0.0)))
+    rotation = math.radians(float(ps.rotation))
     radial = Vector(world_position) - center
     x = radial.dot(u)
     y = radial.dot(v)
@@ -349,21 +349,10 @@ def _apply_binding_record(slave_obj, data):
 
     source_ps = _point_setting(source, source_index)
     slave_ps = _point_setting(slave_obj, slave_index)
+    # Binding controls the slave control-point position only. The slave
+    # profile remains independently editable: never overwrite its scale or
+    # rotation during depsgraph/timer updates.
     settings_changed = False
-    if source_ps is not None and slave_ps is not None:
-        source_scale = max(1.0e-6, float(source_ps.scale))
-        scale_ratio = float(data.get('scale_ratio', 1.0))
-        new_scale = source_scale * scale_ratio
-        # The target section owns the orientation. Do not add the old
-        # per-binding rotation offset: it made the 2D overlay disagree with
-        # the generated 3D ring whenever the two curves had different values.
-        new_rotation = float(data.get('slave_rotation', slave_ps.rotation))
-        settings_changed = settings_changed or (
-            abs(float(slave_ps.scale) - new_scale) > 1.0e-9 or
-            abs(float(slave_ps.rotation) - new_rotation) > 1.0e-7
-        )
-        slave_ps.scale = new_scale
-        slave_ps.rotation = new_rotation
     if not (position_changed or settings_changed):
         return False
     if position_changed or settings_changed:
@@ -469,6 +458,66 @@ def _orthogonal_ring_basis(ring):
     return center, u, v, normal
 
 
+def apply_bound_frames_to_generated_vertices(curve_obj, verts):
+    """Apply bound section frames before a mesh is written.
+
+    This is the single binding write path used by mesh generation. It keeps
+    the slave profile/scale/rotation independent while taking only the bound
+    section center and plane from its source curve.
+    """
+    if curve_obj is None or curve_obj.type != 'CURVE' or not verts:
+        return verts
+    pipe_obj = get_pipe_object_for_curve(curve_obj)
+    if pipe_obj is None:
+        return verts
+    inverse_pipe = pipe_obj.matrix_world.inverted_safe()
+    for data in _get_bindings(curve_obj):
+        source = bpy.data.objects.get(data.get('source_curve', ''))
+        if source is None:
+            continue
+        source_index = int(data.get('source_point', -1))
+        slave_index = int(data.get('slave_point', -1))
+        source_ps = _point_setting(source, source_index)
+        slave_ps = _point_setting(curve_obj, slave_index)
+        if source_ps is None or slave_ps is None:
+            continue
+        source_pipe = get_pipe_object_for_curve(source)
+        source_ring = _nearest_pipe_ring(source_pipe, source, source_index, len(source_ps.cross_section_verts))
+        basis = _stored_binding_plane(data)
+        if source_ring:
+            basis = _basis_on_current_source_plane(source_ring, basis)
+        if basis is None:
+            continue
+        _center, source_u, source_v, _normal = basis
+        source_center = _world_point(source, source_index)
+        if source_center is None:
+            source_center = basis[0]
+        count = len(slave_ps.cross_section_verts)
+        start = slave_index * count
+        if start < 0 or start + count > len(verts):
+            continue
+        scale = float(slave_ps.scale)
+        rotation = math.radians(float(slave_ps.rotation))
+        cos_r = math.cos(rotation)
+        sin_r = math.sin(rotation)
+        snap_map = data.get('vertex_snaps', {})
+        for offset, profile_vert in enumerate(slave_ps.cross_section_verts):
+            raw_x = float(profile_vert.offset_x) * scale
+            raw_y = float(profile_vert.offset_y) * scale
+            x = raw_x * cos_r - raw_y * sin_r
+            y = raw_x * sin_r + raw_y * cos_r
+            desired = source_center + source_u * x + source_v * y
+            target_vertex = snap_map.get(str(offset)) if isinstance(snap_map, dict) else None
+            try:
+                target_vertex = int(target_vertex)
+            except (TypeError, ValueError):
+                target_vertex = -1
+            if source_ring and 0 <= target_vertex < len(source_ring):
+                desired = source_ring[target_vertex]
+            verts[start + offset] = inverse_pipe @ desired
+    return verts
+
+
 def align_binding_ring_planes(slave_obj):
     """Place every bound slave base ring in its target's actual 3D plane.
 
@@ -524,12 +573,17 @@ def align_binding_ring_planes(slave_obj):
             'plane_normal': list(source_normal),
             'source_tilt': current_tilt,
         })
-        binding_data_changed = True
+        binding_data_changed = binding_data_changed or (
+            data.get('plane_center') != list(source_center)
+            or data.get('plane_u') != list(source_u)
+            or data.get('plane_v') != list(source_v)
+            or data.get('plane_normal') != list(source_normal)
+        )
         # The final ring is generated directly from the slave profile's 2D
         # coordinates in the frozen source axes. Never derive axes from the
         # current slave ring: moving one profile vertex would rotate that basis.
         scale = float(slave_ps.scale)
-        rotation = math.radians(float(data.get('profile_rotation', 0.0)))
+        rotation = math.radians(float(slave_ps.rotation))
         cos_r = math.cos(rotation)
         sin_r = math.sin(rotation)
         # Do not recenter or redistribute the profile here. Re-centering would
@@ -554,6 +608,8 @@ def align_binding_ring_planes(slave_obj):
         if target_start is None:
             continue
         inv_matrix = slave_pipe.matrix_world.inverted_safe()
+        local_vertices = []
+        snap_map = data.get('vertex_snaps', {})
         for offset, vertex in enumerate(vertices[target_start:target_start + slave_count]):
             profile_vert = slave_ps.cross_section_verts[offset]
             raw_x = float(profile_vert.offset_x) * scale
@@ -561,20 +617,26 @@ def align_binding_ring_planes(slave_obj):
             x = raw_x * cos_r - raw_y * sin_r
             y = raw_x * sin_r + raw_y * cos_r
             desired = source_center + source_u * x + source_v * y
-            snap_map = data.get('vertex_snaps', {})
             target_vertex = snap_map.get(str(offset)) if isinstance(snap_map, dict) else None
             if target_vertex is not None:
                 try:
                     target_vertex = int(target_vertex)
                     if source_ring and 0 <= target_vertex < len(source_ring):
-                        # Write the exact target mesh vertex world position.
-                        # This includes depth and remains exact when the source
-                        # profile, frame, or curve point moves.
                         desired = source_ring[target_vertex]
                 except (TypeError, ValueError):
                     pass
-            vertex.co = inv_matrix @ desired
-        changed = True
+            local_vertices.append(inv_matrix @ desired)
+        # Do not write/update the mesh when alignment is already exact. The
+        # old unconditional write caused a depsgraph feedback loop and made
+        # the viewport flicker during every G/R/S mouse move.
+        ring_changed = any(
+            (vertex.co - local_co).length_squared > 1.0e-14
+            for vertex, local_co in zip(vertices[target_start:target_start + slave_count], local_vertices)
+        )
+        if ring_changed:
+            for vertex, local_co in zip(vertices[target_start:target_start + slave_count], local_vertices):
+                vertex.co = local_co
+            changed = True
     if binding_data_changed:
         _set_bindings(slave_obj, bindings)
     if changed:

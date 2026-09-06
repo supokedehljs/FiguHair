@@ -18,7 +18,7 @@ from .point_data import sync_point_settings, sync_active_point_from_selection
 from .cross_section import get_active_spline_point_range
 from .binding import (
     is_bound_slave_point, get_bound_edit_target, get_bound_sections_for_target,
-    get_bound_section_display_offsets, set_binding_vertex_snap,
+    get_bound_section_display_offsets, set_binding_vertex_snap, get_binding_source_curve, get_curve_binding,
     find_nearest_source_vertex_world, get_bound_vertex_world, set_bound_vertex_world,
 )
 
@@ -40,8 +40,6 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
         if s.active_point_index >= len(s.point_settings):
             return False
         ps = s.point_settings[s.active_point_index]
-        if is_bound_slave_point(obj, s.active_point_index):
-            return False
         return not is_transition_point(ps) and len(ps.cross_section_verts) >= 3
 
     def invoke(self, context, event):
@@ -171,17 +169,11 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         operator._finish(context)
         return {'CANCELLED'}
 
+    # The Blender active curve is always the editable curve. A binding only
+    # supplies a reference/highlight and must never replace this point setting.
     ps = settings.point_settings[settings.active_point_index]
-    bound_name = getattr(wd, 'bound_edit_curve_name', '')
-    bound_point = int(getattr(wd, 'bound_edit_point_index', -1))
-    if bound_name:
-        bound_obj = bpy.data.objects.get(bound_name)
-        if bound_obj is not None and bound_obj.type == 'CURVE':
-            bound_sections = get_bound_sections_for_target(obj, settings.active_point_index)
-            for candidate_obj, candidate_idx, candidate_ps in bound_sections:
-                if candidate_obj == bound_obj and candidate_idx == bound_point:
-                    ps = candidate_ps
-                    break
+    wd.active_section_curve_name = obj.name
+    wd.active_section_point_index = int(settings.active_point_index)
     if is_transition_point(ps):
         operator._finish(context)
         return {'CANCELLED'}
@@ -289,6 +281,9 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
 
     if not wd.move_active and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.value == 'PRESS':
         if event.shift and not event.ctrl:
+            # Section switching by Shift+wheel is disabled.
+            return {'PASS_THROUGH'}
+        if False:
             sections = [(None, settings.active_point_index)]
             sections.extend(
                 (child_obj, child_idx)
@@ -463,23 +458,27 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type == 'MOUSEMOVE':
-            if getattr(wd, 'snap_bound_points', False) and getattr(wd, 'bound_edit_curve_name', ''):
-                active_bound = bpy.data.objects.get(wd.bound_edit_curve_name)
-                bound_idx = int(getattr(wd, 'bound_edit_point_index', -1))
-                if active_bound is not None and sel:
-                    source_ps = settings.point_settings[settings.active_point_index]
-                    slave_ps = active_bound.hair_pipe_settings.point_settings[bound_idx]
-                    # Use the actual source mesh ring through the binding helper.
-                    for slave_vertex in sel:
-                        world = get_bound_vertex_world(active_bound, bound_idx, slave_vertex)
-                        if world is None:
-                            continue
-                        source_vertex, target_world = find_nearest_source_vertex_world(
-                            obj, settings.active_point_index, world,
-                        )
-                        if source_vertex >= 0 and target_world is not None and (target_world - world).length <= wd.snap_distance:
-                            set_binding_vertex_snap(active_bound, bound_idx, slave_vertex, source_vertex, enabled=True)
-                            set_bound_vertex_world(active_bound, bound_idx, slave_vertex, target_world)
+            if getattr(wd, 'snap_bound_points', False) and sel:
+                # Resolve snapping from the actual editable curve. Legacy
+                # bound_edit_* state is only a display reference and may be
+                # empty when the slave curve itself is active.
+                active_bound = obj
+                binding = get_curve_binding(active_bound)
+                if binding:
+                    source_obj = bpy.data.objects.get(binding.get('source_curve', ''))
+                    bound_idx = int(binding.get('slave_point', settings.active_point_index))
+                    source_idx = int(binding.get('source_point', settings.active_point_index))
+                    if source_obj is not None:
+                        for slave_vertex in sel:
+                            world = get_bound_vertex_world(active_bound, bound_idx, slave_vertex)
+                            if world is None:
+                                continue
+                            source_vertex, target_world = find_nearest_source_vertex_world(
+                                source_obj, source_idx, world,
+                            )
+                            if source_vertex >= 0 and target_world is not None and (target_world - world).length <= wd.snap_distance:
+                                set_binding_vertex_snap(active_bound, bound_idx, slave_vertex, source_vertex, enabled=True)
+                                set_bound_vertex_world(active_bound, bound_idx, slave_vertex, target_world)
             dx, dy = widget_to_effective(mx, my, cx, cy, sf, alignment_angle, flip_h)
             sx, sy = widget_to_effective(wd.move_start_x, wd.move_start_y, cx, cy, sf, alignment_angle, flip_h)
             delta_x = dx - sx
@@ -958,7 +957,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         target_point_index = settings.active_point_index
         wd.context_menu_point_index = target_point_index
         if inside_widget:
-            bound_hit = get_bound_edit_target(
+            bound_hit = None if get_binding_source_curve(obj) is not None else get_bound_edit_target(
                 obj, settings.active_point_index, mx, my, cx, cy,
                 sf, alignment_angle, flip_h,
             )
