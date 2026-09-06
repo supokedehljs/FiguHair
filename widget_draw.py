@@ -1164,10 +1164,12 @@ def draw_widget_callback():
                 ),
                 selection_indices=(
                     get_selected_widget_verts(wd)
-                    if not getattr(wd, 'bound_edit_curve_name', '')
-                    and section_obj == obj
-                    and highlight_idx == settings.active_point_index
+                    if section_obj == obj and highlight_idx == settings.active_point_index
                     else set()
+                ),
+                hollow_indices=(
+                    {int(i) for i in (get_curve_binding(section_obj) or {}).get('vertex_snaps', {}).keys()}
+                    if section_obj.type == 'CURVE' else set()
                 ),
             )
             drawn_sections.add((section_obj.as_pointer(), int(highlight_idx)))
@@ -1182,6 +1184,7 @@ def draw_widget_callback():
             draw_active_pipe_cross_section_ring(
                 context, source_curve.hair_pipe_settings.point_settings[source_idx],
                 source_curve, source_idx, selection_indices=set(), is_active=False,
+                hollow_indices={int(i) for i in (get_curve_binding(obj) or {}).get('vertex_snaps', {}).keys()},
             )
 
     # Also draw every bound child ring in the 3D view, even when the child
@@ -1252,35 +1255,6 @@ def draw_widget_callback():
         half, True, wd, get_selected_widget_verts(wd),
         hollow_indices={int(i) for i in current_snaps.keys()},
     )
-
-    # Read-only slave profiles controlled by this target. Profiles remain
-    # topologically independent, so no cross-hair bridge faces are introduced.
-    for _slave_obj, _slave_idx, slave_ps in get_bound_sections_for_target(
-        obj, settings.active_point_index
-    ):
-        display_offsets = get_bound_section_display_offsets(
-            obj, settings.active_point_index, _slave_obj, _slave_idx,
-        )
-        if len(display_offsets) >= 3:
-            # Draw the actual generated ring in the target ring basis. This
-            # makes the 2D overlay exactly match the 3D parallel result.
-            proxy_verts = []
-            for index, (offset_x, offset_y) in enumerate(display_offsets):
-                proxy_verts.append(type('BoundVertex', (), {
-                    'offset_x': offset_x,
-                    'offset_y': offset_y,
-                    'is_ghost': bool(getattr(slave_ps.cross_section_verts[index], 'is_ghost', False)),
-                })())
-            draw_single_cross_section(
-                shader, proxy_verts, slave_ps, settings,
-                cx, cy, sf, alignment_angle, flip_h, half,
-                getattr(wd, 'bound_edit_curve_name', '') == _slave_obj.name
-                and int(getattr(wd, 'bound_edit_point_index', -1)) == int(_slave_idx),
-                wd, get_bound_selected_widget_verts(wd, _slave_obj, _slave_idx),
-                hollow_indices=(
-                    {int(i) for i in (get_curve_binding(_slave_obj) or {}).get('vertex_snaps', {}).keys()}
-                ),
-            )
 
     if proportional_edit_enabled(context) and wd.move_active:
         circle_center, circle_radius = get_longitudinal_circle_screen_data(
