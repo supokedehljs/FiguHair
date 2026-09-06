@@ -669,6 +669,28 @@ def repair_all_binding_planes():
     return changed
 
 
+def apply_bindings_for_curves(curve_names):
+    """Apply only bindings touched by the changed source/slave curves."""
+    names = {str(name) for name in curve_names if name}
+    if not names:
+        return []
+    changed = []
+    for obj in bpy.data.objects:
+        if obj.type != 'CURVE':
+            continue
+        records = _get_bindings(obj)
+        if not records:
+            continue
+        if not any(
+            obj.name in names or str(item.get('source_curve', '')) in names
+            for item in records
+        ):
+            continue
+        if apply_binding(obj):
+            changed.append(obj)
+    return changed
+
+
 def apply_all_bindings():
     changed = []
     for obj in list(bpy.data.objects):

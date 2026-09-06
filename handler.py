@@ -11,7 +11,7 @@ from .hair_lifecycle import (
 from .pipe_generation import generate_pipe_mesh
 from .point_data import sync_point_settings, sync_active_point_from_selection
 from .widget_cache import invalidate_pipe_mesh_cache
-from .binding import apply_all_bindings, apply_bound_frames_to_generated_vertices, align_binding_ring_planes, repair_all_binding_planes
+from .binding import apply_all_bindings, apply_bindings_for_curves, apply_bound_frames_to_generated_vertices, align_binding_ring_planes, repair_all_binding_planes
 def _clear_all_existing_crease_once():
     try:
         from .pipe_ops import clear_boulder_crease
@@ -40,6 +40,8 @@ _visibility_guard = False
 _root_visibility_states = {}
 _last_selection_signature = None
 _last_visibility_sync_time = 0.0
+_performance_subdiv_state = {}
+_performance_active_key = None
 _pending_rebuilds = set()
 _REBUILD_TIMER_INTERVAL = 0.025
 _last_rebuild_queue_time = 0.0
@@ -91,6 +93,54 @@ def set_object_hidden(obj, hidden):
 
 def object_hidden(obj):
     return bool(obj is not None and obj.hide_get())
+
+
+def sync_edit_performance_mode(context):
+    """Reduce viewport evaluation in every mode, only when the active family changes."""
+    global _performance_active_key
+    active = getattr(context, 'active_object', None)
+    active_curve = None
+    if active is not None and active.type == 'CURVE' and hasattr(active, 'hair_pipe_settings'):
+        active_curve = active
+    elif active is not None and active.type == 'MESH':
+        active_curve = get_pipe_source_curve(active)
+
+    family_key = active_curve.name if active_curve is not None else None
+    if family_key == _performance_active_key:
+        return
+    _performance_active_key = family_key
+
+    keep = {family_key} if family_key else set()
+    if active_curve is not None:
+        for obj in bpy.data.objects:
+            if obj.type != 'CURVE':
+                continue
+            records = obj.get('hair_pipe_cross_curve_binding', [])
+            if not isinstance(records, list):
+                continue
+            if any(item.get('source_curve') == active_curve.name for item in records):
+                keep.add(obj.name)
+            if obj == active_curve:
+                keep.update(str(item.get('source_curve')) for item in records if item.get('source_curve'))
+
+    for curve in bpy.data.objects:
+        if curve.type != 'CURVE':
+            continue
+        pipe = get_pipe_object_for_curve(curve)
+        modifier = pipe.modifiers.get('FiguHair Catmull-Clark') if pipe is not None else None
+        if modifier is None:
+            continue
+        key = pipe.as_pointer()
+        if key not in _performance_subdiv_state:
+            _performance_subdiv_state[key] = bool(modifier.show_viewport)
+        desired = _performance_subdiv_state[key] if active_curve is not None else _performance_subdiv_state[key]
+        if active_curve is not None:
+            desired = curve.name in keep
+        if bool(modifier.show_viewport) != bool(desired):
+            modifier.show_viewport = bool(desired)
+
+    if active_curve is None:
+        _performance_subdiv_state.clear()
 
 
 def sync_figuhair_visibility():
@@ -203,6 +253,8 @@ def rebuild_existing_pipe(curve_obj, fast=False):
 @persistent
 def selection_redirect_callback(scene):
     global _is_redirecting_selection
+    if not bpy.context.selected_objects:
+        return
     if _is_redirecting_selection:
         return
     context = bpy.context
@@ -229,8 +281,10 @@ def selection_redirect_callback(scene):
 
 @persistent
 def update_pipe_callback(scene):
-    """Queue changed curves; mesh generation is merged by the timer below."""
+    """Queue only changed FiguHair curves; ignore unrelated depsgraph work."""
     depsgraph = bpy.context.evaluated_depsgraph_get()
+    if not depsgraph.updates:
+        return
     queued = set()
 
     for update in depsgraph.updates:
@@ -251,7 +305,15 @@ def update_pipe_callback(scene):
         settings = getattr(curve_obj, 'hair_pipe_settings', None)
         if settings is None or not bool(getattr(settings, 'auto_update', True)):
             continue
-        _pending_rebuilds.add(curve_obj.name)
+        # Match the known-good pre-921a0e8 path in Object Mode: update the
+        # changed curve directly instead of routing every normal scene update
+        # through the permanent queue timer. Edit Mode still uses the queue.
+        if not is_curve_edit_mode(curve_obj):
+            rebuild_existing_pipe(curve_obj, fast=False)
+            apply_bindings_for_curves({curve_obj.name})
+            invalidate_pipe_mesh_cache(curve_obj)
+        else:
+            _pending_rebuilds.add(curve_obj.name)
         queued.add(curve_obj.name)
 
 
@@ -291,8 +353,10 @@ def rebuild_queue_timer():
         rebuild_existing_pipe(curve_obj, fast=editing)
         rebuilt.append(curve_obj)
 
-    # Only after source geometry is current may dependent curves be updated.
-    bound_changed = apply_all_bindings()
+    # Only after source geometry is current may affected bindings be updated.
+    # Never scan every binding when this timer has no dirty curve.
+    affected_names = {curve.name for curve in rebuilt}
+    bound_changed = apply_bindings_for_curves(affected_names)
     for bound_curve in bound_changed:
         if bound_curve not in rebuilt:
             rebuild_existing_pipe(bound_curve, fast=True)
@@ -309,6 +373,10 @@ def rebuild_queue_timer():
             for area in screen.areas:
                 if area.type == 'VIEW_3D':
                     area.tag_redraw()
+    if not rebuilt and not _pending_rebuilds:
+        # Idle scenes should not poll at the drag rate. Blender depsgraph
+        # updates will wake the queue when a curve actually changes.
+        return 0.12
     return _REBUILD_TIMER_INTERVAL
 
 
@@ -345,6 +413,7 @@ def selection_sync_timer():
         selection_changed = selected_signature != _last_selection_signature
         if selection_changed:
             _last_selection_signature = selected_signature
+            sync_edit_performance_mode(context)
 
         has_mesh = _has_figuhair_mesh_selected(context)
         if has_mesh and not _is_redirecting_selection:
@@ -365,7 +434,7 @@ def selection_sync_timer():
                         area.tag_redraw()
 
         now = time.perf_counter()
-        if selection_changed or now - _last_visibility_sync_time > 0.5:
+        if selection_changed:
             sync_selected_curve_visibility(context)
             sync_figuhair_visibility()
             _last_visibility_sync_time = now
@@ -457,8 +526,11 @@ def register_handler():
 
     if not bpy.app.timers.is_registered(selection_sync_timer):
         bpy.app.timers.register(selection_sync_timer, persistent=True)
+    # The queue timer is only needed as an Edit Mode fallback. Keep it
+    # registered for mode transitions, but it returns quickly when no edit
+    # operation has queued a curve.
     if not bpy.app.timers.is_registered(rebuild_queue_timer):
-        bpy.app.timers.register(rebuild_queue_timer, persistent=True, first_interval=_REBUILD_TIMER_INTERVAL)
+        bpy.app.timers.register(rebuild_queue_timer, persistent=True, first_interval=0.2)
     try:
         if not bpy.app.timers.is_registered(_clear_all_existing_crease_once):
             bpy.app.timers.register(_clear_all_existing_crease_once, first_interval=0.5)
