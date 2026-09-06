@@ -341,6 +341,49 @@ def selection_sync_timer():
     return 0.25
 
 
+def rebuild_all_figuhair_after_undo():
+    """Restore generated-pipe links after Blender undo/redo restores IDs."""
+    try:
+        global _pending_rebuilds
+        _pending_rebuilds.clear()
+        curves = [obj for obj in bpy.data.objects
+                   if obj.type == 'CURVE' and hasattr(obj, 'hair_pipe_settings')]
+        # Restore source-driven control points before rebuilding slave meshes.
+        apply_all_bindings()
+        for curve in curves:
+            settings = curve.hair_pipe_settings
+            sync_point_settings(curve)
+            pipe = get_pipe_object_for_curve(curve)
+            if pipe is None:
+                continue
+            rebuild_existing_pipe(curve, fast=False)
+            invalidate_pipe_mesh_cache(curve)
+        apply_all_bindings()
+        for curve in curves:
+            if curve.type == 'CURVE':
+                align_binding_ring_planes(curve)
+                invalidate_pipe_mesh_cache(curve)
+                try:
+                    curve.update_tag()
+                    curve.data.update_tag()
+                except (AttributeError, RuntimeError):
+                    pass
+        screen = getattr(bpy.context, 'screen', None)
+        if screen is not None:
+            for area in screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+    except (AttributeError, RuntimeError, ReferenceError):
+        pass
+    return None
+
+
+@persistent
+def undo_redo_post(_dummy):
+    if not bpy.app.timers.is_registered(rebuild_all_figuhair_after_undo):
+        bpy.app.timers.register(rebuild_all_figuhair_after_undo, first_interval=0.05)
+
+
 def repair_bindings_after_load():
     try:
         changed = apply_all_bindings()
@@ -373,6 +416,10 @@ def register_handler():
         bpy.app.handlers.depsgraph_update_post.append(selection_redirect_callback)
     if ensure_handlers_after_load not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(ensure_handlers_after_load)
+    if undo_redo_post not in bpy.app.handlers.undo_post:
+        bpy.app.handlers.undo_post.append(undo_redo_post)
+    if undo_redo_post not in bpy.app.handlers.redo_post:
+        bpy.app.handlers.redo_post.append(undo_redo_post)
     _handler_registered = True
 
     if not bpy.app.timers.is_registered(selection_sync_timer):
@@ -396,6 +443,10 @@ def unregister_handler():
             bpy.app.handlers.depsgraph_update_post.remove(selection_redirect_callback)
         if ensure_handlers_after_load in bpy.app.handlers.load_post:
             bpy.app.handlers.load_post.remove(ensure_handlers_after_load)
+        if undo_redo_post in bpy.app.handlers.undo_post:
+            bpy.app.handlers.undo_post.remove(undo_redo_post)
+        if undo_redo_post in bpy.app.handlers.redo_post:
+            bpy.app.handlers.redo_post.remove(undo_redo_post)
         _handler_registered = False
 
     if bpy.app.timers.is_registered(selection_sync_timer):
