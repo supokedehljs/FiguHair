@@ -53,7 +53,7 @@ def _get_bindings(slave_obj):
 
 def get_bound_vertex_world(slave_obj, slave_point_index, slave_vertex_index):
     ps = _point_setting(slave_obj, int(slave_point_index))
-    data = _get_binding(slave_obj)
+    data = get_curve_binding(slave_obj, int(slave_point_index))
     if ps is None or data is None:
         return None
     source = bpy.data.objects.get(data.get('source_curve', ''))
@@ -77,7 +77,7 @@ def get_bound_vertex_world(slave_obj, slave_point_index, slave_vertex_index):
 
 def set_bound_vertex_world(slave_obj, slave_point_index, slave_vertex_index, world_position):
     ps = _point_setting(slave_obj, int(slave_point_index))
-    data = _get_binding(slave_obj)
+    data = get_curve_binding(slave_obj, int(slave_point_index))
     if ps is None or data is None:
         return False
     source = bpy.data.objects.get(data.get('source_curve', ''))
@@ -147,12 +147,19 @@ def _get_binding(slave_obj):
     return bindings[0] if bindings else None
 
 
-def get_curve_binding(curve_obj):
-    return _get_binding(curve_obj)
+def get_curve_binding(curve_obj, slave_point_index=None):
+    bindings = _get_bindings(curve_obj)
+    if slave_point_index is None:
+        return bindings[0] if bindings else None
+    return next(
+        (item for item in bindings
+         if int(item.get('slave_point', -1)) == int(slave_point_index)),
+        None,
+    )
 
 
-def get_binding_source_curve(curve_obj):
-    data = _get_binding(curve_obj)
+def get_binding_source_curve(curve_obj, slave_point_index=None):
+    data = get_curve_binding(curve_obj, slave_point_index)
     if not data:
         return None
     source = bpy.data.objects.get(data.get('source_curve', ''))
@@ -749,6 +756,59 @@ def create_binding(context):
     _set_bindings(slave, bindings)
     apply_binding(slave)
     return slave, None
+
+
+def copy_binding_snap_to_offset(slave_obj, binding_data, slave_offset, source_offset):
+    """Copy one bound section's snap columns to a neighboring pair."""
+    if slave_obj is None or not binding_data:
+        return False
+    source = bpy.data.objects.get(binding_data.get('source_curve', ''))
+    if source is None:
+        return False
+    base_slave = int(binding_data.get('slave_point', -1))
+    base_source = int(binding_data.get('source_point', -1))
+    new_slave = base_slave + int(slave_offset)
+    new_source = base_source + int(source_offset)
+    slave_settings = getattr(slave_obj, 'hair_pipe_settings', None)
+    source_settings = getattr(source, 'hair_pipe_settings', None)
+    if slave_settings is None or source_settings is None:
+        return False
+    if not (0 <= new_slave < len(slave_settings.point_settings)):
+        return False
+    if not (0 <= new_source < len(source_settings.point_settings)):
+        return False
+    slave_ps = slave_settings.point_settings[new_slave]
+    source_ps = source_settings.point_settings[new_source]
+    if len(slave_ps.cross_section_verts) < 3 or len(source_ps.cross_section_verts) < 3:
+        return False
+    copied = dict(binding_data)
+    copied['slave_point'] = int(new_slave)
+    copied['source_point'] = int(new_source)
+    copied.pop('vertex_snaps', None)
+    source_count = len(source_ps.cross_section_verts)
+    slave_count = len(slave_ps.cross_section_verts)
+    snaps = {}
+    for slave_index, source_index in (binding_data.get('vertex_snaps', {}) or {}).items():
+        try:
+            slave_index = int(slave_index)
+            source_index = int(source_index)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= slave_index < slave_count and 0 <= source_index < source_count:
+            snaps[str(slave_index)] = source_index
+    copied['vertex_snaps'] = snaps
+    plane_data = _binding_plane_data(source, new_source)
+    if plane_data:
+        copied.update(plane_data)
+    bindings = _get_bindings(slave_obj)
+    bindings = [item for item in bindings if not (
+        item.get('source_curve') == source.name
+        and int(item.get('source_point', -1)) == new_source
+        and int(item.get('slave_point', -1)) == new_slave
+    )]
+    bindings.append(copied)
+    _set_bindings(slave_obj, bindings)
+    return True
 
 
 def remove_binding(context):

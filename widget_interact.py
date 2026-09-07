@@ -959,7 +959,7 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         target_point_index = settings.active_point_index
         wd.context_menu_point_index = target_point_index
         if inside_widget:
-            bound_hit = None if get_binding_source_curve(obj) is not None else get_bound_edit_target(
+            bound_hit = None if get_binding_source_curve(obj, settings.active_point_index) is not None else get_bound_edit_target(
                 obj, settings.active_point_index, mx, my, cx, cy,
                 sf, alignment_angle, flip_h,
             )
@@ -1072,6 +1072,7 @@ class HAIRPIPE_MT_widget_context_menu(bpy.types.Menu):
         layout.operator("hair_pipe.widget_make_normal", text="转换为正常点", icon='GHOST_DISABLED')
         layout.separator()
         layout.operator("hair_pipe.cross_section_spread", text="横截面传递", icon='DUPLICATE')
+        layout.operator("hair_pipe.snap_transfer", text="吸附传递", icon='SNAP_ON')
 
 
 class HAIRPIPE_OT_widget_smooth_selected_vertices(bpy.types.Operator):

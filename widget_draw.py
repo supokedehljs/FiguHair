@@ -1176,15 +1176,15 @@ def draw_widget_callback():
 
     # If the active curve is a bound child, also draw its source section as
     # a non-interactive highlighted reference.
-    source_curve = get_binding_source_curve(obj)
+    source_curve = get_binding_source_curve(obj, settings.active_point_index)
     if source_curve is not None:
-        source_data = get_curve_binding(obj) or {}
+        source_data = get_curve_binding(obj, settings.active_point_index) or {}
         source_idx = int(source_data.get('source_point', -1))
         if 0 <= source_idx < len(source_curve.hair_pipe_settings.point_settings):
             draw_active_pipe_cross_section_ring(
                 context, source_curve.hair_pipe_settings.point_settings[source_idx],
                 source_curve, source_idx, selection_indices=set(), is_active=False,
-                hollow_indices={int(i) for i in (get_curve_binding(obj) or {}).get('vertex_snaps', {}).keys()},
+                hollow_indices={int(i) for i in (get_curve_binding(obj, settings.active_point_index) or {}).get('vertex_snaps', {}).keys()},
             )
 
     # Also draw every bound child ring in the 3D view, even when the child
@@ -1248,7 +1248,7 @@ def draw_widget_callback():
         (0.18, 0.18, 0.18, 0.88),
         (0.0, 0.0, 0.0, 0.45),
     )
-    current_binding = get_curve_binding(obj) or {}
+    current_binding = get_curve_binding(obj, settings.active_point_index) or {}
     current_snaps = current_binding.get('vertex_snaps', {})
     draw_single_cross_section(
         shader, verts, ps, settings, cx, cy, sf, alignment_angle, flip_h,

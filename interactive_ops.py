@@ -9,6 +9,10 @@ from .hair_lifecycle import get_next_figuhair_base_name, ensure_figuhair_root, g
 from .curve_data import ensure_curve_defaults, is_curve_edit_mode, get_selected_curve_point_indices
 from .point_data import sync_point_settings, _point_setting_to_data, _apply_point_setting_data
 from .ghost import update_ghost_vertices, update_all_ghost_vertices
+from .binding import (
+    get_curve_binding, copy_binding_snap_to_offset, apply_binding,
+    _get_bindings, _set_bindings,
+)
 
 
 class HAIRPIPE_OT_cross_section_spread(bpy.types.Operator):
@@ -142,6 +146,115 @@ class HAIRPIPE_OT_cross_section_spread(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
 
+
+
+class HAIRPIPE_OT_snap_transfer(bpy.types.Operator):
+    """Transfer bound vertex snaps to neighboring cross-sections."""
+    bl_idname = "hair_pipe.snap_transfer"
+    bl_label = "吸附传递"
+    bl_options = {'REGISTER', 'UNDO', 'BLOCKING'}
+
+    _curve_obj = None
+    _binding = None
+    _source_idx = -1
+    _slave_idx = -1
+    _direction = 0
+    _amount = 0
+    _original_bindings = None
+
+    @classmethod
+    def poll(cls, context):
+        curve = get_context_curve_object(context)
+        widget = getattr(context.window_manager, 'hair_pipe_widget', None)
+        active_idx = int(curve.hair_pipe_settings.active_point_index) if curve is not None else -1
+        data = get_curve_binding(curve, active_idx) if curve is not None else None
+        return (
+            curve is not None and curve.type == 'CURVE'
+            and is_curve_edit_mode(curve)
+            and widget is not None and widget.is_active
+            and data is not None and bool(data.get('vertex_snaps'))
+        )
+
+    def _available_amount(self):
+        source = bpy.data.objects.get(self._binding.get('source_curve', ''))
+        if source is None:
+            return 0
+        source_settings = source.hair_pipe_settings
+        slave_settings = self._curve_obj.hair_pipe_settings
+        if self._direction < 0:
+            return min(self._source_idx, self._slave_idx)
+        return min(
+            len(source_settings.point_settings) - 1 - self._source_idx,
+            len(slave_settings.point_settings) - 1 - self._slave_idx,
+        )
+
+    def _apply_preview(self):
+        # Recreate preview from the invocation snapshot every time. This makes
+        # wheel reversal and range reduction deterministic and preserves all
+        # unrelated/pre-existing section bindings.
+        _set_bindings(self._curve_obj, self._original_bindings)
+        base = self._binding
+        for step in range(1, self._amount + 1):
+            offset = -step if self._direction < 0 else step
+            copy_binding_snap_to_offset(self._curve_obj, base, offset, offset)
+        apply_binding(self._curve_obj)
+        self._curve_obj.data.update_tag()
+        self._curve_obj.update_tag()
+
+    def _finish(self, context, cancelled=False):
+        if cancelled:
+            _set_bindings(self._curve_obj, self._original_bindings)
+            apply_binding(self._curve_obj)
+            self._curve_obj.data.update_tag()
+            self._curve_obj.update_tag()
+        if not cancelled:
+            bpy.ops.ed.undo_push(message="吸附传递")
+        context.area.header_text_set(None)
+        context.window.cursor_modal_restore()
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        return {'CANCELLED'} if cancelled else {'FINISHED'}
+
+    def invoke(self, context, event):
+        self._curve_obj = get_context_curve_object(context)
+        active_idx = int(self._curve_obj.hair_pipe_settings.active_point_index)
+        self._binding = dict(get_curve_binding(self._curve_obj, active_idx) or {})
+        if not self._binding or not self._binding.get('vertex_snaps'):
+            self.report({'WARNING'}, "当前横截面没有可传递的吸附关系")
+            return {'CANCELLED'}
+        self._original_bindings = [dict(item) for item in _get_bindings(self._curve_obj)]
+        self._source_idx = int(self._binding.get('source_point', -1))
+        self._slave_idx = int(self._binding.get('slave_point', -1))
+        self._direction = -1
+        self._amount = 0
+        context.window_manager.modal_handler_add(self)
+        context.window.cursor_modal_set('SCROLL_XY')
+        context.area.header_text_set("吸附传递：滚轮向上/下选择方向和数量 | 左键/Enter 确认 | 右键/Esc 取消")
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type in {'ESC', 'RIGHTMOUSE'} and event.value == 'PRESS':
+            return self._finish(context, cancelled=True)
+        if event.type in {'LEFTMOUSE', 'RET', 'NUMPAD_ENTER'} and event.value == 'PRESS':
+            return self._finish(context)
+        if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.value == 'PRESS':
+            direction = -1 if event.type == 'WHEELUPMOUSE' else 1
+            if direction == self._direction:
+                self._amount = min(self._available_amount(), self._amount + 1)
+            elif self._amount > 0:
+                self._amount -= 1
+            else:
+                self._direction = direction
+                self._amount = min(self._available_amount(), 1)
+            self._apply_preview()
+            side = '上方' if self._direction < 0 else '下方'
+            context.area.header_text_set(f"吸附传递：{side} {self._amount} 层 | 左键确认 | Esc 取消")
+            for area in context.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+            return {'RUNNING_MODAL'}
+        return {'RUNNING_MODAL'}
 
 
 class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
@@ -475,5 +588,6 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
 
 classes = (
     HAIRPIPE_OT_cross_section_spread,
+    HAIRPIPE_OT_snap_transfer,
     HAIRPIPE_OT_draw_hair_curve,
 )

@@ -180,6 +180,7 @@ from .view_ops import (
 )
 from .interactive_ops import (
     HAIRPIPE_OT_cross_section_spread as interactive_cross_section_spread,
+    HAIRPIPE_OT_snap_transfer as interactive_snap_transfer,
     HAIRPIPE_OT_draw_hair_curve as interactive_draw_hair_curve,
 )
 from .mesh_utils import (
@@ -407,10 +408,12 @@ def _is_figuhair_family_obj(*args, **kwargs):
     return hair_ops_is_figuhair_family_obj(*args, **kwargs)
 
 HAIRPIPE_OT_cross_section_spread = interactive_cross_section_spread
+HAIRPIPE_OT_snap_transfer = interactive_snap_transfer
 HAIRPIPE_OT_draw_hair_curve = interactive_draw_hair_curve
 
 classes = (
     HAIRPIPE_OT_cross_section_spread,
+    HAIRPIPE_OT_snap_transfer,
     HAIRPIPE_OT_draw_hair_curve,
     HAIRPIPE_OT_mesh_to_hair_curve,
     HAIRPIPE_OT_generate_pipe,
