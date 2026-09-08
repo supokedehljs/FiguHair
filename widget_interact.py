@@ -950,8 +950,21 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
         redraw_view3d(context)
         return {'RUNNING_MODAL'}
 
-    if event.type == 'X' and event.value == 'PRESS':
-        return {'PASS_THROUGH'}
+    if event.type in {'X', 'DEL'} and event.value == 'PRESS':
+        selected = get_current_selected_widget_verts(wd)
+        selected = {
+            index for index in selected
+            if 0 <= index < len(verts)
+            and not getattr(verts[index], 'is_ghost', False)
+        }
+        if not selected:
+            return {'PASS_THROUGH'}
+        if len(verts) - len(selected) < 3:
+            return {'RUNNING_MODAL'}
+        # X/Delete belongs to the cross-section editor while the widget is
+        # active; do not pass it to Blender's curve-control-point deletion.
+        bpy.ops.hair_pipe.widget_delete_selected_vertices()
+        return {'RUNNING_MODAL'}
 
     if event.type == 'RIGHTMOUSE' and event.value == 'PRESS':
         if event.alt or event.ctrl or event.shift or event.oskey:

@@ -1,5 +1,7 @@
 import bpy
 from .curve_data import is_curve_edit_mode
+
+_last_visible_selection = set()
 from .hair_lifecycle import get_pipe_source_curve
 
 
@@ -18,22 +20,26 @@ def ensure_selected_curve_visible(curve_obj):
 
 
 def sync_selected_curve_visibility(context):
+    """Update only selection deltas; avoid rewriting every hair object."""
+    global _last_visible_selection
     selected_names = {
         obj.name for obj in getattr(context, 'selected_objects', [])
         if obj.type == 'CURVE' and hasattr(obj, 'hair_pipe_settings')
     }
-    for curve_obj in bpy.data.objects:
-        if curve_obj.type != 'CURVE' or not hasattr(curve_obj, 'hair_pipe_settings'):
+    changed = selected_names ^ _last_visible_selection
+    if not changed:
+        return False
+    for name in changed:
+        curve_obj = bpy.data.objects.get(name)
+        if curve_obj is None or curve_obj.type != 'CURVE' or not hasattr(curve_obj, 'hair_pipe_settings'):
             continue
         if curve_obj.get("hair_pipe_widget_hide_curve_overlay", False):
             continue
-        is_selected = curve_obj.name in selected_names
-        curve_obj.show_in_front = is_selected
-        if is_selected:
-            curve_obj.hide_viewport = False
-            curve_obj.hide_set(False)
-            curve_obj.display_type = 'WIRE'
-            curve_obj.show_wire = True
+        is_selected = name in selected_names
+        if bool(curve_obj.show_in_front) != is_selected:
+            curve_obj.show_in_front = is_selected
+    _last_visible_selection = selected_names
+    return True
 
 
 def _collect_pipe_selection_from_context(context, active_curve):
@@ -109,7 +115,8 @@ def redirect_pipe_selection(context, pipe_obj=None):
             curve.select_set(True)
         except Exception:
             pass
-    sync_selected_curve_visibility(context)
+    # Selection visibility is synchronized by the selection timer only when
+    # the actual selection signature changes. Do not rescan/write all curves here.
     # Prefer the curve that was under the click/box as active, fallback to first selected hair curve.
     try:
         if active_curve is not None and active_curve.name in {c.name for c in selected_curves}:

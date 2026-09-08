@@ -39,9 +39,8 @@ _rebuild_guard = False
 _visibility_guard = False
 _root_visibility_states = {}
 _last_selection_signature = None
+_last_active_object_name = None
 _last_visibility_sync_time = 0.0
-_performance_subdiv_state = {}
-_performance_active_key = None
 _pending_rebuilds = set()
 _REBUILD_TIMER_INTERVAL = 0.025
 _last_rebuild_queue_time = 0.0
@@ -96,51 +95,8 @@ def object_hidden(obj):
 
 
 def sync_edit_performance_mode(context):
-    """Reduce viewport evaluation in every mode, only when the active family changes."""
-    global _performance_active_key
-    active = getattr(context, 'active_object', None)
-    active_curve = None
-    if active is not None and active.type == 'CURVE' and hasattr(active, 'hair_pipe_settings'):
-        active_curve = active
-    elif active is not None and active.type == 'MESH':
-        active_curve = get_pipe_source_curve(active)
-
-    family_key = active_curve.name if active_curve is not None else None
-    if family_key == _performance_active_key:
-        return
-    _performance_active_key = family_key
-
-    keep = {family_key} if family_key else set()
-    if active_curve is not None:
-        for obj in bpy.data.objects:
-            if obj.type != 'CURVE':
-                continue
-            records = obj.get('hair_pipe_cross_curve_binding', [])
-            if not isinstance(records, list):
-                continue
-            if any(item.get('source_curve') == active_curve.name for item in records):
-                keep.add(obj.name)
-            if obj == active_curve:
-                keep.update(str(item.get('source_curve')) for item in records if item.get('source_curve'))
-
-    for curve in bpy.data.objects:
-        if curve.type != 'CURVE':
-            continue
-        pipe = get_pipe_object_for_curve(curve)
-        modifier = pipe.modifiers.get('FiguHair Catmull-Clark') if pipe is not None else None
-        if modifier is None:
-            continue
-        key = pipe.as_pointer()
-        if key not in _performance_subdiv_state:
-            _performance_subdiv_state[key] = bool(modifier.show_viewport)
-        desired = _performance_subdiv_state[key] if active_curve is not None else _performance_subdiv_state[key]
-        if active_curve is not None:
-            desired = curve.name in keep
-        if bool(modifier.show_viewport) != bool(desired):
-            modifier.show_viewport = bool(desired)
-
-    if active_curve is None:
-        _performance_subdiv_state.clear()
+    """Compatibility no-op; subdivision is independent of selection."""
+    return
 
 
 def sync_figuhair_visibility():
@@ -405,18 +361,23 @@ def _first_figuhair_mesh_selected(context):
 
 
 def selection_sync_timer():
-    global _is_redirecting_selection, _last_selection_signature, _last_visibility_sync_time
+    global _is_redirecting_selection, _last_selection_signature, _last_active_object_name, _last_visibility_sync_time
     try:
         context = bpy.context
         obj = getattr(context, 'active_object', None)
         selected_signature = tuple(sorted(item.name for item in context.selected_objects))
-        selection_changed = selected_signature != _last_selection_signature
+        active_name = getattr(obj, 'name', None)
+        selection_changed = (
+            selected_signature != _last_selection_signature
+            or active_name != _last_active_object_name
+        )
         if selection_changed:
             _last_selection_signature = selected_signature
-            sync_edit_performance_mode(context)
+            _last_active_object_name = active_name
+            sync_selected_curve_visibility(context)
 
         has_mesh = _has_figuhair_mesh_selected(context)
-        if has_mesh and not _is_redirecting_selection:
+        if selection_changed and has_mesh and not _is_redirecting_selection:
             mesh_obj = _first_figuhair_mesh_selected(context) or obj
             _is_redirecting_selection = True
             try:
@@ -435,12 +396,12 @@ def selection_sync_timer():
 
         now = time.perf_counter()
         if selection_changed:
-            sync_selected_curve_visibility(context)
-            sync_figuhair_visibility()
+            # Selection highlighting must not rewrite object visibility. The
+            # visibility state is user-controlled and is handled separately.
             _last_visibility_sync_time = now
     except AttributeError:
         pass
-    return 0.25
+    return 0.05
 
 
 def rebuild_all_figuhair_after_undo():
@@ -488,6 +449,15 @@ def undo_redo_post(_dummy):
 
 def repair_bindings_after_load():
     try:
+        # Restore modifier visibility that older performance-mode revisions
+        # tied to selection. Each hair owns its subdivision display setting.
+        for curve in bpy.data.objects:
+            if curve.type != 'CURVE' or not hasattr(curve, 'hair_pipe_settings'):
+                continue
+            pipe = get_pipe_object_for_curve(curve)
+            modifier = pipe.modifiers.get('FiguHair Catmull-Clark') if pipe is not None else None
+            if modifier is not None:
+                modifier.show_viewport = bool(curve.hair_pipe_settings.default_subdiv)
         changed = apply_all_bindings()
         repaired = repair_all_binding_planes()
         for obj in changed + repaired:
