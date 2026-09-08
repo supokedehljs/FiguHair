@@ -158,8 +158,6 @@ def rebuild_existing_pipe(curve_obj, fast=False):
     settings = curve_obj.hair_pipe_settings
     if not bool(getattr(settings, 'auto_update', True)) and not fast:
         return
-    if len(settings.point_settings) == 0:
-        return
 
     pipe_obj = get_pipe_object_for_curve(curve_obj)
     if pipe_obj is None:
@@ -167,9 +165,23 @@ def rebuild_existing_pipe(curve_obj, fast=False):
 
     _rebuild_guard = True
     try:
+        # Curve Edit Mode can leave the edit data unflushed when a point is
+        # deleted. Synchronize the point settings before checking their count
+        # or generating rings, otherwise the old section indices deform the
+        # whole hair until the next selection click.
         if not fast:
             ensure_curve_defaults(curve_obj)
-            sync_point_settings(curve_obj)
+        # Topology changes must always synchronize point settings, including
+        # the fast edit-mode rebuild path. The old fast branch skipped this and
+        # left deleted-point section data attached to the wrong rings.
+        try:
+            if getattr(curve_obj, 'mode', '') in {'EDIT', 'EDIT_CURVE'}:
+                curve_obj.update_from_editmode()
+        except (AttributeError, RuntimeError):
+            pass
+        sync_point_settings(curve_obj)
+        if len(settings.point_settings) == 0:
+            return
         verts, faces = generate_pipe_mesh(curve_obj, settings)
         if verts is None:
             return
@@ -292,6 +304,14 @@ def rebuild_queue_timer():
     # generated mesh.
     names = []
     if active is not None and active.type == 'CURVE' and is_curve_edit_mode(active):
+        # Flush Curve Edit Mode topology before reading the fallback signature
+        # or syncing point settings. Otherwise a deleted control point is
+        # still invisible to the first rebuild and all sections shift until
+        # the next click.
+        try:
+            active.update_from_editmode()
+        except (AttributeError, RuntimeError):
+            pass
         if bool(getattr(active.hair_pipe_settings, 'auto_update', True)):
             signature = _curve_edit_signature(active)
             if signature != _active_edit_signature:
