@@ -1197,6 +1197,14 @@ def cleanup_widget_display_state(context, wd):
     source_curve = get_widget_source_curve(context)
     set_curve_overlay_hidden(context, source_curve, False)
     set_pipe_basemesh_preview(context, source_curve, False)
+    # Overlay restoration can bring back a stale show_in_front=True after the
+    # user has left Curve Edit Mode. Reconcile against Blender's real
+    # selection immediately, rather than waiting for the selection timer.
+    try:
+        from .selection import force_sync_selected_curve_visibility
+        force_sync_selected_curve_visibility(context)
+    except (ImportError, AttributeError, RuntimeError):
+        pass
 
 
 def refresh_pipe_during_widget_edit(context, min_interval=1.0 / 30.0):

@@ -26,16 +26,18 @@ def sync_selected_curve_visibility(context):
         obj.name for obj in getattr(context, 'selected_objects', [])
         if obj.type == 'CURVE' and hasattr(obj, 'hair_pipe_settings')
     }
-    changed = selected_names ^ _last_visible_selection
+    changed = selected_names != _last_visible_selection
     if not changed:
         return False
-    for name in changed:
-        curve_obj = bpy.data.objects.get(name)
-        if curve_obj is None or curve_obj.type != 'CURVE' or not hasattr(curve_obj, 'hair_pipe_settings'):
+    # Normalize the actual scene state, not only the cached delta. The cache
+    # can be stale after mesh-to-curve selection redirection or file reload,
+    # which otherwise leaves an unselected curve in front of the hair.
+    for curve_obj in bpy.data.objects:
+        if curve_obj.type != 'CURVE' or not hasattr(curve_obj, 'hair_pipe_settings'):
             continue
         if curve_obj.get("hair_pipe_widget_hide_curve_overlay", False):
             continue
-        is_selected = name in selected_names
+        is_selected = curve_obj.name in selected_names
         if bool(curve_obj.show_in_front) != is_selected:
             curve_obj.show_in_front = is_selected
     _last_visible_selection = selected_names
@@ -126,3 +128,10 @@ def redirect_pipe_selection(context, pipe_obj=None):
     except Exception:
         pass
     return True
+
+
+def force_sync_selected_curve_visibility(context):
+    """Reconcile front-display state after an editor restores object properties."""
+    global _last_visible_selection
+    _last_visible_selection = set()
+    return sync_selected_curve_visibility(context)
