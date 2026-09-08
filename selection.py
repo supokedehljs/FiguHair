@@ -1,47 +1,19 @@
 import bpy
-from .curve_data import is_curve_edit_mode
-
-_last_visible_selection = set()
 from .hair_lifecycle import get_pipe_source_curve
 
 
 def ensure_selected_curve_visible(curve_obj):
-    if curve_obj is None or curve_obj.type != 'CURVE':
-        return
-    if curve_obj.get("hair_pipe_widget_hide_curve_overlay", False):
-        return
-    curve_obj.hide_viewport = False
-    curve_obj.hide_set(False)
-    curve_obj.display_type = 'WIRE'
-    curve_obj.show_wire = True
-    curve_obj.show_in_front = True
-    if hasattr(curve_obj.data, "show_handles") and is_curve_edit_mode(curve_obj):
-        curve_obj.data.show_handles = True
+    """Legacy compatibility: selection highlighting is draw-overlay only."""
+    return curve_obj is not None and curve_obj.type == 'CURVE'
 
 
 def sync_selected_curve_visibility(context):
-    """Update only selection deltas; avoid rewriting every hair object."""
-    global _last_visible_selection
-    selected_names = {
-        obj.name for obj in getattr(context, 'selected_objects', [])
-        if obj.type == 'CURVE' and hasattr(obj, 'hair_pipe_settings')
-    }
-    changed = selected_names != _last_visible_selection
-    if not changed:
-        return False
-    # Normalize the actual scene state, not only the cached delta. The cache
-    # can be stale after mesh-to-curve selection redirection or file reload,
-    # which otherwise leaves an unselected curve in front of the hair.
-    for curve_obj in bpy.data.objects:
-        if curve_obj.type != 'CURVE' or not hasattr(curve_obj, 'hair_pipe_settings'):
-            continue
-        if curve_obj.get("hair_pipe_widget_hide_curve_overlay", False):
-            continue
-        is_selected = curve_obj.name in selected_names
-        if bool(curve_obj.show_in_front) != is_selected:
-            curve_obj.show_in_front = is_selected
-    _last_visible_selection = selected_names
-    return True
+    """Selection is rendered by the 3D overlay; do not mutate curve objects."""
+    return False
+
+
+def force_sync_selected_curve_visibility(context):
+    return False
 
 
 def _collect_pipe_selection_from_context(context, active_curve):

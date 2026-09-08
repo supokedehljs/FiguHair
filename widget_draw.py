@@ -1114,6 +1114,9 @@ def draw_widget_callback():
         return
 
     wm = context.window_manager
+    # Selection highlighting is a pure overlay and must remain available even
+    # when the cross-section widget is closed.
+    draw_selected_curves_highlight(context)
     if not hasattr(wm, 'hair_pipe_widget'):
         return
     wd = wm.hair_pipe_widget
@@ -1127,7 +1130,6 @@ def draw_widget_callback():
         return
 
     settings = obj.hair_pipe_settings
-    draw_selected_curves_highlight(context)
     if len(settings.point_settings) == 0:
         return
 
