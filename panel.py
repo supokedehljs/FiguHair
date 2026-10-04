@@ -66,6 +66,9 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         box = layout.box()
         box.label(text="通用", icon='MESH_CYLINDER')
         row = box.row(align=True)
+        row.scale_y = 1.35
+        row.operator("hair_pipe.draw_hair_curve", text="添加头发", icon='CURVE_DATA')
+        row = box.row(align=True)
         row.enabled = curve_obj is not None
         row.scale_y = 1.35
         row.operator("hair_pipe.generate_pipe", text="生成 / 更新管线")

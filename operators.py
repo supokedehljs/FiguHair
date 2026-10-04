@@ -5382,16 +5382,37 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
     _radius = 0.012
     _draw_handle = None
     _hover_world = None
+    _view_region = None
+    _view_region_data = None
+    _view_area = None
+    _navigation_active = False
 
     @classmethod
     def poll(cls, context):
-        return context.mode == 'OBJECT' and context.area is not None and context.area.type == 'VIEW_3D'
+        if context.area is None or context.area.type not in {'VIEW_3D', 'PROPERTIES'}:
+            return False
+        return context.mode == 'OBJECT' and any(
+            area.type == 'VIEW_3D' for area in getattr(context.screen, 'areas', [])
+        )
+
+    def _event_view_coord(self, event):
+        if self._view_region is None:
+            return None
+        return (event.mouse_x - self._view_region.x, event.mouse_y - self._view_region.y)
+
+    def _set_view_header(self, text):
+        if self._view_area is not None:
+            self._view_area.header_text_set(text)
+
+    def _tag_view_redraw(self):
+        if self._view_area is not None:
+            self._view_area.tag_redraw()
 
     def draw_path_preview(self, context):
         if not self._points:
             return
-        region = context.region
-        region_data = context.region_data
+        region = self._view_region
+        region_data = self._view_region_data
         if region is None or region_data is None:
             return
         world_points = list(self._points)
@@ -5425,9 +5446,11 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
         gpu.state.blend_set('NONE')
 
     def raycast_surface(self, context, event):
-        region = context.region
-        region_data = context.region_data
-        coord = (event.mouse_region_x, event.mouse_region_y)
+        region = self._view_region
+        region_data = self._view_region_data
+        coord = self._event_view_coord(event)
+        if region is None or region_data is None or coord is None:
+            return None, None
         origin = view3d_utils.region_2d_to_origin_3d(region, region_data, coord)
         direction = view3d_utils.region_2d_to_vector_3d(region, region_data, coord)
         hit, location, normal, _face_index, hit_obj, _matrix = context.scene.ray_cast(
@@ -5441,16 +5464,21 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
         end_world, _normal = self.raycast_surface(context, event)
         if end_world is not None:
             return end_world
-        region = context.region
-        region_data = context.region_data
-        coord = (event.mouse_region_x, event.mouse_region_y)
+        region = self._view_region
+        region_data = self._view_region_data
+        coord = self._event_view_coord(event)
+        if region is None or region_data is None or coord is None:
+            return None
         origin = view3d_utils.region_2d_to_origin_3d(region, region_data, coord)
         direction = view3d_utils.region_2d_to_vector_3d(region, region_data, coord)
         plane_normal = region_data.view_rotation @ Vector((0.0, 0.0, 1.0))
         denominator = direction.dot(plane_normal)
         if abs(denominator) <= 1e-8:
             return None
-        return origin + direction * ((self._start_world - origin).dot(plane_normal) / denominator)
+        anchor = self._points[-1] if self._points else self._start_world
+        if anchor is None:
+            return None
+        return origin + direction * ((anchor - origin).dot(plane_normal) / denominator)
 
     def update_curve_points(self, curve_obj, hover_world=None):
         points = list(self._points or [])
@@ -5583,61 +5611,85 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
         self._preview_mesh = None
         self._points = []
         self._radius = 0.012
-        self._start_world, self._start_normal = self.raycast_surface(context, event)
-        if self._start_world is None:
-            self.report({'WARNING'}, "请在网格物体表面开始拖动")
+        self._navigation_active = False
+        self._view_area = next(
+            (area for area in context.screen.areas if area.type == 'VIEW_3D'), None
+        )
+        if self._view_area is None:
+            self.report({'WARNING'}, "需要打开 3D 视图")
             return {'CANCELLED'}
-        self._points.append(self._start_world.copy())
-        self._hover_world = self.get_drag_end(context, event)
+        self._view_region = next(
+            (region for region in self._view_area.regions if region.type == 'WINDOW'), None
+        )
+        self._view_region_data = self._view_area.spaces.active.region_3d
+        if self._view_region is None or self._view_region_data is None:
+            return {'CANCELLED'}
         self._draw_handle = bpy.types.SpaceView3D.draw_handler_add(
             self.draw_path_preview, (context,), 'WINDOW', 'POST_PIXEL'
         )
         context.window_manager.modal_handler_add(self)
         context.window.cursor_modal_set('CROSSHAIR')
-        context.area.header_text_set("左键逐点添加 | 滚轮调整横截面宽度 | 空格/Enter 确认 | 右键/Esc 取消")
+        self._set_view_header("左键创建头发点 | 右键撤回上一个点 | 空格确认 | 中键/滚轮旋转缩放视图 | Esc 取消")
         return {'RUNNING_MODAL'}
 
     def modal(self, context, event):
-        if event.type in {'ESC', 'RIGHTMOUSE'} and event.value == 'PRESS':
+        if event.type == 'ESC' and event.value == 'PRESS':
             self.cleanup_preview()
             context.window.cursor_modal_restore()
-            context.area.header_text_set(None)
+            self._set_view_header(None)
             return {'CANCELLED'}
-        if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.value == 'PRESS':
-            factor = 1.12 if event.type == 'WHEELUPMOUSE' else 1.0 / 1.12
-            self._radius = max(0.001, min(10.0, self._radius * factor))
-            if self._preview_curve is not None:
-                self._preview_curve.data.update_tag()
-            context.area.header_text_set(
-                f"横截面宽度 {self._radius:.4f} | 左键逐点添加 | 空格/Enter 确认 | 右键/Esc 取消"
-            )
-            context.area.tag_redraw()
-            return {'RUNNING_MODAL'}
+        if event.type == 'RIGHTMOUSE' and event.value == 'PRESS':
+            if self._points:
+                self._points.pop()
+                self._hover_world = self._points[-1].copy() if self._points else None
+                if not self._points:
+                    self._start_world = None
+                    self._start_normal = None
+                self._tag_view_redraw()
+                return {'RUNNING_MODAL'}
+            self.cleanup_preview()
+            context.window.cursor_modal_restore()
+            self._set_view_header(None)
+            return {'CANCELLED'}
+        if event.type == 'MIDDLEMOUSE':
+            self._navigation_active = event.value != 'RELEASE'
+            return {'PASS_THROUGH'}
+        if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE', 'NDOF_MOTION'}:
+            return {'PASS_THROUGH'}
+        if self._navigation_active and event.type == 'MOUSEMOVE':
+            return {'PASS_THROUGH'}
         if event.type in {'SPACE', 'RET', 'NUMPAD_ENTER'} and event.value == 'PRESS':
-            if len(self._points) < 3:
-                self.report({'WARNING'}, "至少需要设置三个顶点")
+            if len(self._points) < 2:
+                self.report({'WARNING'}, "至少需要设置两个顶点")
                 return {'RUNNING_MODAL'}
             self.cleanup_preview()
             if self.create_curve(context) is None:
                 return {'RUNNING_MODAL'}
             context.window.cursor_modal_restore()
-            context.area.header_text_set(None)
+            self._set_view_header(None)
             return {'FINISHED'}
         if event.type == 'MOUSEMOVE':
+            if self._navigation_active:
+                return {'PASS_THROUGH'}
             hover_world = self.get_drag_end(context, event)
             if hover_world is not None:
                 self._hover_world = hover_world.copy()
-                context.area.tag_redraw()
+                self._tag_view_redraw()
             return {'RUNNING_MODAL'}
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
-            point_world = self.get_drag_end(context, event)
-            if point_world is not None and (point_world - self._points[-1]).length >= 1e-5:
+            point_world, normal = self.raycast_surface(context, event)
+            if point_world is None:
+                point_world = self.get_drag_end(context, event)
+            if point_world is not None and (not self._points or (point_world - self._points[-1]).length >= 1e-5):
+                if self._start_world is None:
+                    self._start_world = point_world.copy()
+                    self._start_normal = normal.copy() if normal is not None else None
                 self._points.append(point_world.copy())
                 self._hover_world = point_world.copy()
-                context.area.header_text_set(
-                    f"已设置 {len(self._points)} 个点 | 滚轮调整宽度 | 空格/Enter 确认 | 右键/Esc 取消"
+                self._set_view_header(
+                    f"已设置 {len(self._points)} 个点 | 左键继续 | 空格确认 | 右键撤回"
                 )
-                context.area.tag_redraw()
+                self._tag_view_redraw()
             return {'RUNNING_MODAL'}
         return {'RUNNING_MODAL'}
 
@@ -5807,10 +5859,6 @@ def unregister_keymaps():
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
-    try:
-        bpy.utils.register_tool(HAIRPIPE_WST_draw_hair_curve, after={"builtin.cursor"}, separator=True, group=True)
-    except RuntimeError:
-        pass
     register_keymaps()
 
 
