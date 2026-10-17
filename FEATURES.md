@@ -160,7 +160,7 @@ FiguHair 01 Curve        ← 曲线对象，就是「头发根」。所有截面
 | 过渡强度 `transition_strength` | 0…2，2.0 | 相邻截面影响强度 |
 | 强平滑 `strong_smoothing` | 开关，关 | 对整串环额外平滑 |
 | 强平滑次数 `strong_smoothing_iterations` | 1…12，8 | 额外平滑遍数 |
-| 滚转算法 `roll_mode` | START_FIXED / HYBRID_STABLE / START_PROJECTED / PARALLEL_TRANSPORT / WORLD_UP，START_FIXED | 曲线点移动时截面朝向如何保持 |
+| 滚转算法 `roll_mode` | START_FIXED / HYBRID_STABLE / START_PROJECTED / PARALLEL_TRANSPORT / WORLD_UP / STICKY，START_FIXED | 曲线点移动时截面朝向如何保持 |
 | 边流模式 `edge_flow_mode` | LINEAR / EASE / SMOOTHER / START / END / SINE，SMOOTHER | 截面边流的插入方式 |
 | 边流强度 `edge_flow_power` | 0.1…8，2.0 | 偏起点/偏终点的力度 |
 | 边流混合 `edge_flow_blend` | 0…1，1.0 | 重建结果替代原截面的程度 |
@@ -345,3 +345,31 @@ FiguHair（3D 视图侧栏，分类 FiguHair）
 - 浮动编辑器上的图形按钮（加/删/幽灵/预览/翻转/索引）在本版不显示，相关操作只能走面板或 F3。
 - 「网格不可选模式」的语义是：网格保持可点选（否则会点到后面的物体），点击后由选择处理器重定向到曲线。
 - 撤销/重做后自动重建依赖 handler；后台无界面时部分绘制函数会静默跳过。
+
+---
+
+## 13. 滚转模式补充（STICKY）
+
+| 模式 | 行为 |
+|---|---|
+| START 绝对锁定 | 所有截面共用「起点锚向量」的投影；改变起点切线会带动整根头发 |
+| 前向独立锁定 | 每个截面只用自身位置和下一个点定方向 |
+| START 投影 | 把持久的 START 方向投影到每个切线上 |
+| 最小扭转 | 沿曲线平行传输 START 帧（会向下游传播） |
+| 世界向上 | 固定世界向上参考 |
+| **逐点锁定（STICKY）** | 每个截面自己保存参考朝向（对象局部空间），用「上次切线→当前切线」的最小旋转更新；移动其它控制点不改变它的 roll，也不读取邻居状态 |
+
+STICKY 的实现要点：
+
+- 参考帧与参考切线存在 `HairPipePointSettings.roll_ref` / `.roll_tangent`，对象局部空间
+- 更新用 `rotation_difference(旧切线, 新切线)` 的最小旋转，而不是把参考投影到新平面
+- 只在没有状态时写入种子（种子由现有算法铺出，保证初始外观平滑）；之后每次重建都是当前切线的纯函数，不写回、不递归、不累积路径漂移
+- 退化（参考与切线平行）时只用自身切线选轴兜底，不读邻居
+- 切换到 STICKY 时清空逐点状态，按当前外观重新铺种，所以切换瞬间外观不变
+- 状态随 `point_settings` 一起复制/迁移（插入点沿用邻居数据）
+
+已知限制：
+
+- 截面仍会随自身切线倾斜（几何必然），倾斜不等于 roll
+- 闭合曲线的接缝没有特殊处理
+- 还没有「显式旋转截面朝向」的操作符；单点 `rotation` 只旋转截面形状

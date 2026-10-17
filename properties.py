@@ -96,6 +96,20 @@ class HairPipePointSettings(PropertyGroup):
         min=-64,
         max=64,
     )
+    roll_ref: FloatVectorProperty(
+        name="参考上方向",
+        description="STICKY 模式下该截面自己的参考上方向（对象局部空间）",
+        size=3,
+        default=(0.0, 0.0, 0.0),
+        subtype='DIRECTION',
+    )
+    roll_tangent: FloatVectorProperty(
+        name="参考切线",
+        description="上次求解时的截面切线（对象局部空间），用于最小旋转",
+        size=3,
+        default=(0.0, 0.0, 0.0),
+        subtype='DIRECTION',
+    )
 
 
 def update_one_shot_slider(self, context, slider_name):
@@ -108,6 +122,16 @@ def update_one_shot_slider(self, context, slider_name):
         ensure_one_shot_slider_gesture(owner, slider_name)
     except (ImportError, AttributeError, RuntimeError):
         pass
+
+
+def update_roll_mode(self, context):
+    # 切到 STICKY 时清空逐点状态，下一次重建会按当前外观铺一个平滑初始场，
+    # 避免切换到新模式时头发突然跳到旧的冻结状态。
+    if self.roll_mode != 'STICKY':
+        return
+    for point_setting in self.point_settings:
+        point_setting.roll_ref = (0.0, 0.0, 0.0)
+        point_setting.roll_tangent = (0.0, 0.0, 0.0)
 
 
 def update_auto_ghost_tolerance(self, context):
@@ -192,12 +216,14 @@ class HairPipeSettings(PropertyGroup):
     roll_mode: EnumProperty(
         name="Roll Mode",
         description="How generated cross-section frames respond when curve points move",
+        update=update_roll_mode,
         items=(
             ('START_FIXED', "START 绝对锁定", "Keep every ring orientation fixed from START; only moving START can rotate the hair, but rings may not stay perpendicular to sharp bends"),
             ('HYBRID_STABLE', "前向独立锁定", "Each section uses only its own position and the following section for direction; moving a point cannot rotate the next section"),
             ('START_PROJECTED', "START 投影", "Project a persistent START direction onto every tangent; follows bends without accumulated roll, but nearby rings can rotate when their tangent changes"),
             ('PARALLEL_TRANSPORT', "最小扭转", "Transport the START frame along the curve; natural but later points can change downstream roll"),
             ('WORLD_UP', "世界向上", "Use a fixed world-up reference for every cross-section"),
+            ('STICKY', "逐点锁定", "每个截面保存自己的参考朝向：移动其它控制点只会让截面随自身切线倾斜，不改变滚转；只有显式旋转才会转"),
         ),
         default='START_FIXED',
     )

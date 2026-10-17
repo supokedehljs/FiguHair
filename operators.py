@@ -1058,21 +1058,117 @@ def _get_start_roll_normal(curve_obj, start_tangent):
     return normal
 
 
+_STICKY_STATE_GUARD = False
+
+
+def _finite_vector(values, fallback):
+    try:
+        vector = Vector(values)
+    except (TypeError, ValueError):
+        return fallback.copy()
+    if len(vector) < 3 or not all(math.isfinite(value) for value in vector):
+        return fallback.copy()
+    return vector
+
+
+def _self_contained_reference(tangent):
+    """退化时只依赖自身切线的兜底参考，不读取邻居状态。"""
+    axes = (Vector((1.0, 0.0, 0.0)), Vector((0.0, 1.0, 0.0)), Vector((0.0, 0.0, 1.0)))
+    best = min(axes, key=lambda axis: abs(axis.dot(tangent)))
+    reference = best - tangent * best.dot(tangent)
+    if reference.length < 1e-8:
+        reference = Vector((1.0, 0.0, 0.0))
+    return reference.normalized()
+
+
+def _sticky_frames(curve_obj, ring_specs, is_cyclic, start_normal, point_index_offset=0):
+    """逐点持久参考帧（STICKY）。
+
+    - 每个截面保存自己的参考向量和上次切线（对象局部空间）
+    - 用 rotation_difference(旧切线, 新切线) 做最小旋转，而不是投影
+    - 退化时只用自身切线兜底，不读邻居
+    - 只有数值真正变化才写回，避免 depsgraph 递归
+    """
+    global _STICKY_STATE_GUARD
+
+    settings = curve_obj.hair_pipe_settings
+    point_settings = settings.point_settings
+    centers = [center for center, _tangent, _offsets in ring_specs]
+    tangents = [raw_tangent for _center, raw_tangent, _offsets in ring_specs]
+
+    # 没有历史状态时，用现有算法铺一个平滑初始场，然后冻结成逐点状态
+    seed_frames = _endpoint_driven_frames(
+        centers, tangents, is_cyclic, start_normal, 'START_FIXED'
+    )
+
+    frames = []
+    for ring_index, (_center, raw_tangent, _offsets) in enumerate(ring_specs):
+        tangent = safe_normalized(raw_tangent)
+        point_index = point_index_offset + ring_index
+        point = point_settings[point_index] if 0 <= point_index < len(point_settings) else None
+        normal = None
+
+        if point is not None:
+            stored_ref = _finite_vector(getattr(point, "roll_ref", ()), Vector((0.0, 0.0, 0.0)))
+            stored_tangent = _finite_vector(getattr(point, "roll_tangent", ()), Vector((0.0, 0.0, 0.0)))
+            if stored_ref.length > 1e-6 and stored_tangent.length > 1e-6:
+                stored_tangent = stored_tangent.normalized()
+                rotation = stored_tangent.rotation_difference(tangent)
+                normal = rotation @ stored_ref
+                tangential = normal.dot(tangent)
+                if abs(tangential) > 1e-7:
+                    normal = normal - tangent * tangential
+                if normal.length < 1e-6:
+                    normal = None
+
+        if normal is None:
+            if ring_index < len(seed_frames):
+                normal = seed_frames[ring_index][1].copy()
+            else:
+                normal = _self_contained_reference(tangent)
+
+        normal.normalize()
+        binormal = tangent.cross(normal).normalized()
+
+        if point is not None and not _STICKY_STATE_GUARD:
+            stored_ref = Vector(point.roll_ref)
+            stored_tangent = Vector(point.roll_tangent)
+            # 只在还没有状态时写入（种子）。之后每帧都由"存储切线→当前切线"的
+            # 最小旋转直接算出，属于当前切线的纯函数，不再写回：
+            # 既不会递归触发重建，也不会沿拖动路径累积漂移。
+            if stored_ref.length <= 1e-6 or stored_tangent.length <= 1e-6:
+                _STICKY_STATE_GUARD = True
+                try:
+                    point.roll_ref = normal
+                    point.roll_tangent = tangent
+                finally:
+                    _STICKY_STATE_GUARD = False
+
+        frames.append((tangent, normal, binormal))
+
+    return frames
+
+
 def build_minimal_twist_rings(
     ring_specs, is_cyclic=False, start_normal=None, curve_obj=None, spline_index=0,
-    roll_mode='START_FIXED',
+    roll_mode='START_FIXED', point_index_offset=0,
 ):
     if not ring_specs:
         return []
 
     rings = []
-    frames = _endpoint_driven_frames(
-        [center for center, _raw_tangent, _offsets in ring_specs],
-        [raw_tangent for _center, raw_tangent, _offsets in ring_specs],
-        is_cyclic,
-        start_normal,
-        roll_mode,
-    )
+    if roll_mode == 'STICKY' and curve_obj is not None:
+        frames = _sticky_frames(
+            curve_obj, ring_specs, is_cyclic, start_normal, point_index_offset
+        )
+    else:
+        frames = _endpoint_driven_frames(
+            [center for center, _raw_tangent, _offsets in ring_specs],
+            [raw_tangent for _center, raw_tangent, _offsets in ring_specs],
+            is_cyclic,
+            start_normal,
+            roll_mode,
+        )
     if curve_obj is not None:
         _write_roll_diagnostic(curve_obj, spline_index, ring_specs, frames, is_cyclic)
 
@@ -1899,7 +1995,7 @@ def generate_pipe_mesh(curve_obj, settings):
             start_normal = _get_start_roll_normal(curve_obj, safe_normalized(ring_specs[0][1]))
         rings = build_minimal_twist_rings(
             ring_specs, is_cyclic, start_normal, curve_obj, spline_index,
-            settings.roll_mode,
+            settings.roll_mode, point_index_offset=global_point_idx,
         )
         global_point_idx += num_points
         if not rings:
@@ -1978,6 +2074,8 @@ def _point_setting_to_data(point_setting):
         "rotation": point_setting.rotation,
         "use_transition": bool(getattr(point_setting, "use_transition", False)),
         "active_vert_index": point_setting.active_vert_index,
+        "roll_ref": tuple(getattr(point_setting, "roll_ref", (0.0, 0.0, 0.0))),
+        "roll_tangent": tuple(getattr(point_setting, "roll_tangent", (0.0, 0.0, 0.0))),
         "verts": [
             {
                 "offset_x": vert.offset_x,
@@ -2047,6 +2145,8 @@ def _clone_point_setting_data(data):
         "rotation": data.get("rotation", 0.0),
         "use_transition": bool(data.get("use_transition", False)),
         "active_vert_index": data.get("active_vert_index", 0),
+        "roll_ref": tuple(data.get("roll_ref", (0.0, 0.0, 0.0))),
+        "roll_tangent": tuple(data.get("roll_tangent", (0.0, 0.0, 0.0))),
         "verts": [dict(vert) for vert in data.get("verts", [])],
     }
 
@@ -2059,6 +2159,10 @@ def _apply_point_setting_data(point_setting, data, settings):
     point_setting.scale = data.get("scale", 1.0)
     point_setting.rotation = data.get("rotation", 0.0)
     point_setting.use_transition = bool(data.get("use_transition", False))
+    if "roll_ref" in data:
+        point_setting.roll_ref = data["roll_ref"]
+    if "roll_tangent" in data:
+        point_setting.roll_tangent = data["roll_tangent"]
     for vert_data in verts:
         vert = point_setting.cross_section_verts.add()
         vert.offset_x = vert_data.get("offset_x", 0.0)
