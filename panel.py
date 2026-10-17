@@ -18,193 +18,156 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
     def poll(cls, context):
         return True
 
+    def draw_unavailable_settings(self, context, layout):
+        disabled = layout.column()
+        disabled.enabled = False
+
+        box = disabled.box()
+        box.label(text="显示", icon='HIDE_OFF')
+        for label in ("预览模式", "细分层级", "单独显示", "显示在最前"):
+            box.label(text=label)
+
+        edit_box = disabled.box()
+        edit_box.label(text="编辑", icon='EDITMODE_HLT')
+        edit_box.operator("figuhair.widget_interact", text="打开横截面编辑器", icon='MOUSE_LMB')
+        row = edit_box.row(align=True)
+        row.operator("figuhair.widget_smooth_selected_vertices", text="普通平滑", icon='MOD_SMOOTH')
+        row.operator("figuhair.widget_smooth_selected_vertices", text="圆形平滑", icon='MESH_CIRCLE')
+        row = edit_box.row(align=True)
+        row.operator("figuhair.auto_simplify_cross_section", text="自动简化", icon='GHOST_ENABLED')
+        row.operator("figuhair.apply_edge_flow", text="截面边流")
+        row = edit_box.row(align=True)
+        row.operator("figuhair.smooth_curve_points", text="曲线平滑", icon='SMOOTHCURVE')
+        row.operator("figuhair.reverse_curve_direction", text="翻转方向", icon='ARROW_LEFTRIGHT')
+        edit_box.label(text="自动更新管线")
+
+        output_box = disabled.box()
+        output_box.label(text="输出", icon='EXPORT')
+        output_box.operator("figuhair.merge_hair_for_export", text="合并所有头发", icon='EXPORT')
+
+        settings_box = disabled.box()
+        settings_box.label(text="设置", icon='PREFERENCES')
+        for label in ("材质选择", "滚转算法", "平滑着色"):
+            settings_box.label(text=label)
+
     def draw(self, context):
         layout = self.layout
         curve_obj = get_context_curve_object(context)
-        settings = None
-        edit_mode = False
-        if curve_obj is not None:
+
+        # ---------------- 创建 ----------------
+        box = layout.box()
+        box.label(text="创建", icon='MESH_CYLINDER')
+        row = box.row(align=True)
+        row.scale_y = 1.35
+        row.operator("figuhair.draw_hair_curve", text="添加头发", icon='CURVE_DATA')
+        row.operator("figuhair.mesh_to_hair_curve", text="发管转曲线", icon='CURVE_DATA')
+
+        if curve_obj is None:
+            layout.label(text="未选择 FiguHair 头发；设置暂不可编辑", icon='INFO')
+            settings = None
+            edit_mode = False
+        else:
             try:
                 settings = curve_obj.hair_pipe_settings
                 edit_mode = is_curve_edit_mode(curve_obj)
             except Exception as exc:
                 layout.label(text="FiguHair 状态初始化失败", icon='ERROR')
                 layout.label(text=str(exc)[:80], icon='INFO')
+                settings = None
+                edit_mode = False
+
+        if settings is None:
+            self.draw_unavailable_settings(context, layout)
+            return
 
         widget_options = getattr(context.window_manager, "hair_pipe_widget", None)
-        prefs = None
-        try:
-            addon_entry = context.preferences.addons.get("figuhair")
-            prefs = addon_entry.preferences if addon_entry is not None else None
-        except Exception:
-            prefs = None
-
-        edit_controls_enabled = bool(
-            settings is not None
-            and edit_mode
-            and settings.auto_update
-            and len(settings.point_settings) > 0
-        )
-        widget_ready = widget_options is not None and edit_controls_enabled
+        edit_controls_enabled = edit_mode and settings.auto_update and len(settings.point_settings) > 0
+        active_idx = min(settings.active_point_index, len(settings.point_settings) - 1) if settings.point_settings else -1
+        active_ps = settings.point_settings[active_idx] if active_idx >= 0 else None
+        widget_ready = widget_options is not None and edit_controls_enabled and active_ps is not None
         widget_active = widget_ready and widget_options.is_active
-        solo_root = get_hair_root_object(curve_obj) if curve_obj is not None else None
+        solo_root = get_hair_root_object(curve_obj)
         solo_active = bool(solo_root is not None and solo_root.get("hair_pipe_solo_active", False))
-
-        # ---------------- 创建 ----------------
-        create_box = layout.box()
-        create_box.label(text="创建")
-        row = create_box.row(align=True)
-        row.scale_y = 1.35
-        split = row.split(factor=0.62, align=True)
-        split.operator("figuhair.draw_hair_curve", text="添加头发")
-        split.operator("figuhair.mesh_to_hair_curve", text="发管转曲线")
 
         # ---------------- 显示 ----------------
         display_box = layout.box()
-        display_box.label(text="显示")
-        display_box.label(text="预览模式")
-        mode_area = display_box.column(align=True)
-        mode_area.enabled = widget_options is not None
+        display_box.label(text="显示", icon='HIDE_OFF')
+        mode_row = display_box.row(align=True)
+        mode_row.scale_y = 1.3
+        mode_row.enabled = widget_options is not None
         if widget_options is not None:
-            row = mode_area.row(align=True)
-            row.prop(
-                widget_options,
-                "base_preview_enabled",
-                text="去细分",
-                toggle=True,
-                icon='RADIOBUT_ON' if widget_options.preview_mode == 'BASE' else 'RADIOBUT_OFF',
-            )
-            sub = row.row(align=True)
-            sub.alignment = 'RIGHT'
-            sub.label(text="平直着色 · 线框")
-            row = mode_area.row(align=True)
-            row.prop(
-                widget_options,
-                "subdiv_preview_enabled",
-                text="细分",
-                toggle=True,
-                icon='RADIOBUT_ON' if widget_options.preview_mode == 'SUBDIV' else 'RADIOBUT_OFF',
-            )
-            sub = row.row(align=True)
-            sub.alignment = 'RIGHT'
-            sub.label(text="平滑着色")
-            if settings is not None:
-                row = mode_area.row(align=True)
-                row.label(text="", icon='BLANK1')
-                row.prop(settings, "subdivision_levels", text="细分层级")
-                row.prop(
-                    settings,
-                    "default_subdiv",
-                    text="",
-                    emboss=False,
-                    icon='HIDE_OFF' if settings.default_subdiv else 'HIDE_ON',
-                )
+            mode_row.prop(widget_options, "preview_mode", expand=True)
 
-        display_box.separator()
         row = display_box.row(align=True)
-        row.label(text="单独显示")
-        sub = row.row(align=True)
-        sub.alignment = 'RIGHT'
-        sub.label(text="Ctrl+F")
-        sub.operator(
+        row.prop(settings, "subdivision_levels", text="细分层级")
+        icon = 'HIDE_OFF' if settings.default_subdiv else 'HIDE_ON'
+        row.prop(settings, "default_subdiv", text="", icon=icon, toggle=True)
+
+        toggle_row = display_box.row(align=True)
+        toggle_row.scale_y = 1.2
+        toggle_row.operator(
             "figuhair.toggle_solo_display",
-            text="",
-            icon='CHECKBOX_HLT' if solo_active else 'CHECKBOX_DEHLT',
+            text="单独显示",
+            icon='SOLO_ON' if solo_active else 'SOLO_OFF',
             depress=solo_active,
         )
         if widget_options is not None:
-            row = display_box.row(align=True)
-            row.label(text="显示在最前")
-            sub = row.row(align=True)
-            sub.alignment = 'RIGHT'
-            sub.prop(
-                widget_options,
-                "preview_in_front",
-                text="",
-                toggle=True,
-                icon='CHECKBOX_HLT' if widget_options.preview_in_front else 'CHECKBOX_DEHLT',
-            )
+            toggle_row.prop(widget_options, "preview_in_front", text="显示在最前", toggle=True)
 
         # ---------------- 编辑 ----------------
         edit_box = layout.box()
-        header = edit_box.row(align=True)
-        header.label(text="编辑")
-        sub = header.row(align=True)
-        sub.alignment = 'RIGHT'
-        if edit_mode:
-            sub.label(text="曲线编辑模式")
-        else:
-            sub.label(text="需进入曲线编辑模式")
-
+        edit_box.label(text="编辑", icon='EDITMODE_HLT')
         row = edit_box.row(align=True)
         row.scale_y = 1.35
         row.enabled = widget_ready
         if widget_active:
-            row.operator("figuhair.widget_stop", text="关闭横截面编辑器")
+            row.operator("figuhair.widget_stop", text="关闭横截面编辑器", icon='PANEL_CLOSE')
         else:
-            row.operator("figuhair.widget_interact", text="打开横截面编辑器")
+            row.operator("figuhair.widget_interact", text="打开横截面编辑器", icon='MOUSE_LMB')
 
         edit_box.label(text="横截面")
         commands = edit_box.column(align=True)
         commands.enabled = edit_controls_enabled
         row = commands.row(align=True)
-        op = row.operator("figuhair.widget_smooth_selected_vertices", text="普通平滑")
+        row.scale_y = 1.2
+        op = row.operator("figuhair.widget_smooth_selected_vertices", text="普通平滑", icon='MOD_SMOOTH')
         op.mode = 'NEIGHBOR'
-        op = row.operator("figuhair.widget_smooth_selected_vertices", text="圆形平滑")
+        op = row.operator("figuhair.widget_smooth_selected_vertices", text="圆形平滑", icon='MESH_CIRCLE')
         op.mode = 'CIRCULAR'
         row = commands.row(align=True)
-        row.operator("figuhair.auto_simplify_cross_section", text="自动简化")
+        row.scale_y = 1.2
+        row.operator("figuhair.auto_simplify_cross_section", text="自动简化", icon='GHOST_ENABLED')
         op = row.operator("figuhair.apply_edge_flow", text="截面边流")
-        if settings is not None:
-            op.mode = settings.edge_flow_mode
-            op.power = settings.edge_flow_power
-            op.blend = settings.edge_flow_blend
+        op.mode = settings.edge_flow_mode
+        op.power = settings.edge_flow_power
+        op.blend = settings.edge_flow_blend
 
         edit_box.label(text="曲线")
         curve_commands = edit_box.column(align=True)
         curve_commands.enabled = edit_controls_enabled
         row = curve_commands.row(align=True)
-        row.operator("figuhair.smooth_curve_points", text="曲线平滑")
-        row.operator("figuhair.reverse_curve_direction", text="翻转方向")
+        row.scale_y = 1.2
+        row.operator("figuhair.smooth_curve_points", text="曲线平滑", icon='SMOOTHCURVE')
+        row.operator("figuhair.reverse_curve_direction", text="翻转方向", icon='ARROW_LEFTRIGHT')
 
-        if settings is not None:
-            row = edit_box.row(align=True)
-            row.enabled = edit_mode
-            row.prop(settings, "auto_update", text="自动更新管线")
+        auto_row = edit_box.row()
+        auto_row.enabled = edit_mode
+        auto_row.prop(settings, "auto_update", text="自动更新管线")
 
         # ---------------- 输出 ----------------
         output_box = layout.box()
-        output_box.label(text="输出")
+        output_box.label(text="输出", icon='EXPORT')
         row = output_box.row(align=True)
-        row.scale_y = 1.25
-        row.operator("figuhair.merge_hair_for_export", text="合并所有头发")
+        row.enabled = curve_obj is not None
+        row.scale_y = 1.2
+        row.operator("figuhair.merge_hair_for_export", text="合并所有头发", icon='EXPORT')
 
-        # ---------------- 设置（不常改动，可折叠） ----------------
-        expanded = bool(prefs is not None and getattr(prefs, "settings_expanded", False))
+        # ---------------- 设置 ----------------
         settings_box = layout.box()
-        header = settings_box.row(align=True)
-        if prefs is not None:
-            header.prop(
-                prefs,
-                "settings_expanded",
-                text="",
-                emboss=False,
-                icon='TRIA_DOWN' if expanded else 'TRIA_RIGHT',
-            )
-        header.label(text="设置")
-        sub = header.row(align=True)
-        sub.alignment = 'RIGHT'
-        sub.label(text="不常改动")
-
-        if expanded:
-            if settings is None:
-                settings_box.label(text="选择头发后可编辑", icon='INFO')
-            else:
-                column = settings_box.column(align=True)
-                column.prop(settings, "shared_hair_material", text="材质")
-                column.prop(settings, "roll_mode", text="滚转算法")
-                row = settings_box.row(align=True)
-                row.prop(settings, "smooth_shading", text="平滑着色")
+        settings_box.label(text="设置", icon='PREFERENCES')
+        settings_box.prop(settings, "shared_hair_material", text="材质选择", icon='MATERIAL')
+        settings_box.prop(settings, "roll_mode", text="滚转算法")
+        settings_box.prop(settings, "smooth_shading", text="平滑着色")
 
 
 classes = (

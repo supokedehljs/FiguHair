@@ -1,6 +1,6 @@
 import bpy
 from bpy.types import AddonPreferences
-from bpy.props import BoolProperty, FloatProperty
+from bpy.props import FloatProperty
 
 # 常用命令：(操作符 idname, 面板上显示的名字)。注册成键位映射里的条目后，
 # 就能在 偏好设置 > 键位映射 里直接给它们分配快捷键。
@@ -84,12 +84,6 @@ class HairPipePreferences(AddonPreferences):
         max=1.8,
         precision=2,
         update=update_widget_layout,
-    )
-
-    settings_expanded: BoolProperty(
-        name="展开设置",
-        description="侧栏里的「设置」区块是否展开",
-        default=False,
     )
 
     def draw(self, context):
