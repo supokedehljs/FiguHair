@@ -3,6 +3,7 @@ from .operators import (
     is_curve_edit_mode,
     get_curve_point_by_global_index,
     get_context_curve_object,
+    get_hair_root_object,
 )
 
 
@@ -88,51 +89,64 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         icon = 'HIDE_OFF' if settings.default_subdiv else 'HIDE_ON'
         row.prop(settings, "default_subdiv", text="", icon=icon, toggle=True)
 
-        header_box = layout.box()
-        auto_update_row = header_box.row()
-        auto_update_row.enabled = edit_mode
-        auto_update_row.prop(settings, "auto_update", text="编辑模式操作", icon='EDITMODE_HLT', emboss=False)
-
+        widget_options = getattr(context.window_manager, "hair_pipe_widget", None)
         edit_controls_enabled = edit_mode and settings.auto_update and len(settings.point_settings) > 0
         active_idx = min(settings.active_point_index, len(settings.point_settings) - 1) if settings.point_settings else -1
         active_ps = settings.point_settings[active_idx] if active_idx >= 0 else None
-        widget_data = getattr(context.window_manager, "hair_pipe_widget", None)
+        widget_ready = widget_options is not None and edit_controls_enabled and active_ps is not None
+        widget_active = widget_ready and widget_options.is_active
+        solo_root = get_hair_root_object(curve_obj)
+        solo_active = bool(solo_root is not None and solo_root.get("hair_pipe_solo_active", False))
 
-        box = header_box.box()
-        widget_options = getattr(context.window_manager, "hair_pipe_widget", None)
-        display_options = box.column(align=True)
-        display_options.enabled = widget_options is not None
-        display_options.prop(widget_options, "base_preview_enabled", text="去细分显示")
-        display_options.prop(widget_options, "subdiv_preview_enabled", text="细分显示")
-        display_options.prop(widget_options, "solo_display_enabled", text="单独显示")
-        display_options.prop(widget_options, "preview_in_front", text="显示在最前")
+        display_box = layout.box()
+        display_box.label(text="显示", icon='HIDE_OFF')
+        mode_row = display_box.row(align=True)
+        mode_row.scale_y = 1.3
+        mode_row.enabled = widget_options is not None
+        if widget_options is not None:
+            mode_row.prop(widget_options, "preview_mode", expand=True)
 
-        widget_ready = widget_data is not None and edit_controls_enabled and active_ps is not None
-        widget_active = widget_ready and widget_data.is_active
-        row = box.row(align=True)
+        toggle_row = display_box.row(align=True)
+        toggle_row.scale_y = 1.2
+        toggle_row.operator(
+            "figuhair.toggle_solo_display",
+            text="单独显示",
+            icon='SOLO_ON' if solo_active else 'SOLO_OFF',
+            depress=solo_active,
+        )
+        if widget_options is not None:
+            toggle_row.prop(widget_options, "preview_in_front", text="显示在最前", toggle=True)
+
+        editor_box = layout.box()
+        row = editor_box.row(align=True)
+        row.scale_y = 1.35
         row.enabled = widget_ready
-        row.scale_y = 1.25
         if widget_active:
-            row.operator("figuhair.widget_stop", text="关闭编辑器", icon='PANEL_CLOSE')
+            row.operator("figuhair.widget_stop", text="关闭横截面编辑器", icon='PANEL_CLOSE')
         else:
-            row.operator("figuhair.widget_interact", text="打开编辑器", icon='MOUSE_LMB')
+            row.operator("figuhair.widget_interact", text="打开横截面编辑器", icon='MOUSE_LMB')
 
-        commands = header_box.box()
-        commands.label(text="编辑命令", icon='TOOL_SETTINGS')
-        command_controls = commands.column(align=True)
-        command_controls.enabled = edit_controls_enabled
-        row = command_controls.row(align=True)
+        edit_box = layout.box()
+        header_row = edit_box.row()
+        header_row.label(text="编辑模式操作", icon='EDITMODE_HLT')
+        auto_row = edit_box.row()
+        auto_row.enabled = edit_mode
+        auto_row.prop(settings, "auto_update", text="自动更新管线")
+
+        commands = edit_box.column(align=True)
+        commands.enabled = edit_controls_enabled
+        row = commands.row(align=True)
         row.scale_y = 1.2
         op = row.operator("figuhair.apply_edge_flow", text="截面边流")
         op.mode = settings.edge_flow_mode
         op.power = settings.edge_flow_power
         op.blend = settings.edge_flow_blend
         row.operator("figuhair.reverse_curve_direction", text="翻转方向", icon='ARROW_LEFTRIGHT')
-        row = command_controls.row(align=True)
+        row = commands.row(align=True)
         row.scale_y = 1.2
         row.operator("figuhair.smooth_curve_points", text="曲线平滑", icon='SMOOTHCURVE')
         row.operator("figuhair.auto_simplify_cross_section", text="自动简化", icon='GHOST_ENABLED')
-        row = command_controls.row(align=True)
+        row = commands.row(align=True)
         row.scale_y = 1.2
         op = row.operator("figuhair.widget_smooth_selected_vertices", text="普通平滑", icon='MOD_SMOOTH')
         op.mode = 'NEIGHBOR'

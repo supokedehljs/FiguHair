@@ -4813,6 +4813,19 @@ class HAIRPIPE_OT_hide_all_tail_meshes(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _object_in_figuhair_context(obj):
+    """只有 FiguHair 的头发对象才算（避免占用别的插件的快捷键）。"""
+    if obj is None:
+        return False
+    if obj.type == 'CURVE':
+        return bool(obj.get("hair_pipe_base_name"))
+    if obj.type == 'EMPTY':
+        return get_curve_from_figuhair_root(obj) is not None
+    if obj.type == 'MESH':
+        return get_pipe_source_curve(obj) is not None or get_tail_source_curve(obj) is not None
+    return False
+
+
 class HAIRPIPE_OT_toggle_solo_display(bpy.types.Operator):
     """Toggle solo display for the active hair set"""
     bl_idname = "figuhair.toggle_solo_display"
@@ -4821,8 +4834,12 @@ class HAIRPIPE_OT_toggle_solo_display(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        curve_obj = get_context_curve_object(context)
-        return curve_obj is not None and curve_obj.type == 'CURVE'
+        candidates = [
+            getattr(context, 'object', None),
+            getattr(context, 'active_object', None),
+        ]
+        candidates.extend(getattr(context, 'selected_objects', ()) or ())
+        return any(_object_in_figuhair_context(obj) for obj in candidates)
 
     def execute(self, context):
         curves = []

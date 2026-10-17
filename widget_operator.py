@@ -193,6 +193,7 @@ class HairPipeWidgetSettings(PropertyGroup):
             ('SUBDIV', "细分显示", "保留细分并使用平滑着色"),
         ),
         default='SUBDIV',
+        update=refresh_widget_preview_from_property,
     )
     preview_in_front: BoolProperty(
         name="显示在最前",
@@ -1932,7 +1933,10 @@ def refresh_pipe_during_widget_edit(context, min_interval=1.0 / 30.0):
 def redraw_view3d(context, refresh_pipe=True):
     if refresh_pipe and getattr(getattr(context.window_manager, 'hair_pipe_widget', None), 'is_active', False):
         refresh_pipe_during_widget_edit(context)
-    for area in context.screen.areas:
+    screen = getattr(context, 'screen', None)
+    if screen is None:
+        return
+    for area in screen.areas:
         if area.type == 'VIEW_3D':
             area.tag_redraw()
 
