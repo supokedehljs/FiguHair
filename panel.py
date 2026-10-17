@@ -74,7 +74,9 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
                 toggle=True,
                 icon='RADIOBUT_ON' if widget_options.preview_mode == 'BASE' else 'RADIOBUT_OFF',
             )
-            row.label(text="平直着色 · 线框")
+            sub = row.row(align=True)
+            sub.alignment = 'RIGHT'
+            sub.label(text="平直着色 · 线框")
             row = mode_area.row(align=True)
             row.prop(
                 widget_options,
@@ -83,16 +85,18 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
                 toggle=True,
                 icon='RADIOBUT_ON' if widget_options.preview_mode == 'SUBDIV' else 'RADIOBUT_OFF',
             )
-            row.label(text="平滑着色")
+            sub = row.row(align=True)
+            sub.alignment = 'RIGHT'
+            sub.label(text="平滑着色")
             if settings is not None:
                 row = mode_area.row(align=True)
-                row.separator(factor=1.0)
+                row.label(text="", icon='BLANK1')
                 row.prop(settings, "subdivision_levels", text="细分层级")
                 row.prop(
                     settings,
                     "default_subdiv",
                     text="",
-                    toggle=True,
+                    emboss=False,
                     icon='HIDE_OFF' if settings.default_subdiv else 'HIDE_ON',
                 )
 
@@ -130,7 +134,7 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         if edit_mode:
             sub.label(text="曲线编辑模式")
         else:
-            sub.label(text="需选中头发并进入曲线编辑模式")
+            sub.label(text="需进入曲线编辑模式")
 
         row = edit_box.row(align=True)
         row.scale_y = 1.35
@@ -166,13 +170,7 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
         if settings is not None:
             row = edit_box.row(align=True)
             row.enabled = edit_mode
-            row.prop(
-                settings,
-                "auto_update",
-                text="自动更新管线",
-                toggle=True,
-                icon='CHECKBOX_HLT' if settings.auto_update else 'CHECKBOX_DEHLT',
-            )
+            row.prop(settings, "auto_update", text="自动更新管线")
 
         # ---------------- 输出 ----------------
         output_box = layout.box()
@@ -189,12 +187,11 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
             header.prop(
                 prefs,
                 "settings_expanded",
-                text="设置",
+                text="",
                 emboss=False,
                 icon='TRIA_DOWN' if expanded else 'TRIA_RIGHT',
             )
-        else:
-            header.label(text="设置")
+        header.label(text="设置")
         sub = header.row(align=True)
         sub.alignment = 'RIGHT'
         sub.label(text="不常改动")
@@ -207,13 +204,7 @@ class HAIRPIPE_PT_main_panel(bpy.types.Panel):
                 column.prop(settings, "shared_hair_material", text="材质")
                 column.prop(settings, "roll_mode", text="滚转算法")
                 row = settings_box.row(align=True)
-                row.prop(
-                    settings,
-                    "smooth_shading",
-                    text="平滑着色",
-                    toggle=True,
-                    icon='CHECKBOX_HLT' if settings.smooth_shading else 'CHECKBOX_DEHLT',
-                )
+                row.prop(settings, "smooth_shading", text="平滑着色")
 
 
 classes = (
