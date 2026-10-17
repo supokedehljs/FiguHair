@@ -17,7 +17,7 @@ def update_widget_layout(self, context):
 
 
 class HairPipePreferences(AddonPreferences):
-    bl_idname = "hair_curve_pipe"
+    bl_idname = "figuhair"
 
     widget_offset_x: FloatProperty(
         name="左右",
@@ -58,8 +58,8 @@ class HairPipePreferences(AddonPreferences):
         layout.separator()
         layout.label(text="快捷键设置", icon='KEYINGSET')
         layout.label(text="请在 Blender 键位映射中搜索 FiguHair 修改快捷键", icon='INFO')
-        layout.label(text="单独显示：hair_pipe.toggle_solo_display")
-        layout.label(text="编辑器（开关）：hair_pipe.widget_interact")
+        layout.label(text="单独显示：figuhair.toggle_solo_display")
+        layout.label(text="编辑器（开关）：figuhair.widget_interact")
 
 
 _addon_keymaps = []
@@ -84,9 +84,9 @@ def register_keymaps():
         return
 
     km = kc.keymaps.new(name='3D View', space_type='VIEW_3D')
-    kmi = km.keymap_items.new('hair_pipe.widget_interact', 'X', 'PRESS', ctrl=True, shift=True)
+    kmi = km.keymap_items.new('figuhair.widget_interact', 'X', 'PRESS', ctrl=True, shift=True)
     _addon_keymaps.append((km, kmi))
-    kmi = km.keymap_items.new('hair_pipe.toggle_solo_display', 'NONE', 'PRESS')
+    kmi = km.keymap_items.new('figuhair.toggle_solo_display', 'NONE', 'PRESS')
     _addon_keymaps.append((km, kmi))
     _register_keymaps_retries = 0
 

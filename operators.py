@@ -1561,6 +1561,122 @@ def ensure_auto_ghost_slider_gesture(context, curve_obj):
     bpy.app.timers.register(finish_when_idle, first_interval=0.08)
 
 
+def get_button_target_point_indices(curve_obj, settings):
+    """按钮版的取点规则：编辑模式优先用曲线选中的控制点，否则退回当前活动点。"""
+    indices = []
+    if is_curve_edit_mode(curve_obj):
+        indices = get_selected_curve_point_indices(curve_obj)
+    if not indices and len(settings.point_settings) > 0:
+        indices = [max(0, min(settings.active_point_index, len(settings.point_settings) - 1))]
+    return [idx for idx in indices if 0 <= idx < len(settings.point_settings)]
+
+
+class HAIRPIPE_OT_smooth_curve_points(bpy.types.Operator):
+    """把选中的曲线控制点向相邻两点的中点平滑（点一次 = 平滑一次）"""
+    bl_idname = "figuhair.smooth_curve_points"
+    bl_label = "曲线平滑"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    strength: FloatProperty(
+        name="强度",
+        description="每次点击的平滑量；越大越接近相邻两点的中点",
+        default=0.5,
+        min=0.0,
+        max=1.0,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return get_context_curve_object(context) is not None
+
+    def execute(self, context):
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            return {'CANCELLED'}
+        settings = curve_obj.hair_pipe_settings
+        indices = get_button_target_point_indices(curve_obj, settings)
+        if not indices:
+            self.report({'WARNING'}, "没有可平滑的控制点")
+            return {'CANCELLED'}
+
+        state = {
+            'selected_indices': indices,
+            'snapshot': _capture_curve_point_snapshot(curve_obj, indices),
+        }
+        _apply_curve_smooth_slider(curve_obj, max(0.0, min(1.0, float(self.strength))), state)
+        curve_obj.data.update_tag()
+        curve_obj.update_tag()
+        _refresh_after_button_edit(context)
+        return {'FINISHED'}
+
+
+class HAIRPIPE_OT_auto_simplify_cross_section(bpy.types.Operator):
+    """按横截面变化程度，把影响较小的顶点转成幽灵点（点一次 = 简化一次）"""
+    bl_idname = "figuhair.auto_simplify_cross_section"
+    bl_label = "自动简化"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    amount: FloatProperty(
+        name="程度",
+        description="每次点击简化的比例；1.0 表示一直简化到只剩三个正常点",
+        default=0.5,
+        min=0.0,
+        max=1.0,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return get_context_curve_object(context) is not None
+
+    def execute(self, context):
+        curve_obj = get_context_curve_object(context)
+        if curve_obj is None:
+            return {'CANCELLED'}
+        settings = curve_obj.hair_pipe_settings
+        indices = get_button_target_point_indices(curve_obj, settings)
+        if not indices:
+            self.report({'WARNING'}, "没有可简化的横截面")
+            return {'CANCELLED'}
+
+        push_widget_undo = _get_widget_undo_pusher()
+        if push_widget_undo is not None:
+            push_widget_undo(context, "自动简化横截面")
+        snapshot = _capture_auto_ghost_snapshot(settings, indices)
+        changed = apply_auto_ghost_vertices(
+            settings,
+            max(0.0, min(1.0, float(self.amount))),
+            indices,
+            snapshot,
+        )
+        curve_obj.data.update_tag()
+        curve_obj.update_tag()
+        _refresh_after_button_edit(context)
+        if not changed:
+            self.report({'INFO'}, "这些横截面已经没有可简化的顶点")
+        return {'FINISHED'}
+
+
+def _get_widget_undo_pusher():
+    try:
+        from .widget_operator import push_widget_undo
+        return push_widget_undo
+    except (ImportError, AttributeError):
+        return None
+
+
+def _refresh_after_button_edit(context):
+    """重建管线并刷新视图；在没有界面（例如后台运行）时安静地跳过。"""
+    try:
+        from .widget_operator import clear_pipe_mesh_cache, redraw_view3d
+    except (ImportError, AttributeError):
+        return
+    clear_pipe_mesh_cache()
+    try:
+        redraw_view3d(context)
+    except (AttributeError, RuntimeError):
+        pass
+
+
 def add_cross_section_vertex_after(point_setting, idx, is_ghost=False):
     csv = point_setting.cross_section_verts
     n = len(csv)
@@ -2019,7 +2135,10 @@ def sync_point_settings(curve_obj):
                     settings.active_point_index += insert_count
                 inserted = True
         if not inserted:
-            template_data = old_data[settings.active_point_index] if current > 0 else _default_point_setting_data(settings)
+            # active_point_index 可能落后于真实点数（例如曲线点数变过），
+            # 这里必须夹紧，否则后面按索引取模板数据会越界报错。
+            template_index = max(0, min(settings.active_point_index, current - 1))
+            template_data = old_data[template_index] if current > 0 else _default_point_setting_data(settings)
             for _ in range(total_points - current):
                 ps = settings.point_settings.add()
                 _apply_point_setting_data(ps, template_data, settings)
@@ -3086,7 +3205,7 @@ def redirect_pipe_selection(context, pipe_obj=None):
     if active_curve is None:
         return False
 
-    if not active_curve.hair_pipe_settings.plugin_enabled:
+    if not active_curve.hair_pipe_settings.redirect_selection:
         return False
 
     if context.view_layer.objects.get(active_curve.name) is None:
@@ -3102,7 +3221,7 @@ def redirect_pipe_selection(context, pipe_obj=None):
             selected_curves.append(obj)
         elif obj.type == 'MESH':
             source_curve = get_pipe_source_curve(obj)
-            if source_curve is not None and source_curve.hair_pipe_settings.plugin_enabled:
+            if source_curve is not None and source_curve.hair_pipe_settings.redirect_selection:
                 selected_meshes.append(obj)
                 selected_curves.append(source_curve)
 
@@ -3612,10 +3731,70 @@ def _signed_polygon_area_2d(points):
     return area * 0.5
 
 
-def make_hair_curve_from_tube_mesh(context, mesh_obj):
-    depsgraph = context.evaluated_depsgraph_get()
-    eval_obj = mesh_obj.evaluated_get(depsgraph)
-    mesh = bpy.data.meshes.new_from_object(eval_obj, depsgraph=depsgraph)
+def _mesh_loose_components(mesh):
+    """Return polygon-connected vertex/face components from the raw mesh."""
+    vertex_to_faces = {}
+    for poly in mesh.polygons:
+        for vertex_index in poly.vertices:
+            vertex_to_faces.setdefault(vertex_index, []).append(poly.index)
+
+    unvisited_faces = set(range(len(mesh.polygons)))
+    components = []
+    while unvisited_faces:
+        start_face = unvisited_faces.pop()
+        face_indices = {start_face}
+        stack = [start_face]
+        while stack:
+            face_index = stack.pop()
+            for vertex_index in mesh.polygons[face_index].vertices:
+                for neighbor_face in vertex_to_faces.get(vertex_index, ()):
+                    if neighbor_face in unvisited_faces:
+                        unvisited_faces.remove(neighbor_face)
+                        face_indices.add(neighbor_face)
+                        stack.append(neighbor_face)
+
+        vertex_indices = set()
+        for face_index in face_indices:
+            vertex_indices.update(mesh.polygons[face_index].vertices)
+        components.append((vertex_indices, face_indices))
+    return components
+
+
+def _make_raw_component_object(mesh_obj, component_index, vertex_indices, face_indices):
+    """Build a temporary object for one raw, modifier-free loose component."""
+    source_mesh = mesh_obj.data
+    ordered_vertices = sorted(vertex_indices)
+    vertex_map = {old: new for new, old in enumerate(ordered_vertices)}
+    vertices = [source_mesh.vertices[index].co.copy() for index in ordered_vertices]
+    faces = [
+        [vertex_map[index] for index in source_mesh.polygons[face_index].vertices]
+        for face_index in sorted(face_indices)
+    ]
+
+    component_mesh = bpy.data.meshes.new(
+        f"{mesh_obj.name}_raw_component_{component_index:03d}"
+    )
+    component_mesh.from_pydata(vertices, [], faces)
+    component_mesh.update()
+    component_obj = bpy.data.objects.new(component_mesh.name, component_mesh)
+    target_collection = mesh_obj.users_collection[0] if mesh_obj.users_collection else bpy.context.scene.collection
+    target_collection.objects.link(component_obj)
+    component_obj.matrix_world = mesh_obj.matrix_world.copy()
+    component_obj.hide_viewport = True
+    component_obj.hide_render = True
+    return component_obj
+
+
+def make_hair_curve_from_tube_mesh(context, mesh_obj, use_modifiers=True):
+    mesh = None
+    owns_mesh = False
+    if use_modifiers:
+        depsgraph = context.evaluated_depsgraph_get()
+        eval_obj = mesh_obj.evaluated_get(depsgraph)
+        mesh = bpy.data.meshes.new_from_object(eval_obj, depsgraph=depsgraph)
+        owns_mesh = True
+    else:
+        mesh = mesh_obj.data
     try:
         rings = extract_tube_rings_from_mesh(mesh)
         if not rings:
@@ -3686,19 +3865,28 @@ def make_hair_curve_from_tube_mesh(context, mesh_obj):
         update_all_ghost_vertices(settings)
         if len(settings.point_settings) > 0:
             settings.active_point_index = 0
-        mesh_obj["hair_pipe_import_source"] = True
         if "hair_pipe_source_curve" in mesh_obj:
             del mesh_obj["hair_pipe_source_curve"]
         mesh_obj.hide_select = False
         return curve_obj, None
     finally:
-        bpy.data.meshes.remove(mesh)
+        if owns_mesh and mesh is not None:
+            bpy.data.meshes.remove(mesh)
+
+
+def _remove_generated_curve(curve_obj):
+    if curve_obj is None:
+        return
+    curve_data = curve_obj.data
+    bpy.data.objects.remove(curve_obj, do_unlink=True)
+    if curve_data.users == 0:
+        bpy.data.curves.remove(curve_data)
 
 
 class HAIRPIPE_OT_mesh_to_hair_curve(bpy.types.Operator):
     """Convert selected quad tube meshes back into FiguHair curves"""
-    bl_idname = "hair_pipe.mesh_to_hair_curve"
-    bl_label = "管状网格转头发曲线"
+    bl_idname = "figuhair.mesh_to_hair_curve"
+    bl_label = "发管转曲线"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -3714,25 +3902,52 @@ class HAIRPIPE_OT_mesh_to_hair_curve(bpy.types.Operator):
         converted_curves = []
         errors = []
         for mesh_obj in mesh_objects:
-            curve_obj, error = make_hair_curve_from_tube_mesh(context, mesh_obj)
-            if error:
-                errors.append(f"{mesh_obj.name}: {error}")
+            # Read the original mesh only. Evaluated geometry would run expensive
+            # hair/shampoo modifiers before the loose components are separated.
+            components = _mesh_loose_components(mesh_obj.data)
+            if not components:
+                errors.append(f"{mesh_obj.name}: 网格没有可转换的面")
                 continue
 
-            for obj in context.selected_objects:
-                obj.select_set(False)
-            curve_obj.select_set(True)
-            context.view_layer.objects.active = curve_obj
-            result = bpy.ops.hair_pipe.generate_pipe()
-            if 'FINISHED' not in result:
-                errors.append(f"{mesh_obj.name}: 生成 FiguHair 管线失败")
-                curve_data = curve_obj.data
-                bpy.data.objects.remove(curve_obj, do_unlink=True)
-                if curve_data.users == 0:
-                    bpy.data.curves.remove(curve_data)
+            mesh_curves = []
+            mesh_error = None
+            temp_objects = []
+            for component_index, (vertex_indices, face_indices) in enumerate(components, 1):
+                component_obj = _make_raw_component_object(
+                    mesh_obj, component_index, vertex_indices, face_indices,
+                )
+                temp_objects.append(component_obj)
+                curve_obj, error = make_hair_curve_from_tube_mesh(
+                    context, component_obj, use_modifiers=False,
+                )
+                if error:
+                    mesh_error = f"{mesh_obj.name} 第 {component_index} 个松散块: {error}"
+                    break
+
+                for obj in context.selected_objects:
+                    obj.select_set(False)
+                curve_obj.select_set(True)
+                context.view_layer.objects.active = curve_obj
+                result = bpy.ops.figuhair.generate_pipe()
+                if 'FINISHED' not in result:
+                    mesh_error = f"{mesh_obj.name} 第 {component_index} 个松散块: 生成 FiguHair 管线失败"
+                    _remove_generated_curve(curve_obj)
+                    break
+                mesh_curves.append(curve_obj)
+
+            for temp_obj in temp_objects:
+                temp_mesh = temp_obj.data
+                bpy.data.objects.remove(temp_obj, do_unlink=True)
+                if temp_mesh.users == 0:
+                    bpy.data.meshes.remove(temp_mesh)
+
+            if mesh_error:
+                for curve_obj in mesh_curves:
+                    _remove_generated_curve(curve_obj)
+                errors.append(mesh_error)
                 continue
 
-            converted_curves.append(curve_obj)
+            converted_curves.extend(mesh_curves)
             mesh_data = mesh_obj.data
             bpy.data.objects.remove(mesh_obj, do_unlink=True)
             if mesh_data.users == 0:
@@ -3758,7 +3973,7 @@ class HAIRPIPE_OT_mesh_to_hair_curve(bpy.types.Operator):
 
 class HAIRPIPE_OT_generate_pipe(bpy.types.Operator):
     """Generate pipe mesh from curve with per-point custom cross-sections"""
-    bl_idname = "hair_pipe.generate_pipe"
+    bl_idname = "figuhair.generate_pipe"
     bl_label = "Generate Hair Pipe"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -3807,7 +4022,7 @@ class HAIRPIPE_OT_generate_pipe(bpy.types.Operator):
 
 class HAIRPIPE_OT_sync_points(bpy.types.Operator):
     """Sync point settings with curve control points"""
-    bl_idname = "hair_pipe.sync_points"
+    bl_idname = "figuhair.sync_points"
     bl_label = "Sync Point Settings"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -3824,7 +4039,7 @@ class HAIRPIPE_OT_sync_points(bpy.types.Operator):
 
 class HAIRPIPE_OT_toggle_cross_section_transition(bpy.types.Operator):
     """Toggle transition mode for selected curve control points"""
-    bl_idname = "hair_pipe.toggle_cross_section_transition"
+    bl_idname = "figuhair.toggle_cross_section_transition"
     bl_label = "横截面过渡模式"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -3868,7 +4083,7 @@ class HAIRPIPE_OT_toggle_cross_section_transition(bpy.types.Operator):
 
 class HAIRPIPE_OT_apply_edge_flow(bpy.types.Operator):
     """Rebuild selected curve control points from surrounding editable cross-sections"""
-    bl_idname = "hair_pipe.apply_edge_flow"
+    bl_idname = "figuhair.apply_edge_flow"
     bl_label = "Apply Edge Flow"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -3949,7 +4164,7 @@ class HAIRPIPE_OT_apply_edge_flow(bpy.types.Operator):
 
 class HAIRPIPE_OT_reset_cross_section(bpy.types.Operator):
     """Reset active point's cross-section to a circle"""
-    bl_idname = "hair_pipe.reset_cross_section"
+    bl_idname = "figuhair.reset_cross_section"
     bl_label = "Reset to Circle"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -3972,7 +4187,7 @@ class HAIRPIPE_OT_reset_cross_section(bpy.types.Operator):
 
 class HAIRPIPE_OT_reset_all_cross_sections(bpy.types.Operator):
     """Reset ALL points' cross-sections to circles"""
-    bl_idname = "hair_pipe.reset_all_cross_sections"
+    bl_idname = "figuhair.reset_all_cross_sections"
     bl_label = "Reset All to Circle"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -3992,7 +4207,7 @@ class HAIRPIPE_OT_reset_all_cross_sections(bpy.types.Operator):
 
 class HAIRPIPE_OT_taper_linear(bpy.types.Operator):
     """Apply linear taper from root to tip"""
-    bl_idname = "hair_pipe.taper_linear"
+    bl_idname = "figuhair.taper_linear"
     bl_label = "Linear Taper"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4016,7 +4231,7 @@ class HAIRPIPE_OT_taper_linear(bpy.types.Operator):
 
 class HAIRPIPE_OT_add_cs_vert(bpy.types.Operator):
     """Add a vertex to the active point's cross-section"""
-    bl_idname = "hair_pipe.add_cs_vert"
+    bl_idname = "figuhair.add_cs_vert"
     bl_label = "Add Vertex"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4048,7 +4263,7 @@ class HAIRPIPE_OT_add_cs_vert(bpy.types.Operator):
 
 class HAIRPIPE_OT_remove_cs_vert(bpy.types.Operator):
     """Remove the active vertex from the cross-section"""
-    bl_idname = "hair_pipe.remove_cs_vert"
+    bl_idname = "figuhair.remove_cs_vert"
     bl_label = "Remove Vertex"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4071,7 +4286,7 @@ class HAIRPIPE_OT_remove_cs_vert(bpy.types.Operator):
 
 class HAIRPIPE_OT_select_point(bpy.types.Operator):
     """Select a control point for editing"""
-    bl_idname = "hair_pipe.select_point"
+    bl_idname = "figuhair.select_point"
     bl_label = "Select Point"
     point_index: IntProperty()
 
@@ -4102,7 +4317,7 @@ _HAIRPIPE_CROSS_SECTION_CLIPBOARD = None
 
 class HAIRPIPE_OT_copy_cross_section(bpy.types.Operator):
     """Copy the active point cross-section to the FiguHair clipboard"""
-    bl_idname = "hair_pipe.copy_cross_section"
+    bl_idname = "figuhair.copy_cross_section"
     bl_label = "复制横截面"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4138,7 +4353,7 @@ class HAIRPIPE_OT_copy_cross_section(bpy.types.Operator):
 
 class HAIRPIPE_OT_paste_cross_section(bpy.types.Operator):
     """Paste the copied cross-section to active or selected curve points"""
-    bl_idname = "hair_pipe.paste_cross_section"
+    bl_idname = "figuhair.paste_cross_section"
     bl_label = "粘贴横截面"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4204,7 +4419,7 @@ class HAIRPIPE_OT_paste_cross_section(bpy.types.Operator):
 
 class HAIRPIPE_OT_copy_cs_to_all(bpy.types.Operator):
     """Copy active point's cross-section to all other points"""
-    bl_idname = "hair_pipe.copy_cs_to_all"
+    bl_idname = "figuhair.copy_cs_to_all"
     bl_label = "Copy to All Points"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4230,38 +4445,16 @@ class HAIRPIPE_OT_copy_cs_to_all(bpy.types.Operator):
 
 
 
-_PLUGIN_ENABLED_STATE_GUARD = False
+def apply_global_mesh_selectability(enabled=True):
+    """让 FiguHair 的管线/尾巴网格保持可点选。
 
-
-def is_plugin_enabled():
+    enabled 参数只为兼容旧调用保留：网格必须保持可被点选，否则点击会
+    穿透到后面的其他物体；点击重定向由对象模式下的选择处理器完成，
+    每个曲线是否参与重定向由它自己的 redirect_selection 决定。
+    """
     for obj in bpy.data.objects:
-        if obj.type == 'CURVE' and hasattr(obj, 'hair_pipe_settings') and obj.get("hair_pipe_base_name"):
-            return bool(obj.hair_pipe_settings.plugin_enabled)
-    return True
-
-
-def apply_plugin_enabled_state(enabled):
-    global _PLUGIN_ENABLED_STATE_GUARD
-    if _PLUGIN_ENABLED_STATE_GUARD:
-        return
-    enabled = bool(enabled)
-    _PLUGIN_ENABLED_STATE_GUARD = True
-    try:
-        for obj in bpy.data.objects:
-            if obj.type == 'CURVE' and hasattr(obj, 'hair_pipe_settings'):
-                if obj.hair_pipe_settings.plugin_enabled != enabled:
-                    obj.hair_pipe_settings.plugin_enabled = enabled
-            if _is_pipe_mesh_obj(obj) or _is_tail_mesh_only_obj(obj):
-                # Enabled meshes must remain hit-testable; the selection handler
-                # redirects the click to the source curve. hide_select would
-                # make the click pass through to unrelated objects behind it.
-                obj.hide_select = False
-    finally:
-        _PLUGIN_ENABLED_STATE_GUARD = False
-
-
-def apply_global_mesh_selectability(enabled):
-    apply_plugin_enabled_state(enabled)
+        if _is_pipe_mesh_obj(obj) or _is_tail_mesh_only_obj(obj):
+            obj.hide_select = False
 
 
 def sync_global_redirect_selection(source_curve):
@@ -4276,7 +4469,7 @@ def sync_global_redirect_selection(source_curve):
 
 class HAIRPIPE_OT_apply_global_mesh_selectability(bpy.types.Operator):
     """Apply global mesh selectability to all FiguHair pipe meshes"""
-    bl_idname = "hair_pipe.apply_global_mesh_selectability"
+    bl_idname = "figuhair.apply_global_mesh_selectability"
     bl_label = "应用网格不可选模式"
 
     @classmethod
@@ -4292,7 +4485,7 @@ class HAIRPIPE_OT_apply_global_mesh_selectability(bpy.types.Operator):
 
 class HAIRPIPE_OT_toggle_redirect_selection(bpy.types.Operator):
     """Toggle global curve-only and mesh-selectable mode"""
-    bl_idname = "hair_pipe.toggle_redirect_selection"
+    bl_idname = "figuhair.toggle_redirect_selection"
     bl_label = "网格不可选模式"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4348,7 +4541,7 @@ def _reverse_spline_points(spline):
 
 class HAIRPIPE_OT_reverse_curve_direction(bpy.types.Operator):
     """Reverse the active hair curve without changing its visible sections"""
-    bl_idname = "hair_pipe.reverse_curve_direction"
+    bl_idname = "figuhair.reverse_curve_direction"
     bl_label = "翻转曲线方向"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4407,7 +4600,7 @@ class HAIRPIPE_OT_reverse_curve_direction(bpy.types.Operator):
 
 class HAIRPIPE_OT_equalize_point_distance(bpy.types.Operator):
     """Redistribute selected curve points to be equally spaced along the curve"""
-    bl_idname = "hair_pipe.equalize_point_distance"
+    bl_idname = "figuhair.equalize_point_distance"
     bl_label = "\u8ddd\u79bb\u5e73\u5747\u5316"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4495,7 +4688,7 @@ class HAIRPIPE_OT_equalize_point_distance(bpy.types.Operator):
 
 class HAIRPIPE_OT_create_tail_mesh(bpy.types.Operator):
     """Create a tail mesh at the end of the curve"""
-    bl_idname = "hair_pipe.create_tail_mesh"
+    bl_idname = "figuhair.create_tail_mesh"
     bl_label = "\u751f\u6210\u672b\u7aef\u7f51\u683c"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4535,7 +4728,7 @@ class HAIRPIPE_OT_create_tail_mesh(bpy.types.Operator):
 
 class HAIRPIPE_OT_remove_tail_mesh(bpy.types.Operator):
     """Remove the tail mesh"""
-    bl_idname = "hair_pipe.remove_tail_mesh"
+    bl_idname = "figuhair.remove_tail_mesh"
     bl_label = "\u5220\u9664\u672b\u7aef\u7f51\u683c"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4568,7 +4761,7 @@ class HAIRPIPE_OT_remove_tail_mesh(bpy.types.Operator):
 
 class HAIRPIPE_OT_toggle_tail_visibility(bpy.types.Operator):
     """Toggle tail mesh visibility"""
-    bl_idname = "hair_pipe.toggle_tail_visibility"
+    bl_idname = "figuhair.toggle_tail_visibility"
     bl_label = "隐藏/显示末端网格"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4598,7 +4791,7 @@ class HAIRPIPE_OT_toggle_tail_visibility(bpy.types.Operator):
 
 class HAIRPIPE_OT_hide_all_tail_meshes(bpy.types.Operator):
     """Hide all FiguHair tail meshes"""
-    bl_idname = "hair_pipe.hide_all_tail_meshes"
+    bl_idname = "figuhair.hide_all_tail_meshes"
     bl_label = "隐藏所有末端网格"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4622,7 +4815,7 @@ class HAIRPIPE_OT_hide_all_tail_meshes(bpy.types.Operator):
 
 class HAIRPIPE_OT_toggle_solo_display(bpy.types.Operator):
     """Toggle solo display for the active hair set"""
-    bl_idname = "hair_pipe.toggle_solo_display"
+    bl_idname = "figuhair.toggle_solo_display"
     bl_label = "单独显示"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4696,7 +4889,7 @@ class HAIRPIPE_OT_toggle_solo_display(bpy.types.Operator):
 
 class HAIRPIPE_OT_edit_tail_mesh(bpy.types.Operator):
     """切换末端网格编辑模式与曲线编辑模式"""
-    bl_idname = "hair_pipe.edit_tail_mesh"
+    bl_idname = "figuhair.edit_tail_mesh"
     bl_label = "\u7f16\u8f91\u672b\u7aef\u7f51\u683c"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4765,7 +4958,7 @@ class HAIRPIPE_OT_edit_tail_mesh(bpy.types.Operator):
 
 class HAIRPIPE_OT_hide_hair(bpy.types.Operator):
     """Hide selected complete FiguHair sets"""
-    bl_idname = "hair_pipe.hide_hair"
+    bl_idname = "figuhair.hide_hair"
     bl_label = "隐藏头发"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4800,7 +4993,7 @@ class HAIRPIPE_OT_hide_hair(bpy.types.Operator):
 
 class HAIRPIPE_OT_show_all_hair(bpy.types.Operator):
     """Show all complete FiguHair sets"""
-    bl_idname = "hair_pipe.show_all_hair"
+    bl_idname = "figuhair.show_all_hair"
     bl_label = "显示全部头发"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4819,7 +5012,7 @@ class HAIRPIPE_OT_show_all_hair(bpy.types.Operator):
 
 class HAIRPIPE_OT_family_local_view(bpy.types.Operator):
     """Toggle Blender local view for complete FiguHair sets"""
-    bl_idname = "hair_pipe.family_local_view"
+    bl_idname = "figuhair.family_local_view"
     bl_label = "整套头发单独显示"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4880,7 +5073,7 @@ class HAIRPIPE_OT_family_local_view(bpy.types.Operator):
 
 class HAIRPIPE_OT_delete_hair(bpy.types.Operator):
     """Delete selected complete FiguHair hair sets"""
-    bl_idname = "hair_pipe.delete_hair"
+    bl_idname = "figuhair.delete_hair"
     bl_label = "删除头发"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -4971,7 +5164,7 @@ class HAIRPIPE_OT_delete_hair(bpy.types.Operator):
 
 class HAIRPIPE_OT_duplicate_hair(bpy.types.Operator):
     """Duplicate the entire hair (root empty, curve, pipe mesh, tail mesh) and rename"""
-    bl_idname = "hair_pipe.duplicate_hair"
+    bl_idname = "figuhair.duplicate_hair"
     bl_label = "\u590d\u5236\u5934\u53d1"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -5118,7 +5311,7 @@ class HAIRPIPE_OT_duplicate_hair(bpy.types.Operator):
 
 class HAIRPIPE_OT_merge_hair_for_export(bpy.types.Operator):
     """\u5c06\u6240\u6709\u5934\u53d1\u7f51\u683c\u5408\u5e76\u4e3a\u5355\u4e00\u7f51\u683c\u7528\u4e8e\u5bfc\u51fa\uff0c\u5e76\u9690\u85cf\u539f\u59cb\u5934\u53d1"""
-    bl_idname = "hair_pipe.merge_hair_for_export"
+    bl_idname = "figuhair.merge_hair_for_export"
     bl_label = "\u5408\u5e76\u5934\u53d1\u7f51\u683c"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -5239,7 +5432,7 @@ def _is_figuhair_family_obj(obj):
 
 class HAIRPIPE_OT_cross_section_spread(bpy.types.Operator):
     """Spread the active cross-section along neighboring curve points with the wheel"""
-    bl_idname = "hair_pipe.cross_section_spread"
+    bl_idname = "figuhair.cross_section_spread"
     bl_label = "横截面传递"
     bl_options = {'REGISTER', 'UNDO', 'BLOCKING'}
 
@@ -5370,7 +5563,7 @@ class HAIRPIPE_OT_cross_section_spread(bpy.types.Operator):
 
 class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
     """Drag from a surface point to create a FiguHair curve"""
-    bl_idname = "hair_pipe.draw_hair_curve"
+    bl_idname = "figuhair.draw_hair_curve"
     bl_label = "新建头发曲线"
     bl_options = {'REGISTER', 'UNDO', 'BLOCKING'}
 
@@ -5582,7 +5775,7 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
         if not preview:
             context.view_layer.objects.active = curve_obj
         if not preview:
-            bpy.ops.hair_pipe.generate_pipe()
+            bpy.ops.figuhair.generate_pipe()
         return curve_obj
 
     def cleanup_preview(self):
@@ -5695,7 +5888,7 @@ class HAIRPIPE_OT_draw_hair_curve(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_begin_custom_profile(bpy.types.Operator):
-    bl_idname = "hair_pipe.begin_custom_profile"
+    bl_idname = "figuhair.begin_custom_profile"
     bl_label = "添加自定义横截面"
 
     def execute(self, context):
@@ -5704,7 +5897,7 @@ class HAIRPIPE_OT_begin_custom_profile(bpy.types.Operator):
             self.report({'WARNING'}, "请先选择头发曲线并进入曲线编辑模式")
             return {'CANCELLED'}
         try:
-            bpy.ops.hair_pipe.widget_interact('INVOKE_DEFAULT')
+            bpy.ops.figuhair.widget_interact('INVOKE_DEFAULT')
         except RuntimeError:
             pass
         obj["hair_pipe_custom_profile_editing"] = True
@@ -5713,7 +5906,7 @@ class HAIRPIPE_OT_begin_custom_profile(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_save_custom_profile(bpy.types.Operator):
-    bl_idname = "hair_pipe.save_custom_profile"
+    bl_idname = "figuhair.save_custom_profile"
     bl_label = "保存自定义横截面"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -5749,7 +5942,7 @@ class HAIRPIPE_OT_save_custom_profile(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_cancel_custom_profile(bpy.types.Operator):
-    bl_idname = "hair_pipe.cancel_custom_profile"
+    bl_idname = "figuhair.cancel_custom_profile"
     bl_label = "取消自定义横截面"
 
     def execute(self, context):
@@ -5760,7 +5953,7 @@ class HAIRPIPE_OT_cancel_custom_profile(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_toggle_custom_profile(bpy.types.Operator):
-    bl_idname = "hair_pipe.toggle_custom_profile"
+    bl_idname = "figuhair.toggle_custom_profile"
     bl_label = "选择自定义横截面"
 
     def execute(self, context):
@@ -5775,17 +5968,19 @@ class HAIRPIPE_OT_toggle_custom_profile(bpy.types.Operator):
 class HAIRPIPE_WST_draw_hair_curve(bpy.types.WorkSpaceTool):
     bl_space_type = 'VIEW_3D'
     bl_context_mode = 'OBJECT'
-    bl_idname = "hair_pipe.draw_hair_curve_tool"
+    bl_idname = "figuhair.draw_hair_curve_tool"
     bl_label = "新建头发曲线"
     bl_description = "左键逐点创建 FiguHair 曲线，滚轮调整横截面宽度，空格或回车确认"
     bl_icon = "ops.curve.draw"
     bl_widget = None
     bl_keymap = (
-        ("hair_pipe.draw_hair_curve", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
+        ("figuhair.draw_hair_curve", {"type": 'LEFTMOUSE', "value": 'PRESS'}, None),
     )
 
 
 classes = (
+    HAIRPIPE_OT_smooth_curve_points,
+    HAIRPIPE_OT_auto_simplify_cross_section,
     HAIRPIPE_OT_cross_section_spread,
     HAIRPIPE_OT_draw_hair_curve,
     HAIRPIPE_OT_begin_custom_profile,
@@ -5835,12 +6030,12 @@ def register_keymaps():
         return
     keymap = keyconfig.keymaps.new(name='Object Mode', space_type='EMPTY')
     bindings = (
-        ('hair_pipe.hide_hair', 'H', 'PRESS', {}),
-        ('hair_pipe.show_all_hair', 'H', 'PRESS', {'alt': True}),
-        ('hair_pipe.duplicate_hair', 'D', 'PRESS', {'shift': True}),
-        ('hair_pipe.delete_hair', 'X', 'PRESS', {}),
-        ('hair_pipe.delete_hair', 'DEL', 'PRESS', {}),
-        ('hair_pipe.family_local_view', 'NUMPAD_SLASH', 'PRESS', {}),
+        ('figuhair.hide_hair', 'H', 'PRESS', {}),
+        ('figuhair.show_all_hair', 'H', 'PRESS', {'alt': True}),
+        ('figuhair.duplicate_hair', 'D', 'PRESS', {'shift': True}),
+        ('figuhair.delete_hair', 'X', 'PRESS', {}),
+        ('figuhair.delete_hair', 'DEL', 'PRESS', {}),
+        ('figuhair.family_local_view', 'NUMPAD_SLASH', 'PRESS', {}),
     )
     for operator, key_type, value, modifiers in bindings:
         item = keymap.keymap_items.new(operator, key_type, value, **modifiers)
@@ -5860,13 +6055,22 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     register_keymaps()
+    try:
+        bpy.utils.register_tool(
+            HAIRPIPE_WST_draw_hair_curve,
+            after={'builtin.select_box'},
+            separator=True,
+        )
+    except (RuntimeError, TypeError, ValueError) as exc:
+        print(f'[FiguHair] 注册工具栏工具失败: {exc}')
 
 
 def unregister():
     unregister_keymaps()
     try:
         bpy.utils.unregister_tool(HAIRPIPE_WST_draw_hair_curve)
-    except RuntimeError:
+    except (AttributeError, RuntimeError):
         pass
-    for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+    finally:
+        for cls in reversed(classes):
+            bpy.utils.unregister_class(cls)

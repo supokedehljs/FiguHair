@@ -78,10 +78,8 @@ class HairLibraryState(PropertyGroup):
 
 
 def get_library_root():
-    base = bpy.utils.user_resource('SCRIPTS', path="addons", create=True)
-    if not base:
-        base = bpy.path.abspath("//")
-    root = os.path.join(base, "hair_curve_pipe", LIBRARY_DIR_NAME)
+    base = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.join(base, LIBRARY_DIR_NAME)
     os.makedirs(root, exist_ok=True)
     os.makedirs(os.path.join(root, ASSET_DIR_NAME), exist_ok=True)
     return root
@@ -693,7 +691,7 @@ def remove_draw_handler():
 
 
 class HAIRPIPE_OT_library_overlay_toggle(bpy.types.Operator):
-    bl_idname = "hair_pipe.library_overlay_toggle"
+    bl_idname = "figuhair.library_overlay_toggle"
     bl_label = "头发库"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -815,7 +813,7 @@ class HAIRPIPE_OT_library_overlay_toggle(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_library_overlay_card_scale_up(bpy.types.Operator):
-    bl_idname = "hair_pipe.library_overlay_card_scale_up"
+    bl_idname = "figuhair.library_overlay_card_scale_up"
     bl_label = "卡片放大"
     bl_options = {'REGISTER'}
 
@@ -826,7 +824,7 @@ class HAIRPIPE_OT_library_overlay_card_scale_up(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_library_overlay_card_scale_down(bpy.types.Operator):
-    bl_idname = "hair_pipe.library_overlay_card_scale_down"
+    bl_idname = "figuhair.library_overlay_card_scale_down"
     bl_label = "卡片缩小"
     bl_options = {'REGISTER'}
 
@@ -837,7 +835,7 @@ class HAIRPIPE_OT_library_overlay_card_scale_down(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_library_overlay_select(bpy.types.Operator):
-    bl_idname = "hair_pipe.library_overlay_select"
+    bl_idname = "figuhair.library_overlay_select"
     bl_label = "选择条目"
     bl_options = {'REGISTER'}
 
@@ -849,7 +847,7 @@ class HAIRPIPE_OT_library_overlay_select(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_library_overlay_click(bpy.types.Operator):
-    bl_idname = "hair_pipe.library_overlay_click"
+    bl_idname = "figuhair.library_overlay_click"
     bl_label = "点击头发库"
     bl_options = {'REGISTER'}
 
@@ -864,12 +862,12 @@ class HAIRPIPE_OT_library_overlay_click(bpy.types.Operator):
         overlay = context.window_manager.hair_pipe_library_overlay
         overlay.active_entry_index = idx
         if self.double_click:
-            return bpy.ops.hair_pipe.library_overlay_insert('INVOKE_DEFAULT')
+            return bpy.ops.figuhair.library_overlay_insert('INVOKE_DEFAULT')
         return {'FINISHED'}
 
 
 class HAIRPIPE_OT_library_overlay_insert(bpy.types.Operator):
-    bl_idname = "hair_pipe.library_overlay_insert"
+    bl_idname = "figuhair.library_overlay_insert"
     bl_label = "导入头发"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -887,7 +885,7 @@ class HAIRPIPE_OT_library_overlay_insert(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_library_toggle_select_entry(bpy.types.Operator):
-    bl_idname = "hair_pipe.library_toggle_select_entry"
+    bl_idname = "figuhair.library_toggle_select_entry"
     bl_label = "选择头发"
     bl_options = {'REGISTER'}
 
@@ -899,7 +897,7 @@ class HAIRPIPE_OT_library_toggle_select_entry(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_library_delete_selected(bpy.types.Operator):
-    bl_idname = "hair_pipe.library_delete_selected"
+    bl_idname = "figuhair.library_delete_selected"
     bl_label = "删除选中头发"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -917,7 +915,7 @@ class HAIRPIPE_OT_library_delete_selected(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_library_import_entry(bpy.types.Operator):
-    bl_idname = "hair_pipe.library_import_entry"
+    bl_idname = "figuhair.library_import_entry"
     bl_label = "导入头发"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -931,7 +929,7 @@ class HAIRPIPE_OT_library_import_entry(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_library_open_folder(bpy.types.Operator):
-    bl_idname = "hair_pipe.library_open_folder"
+    bl_idname = "figuhair.library_open_folder"
     bl_label = "打开头发库文件夹"
     bl_options = {'REGISTER'}
 
@@ -949,7 +947,7 @@ class HAIRPIPE_OT_library_open_folder(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_library_paste_thumbnail(bpy.types.Operator):
-    bl_idname = "hair_pipe.library_paste_thumbnail"
+    bl_idname = "figuhair.library_paste_thumbnail"
     bl_label = "粘贴图片"
     bl_options = {'REGISTER'}
 
@@ -976,7 +974,7 @@ class HAIRPIPE_OT_library_paste_thumbnail(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_library_delete(bpy.types.Operator):
-    bl_idname = "hair_pipe.library_delete"
+    bl_idname = "figuhair.library_delete"
     bl_label = "删除头发库条目"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -992,7 +990,7 @@ class HAIRPIPE_OT_library_delete(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_library_save_current(bpy.types.Operator):
-    bl_idname = "hair_pipe.library_save_current"
+    bl_idname = "figuhair.library_save_current"
     bl_label = "保存到头发库"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -1012,7 +1010,7 @@ class HAIRPIPE_OT_library_save_current(bpy.types.Operator):
         box = layout.box()
         row = box.row(align=True)
         row.label(text="图片", icon='IMAGE_DATA')
-        row.operator("hair_pipe.library_paste_thumbnail", text="粘贴图片", icon='PASTEDOWN')
+        row.operator("figuhair.library_paste_thumbnail", text="粘贴图片", icon='PASTEDOWN')
         if state.pending_thumbnail_path and os.path.exists(bpy.path.abspath(state.pending_thumbnail_path)):
             box.template_icon(icon_value=get_preview_icon_for_path(state.pending_thumbnail_path), scale=7.0)
         else:

@@ -16,7 +16,7 @@
 
 ## 安装方法
 
-1. 将 `hair_curve_pipe` 文件夹复制到 Blender 插件目录：
+1. 将 `figuhair` 文件夹复制到 Blender 插件目录：
    - Windows: `%APPDATA%\Blender Foundation\Blender\<version>\scripts\addons\`
    - macOS: `~/Library/Application Support/Blender/<version>/scripts/addons/`
    - Linux: `~/.config/blender/<version>/scripts/addons/`
@@ -63,7 +63,7 @@
 ## 文件结构
 
 ```
-hair_curve_pipe/
+figuhair/
 ├── __init__.py      # 插件入口
 ├── properties.py    # 属性（横截面顶点、逐点设置、全局设置）
 ├── operators.py     # 核心算法与操作符

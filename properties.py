@@ -7,14 +7,6 @@ from bpy.props import (
 from bpy.types import PropertyGroup
 
 
-def update_plugin_enabled(self, context):
-    try:
-        from .operators import apply_plugin_enabled_state
-        apply_plugin_enabled_state(bool(self.plugin_enabled))
-    except (ImportError, AttributeError, RuntimeError):
-        pass
-
-
 def apply_shared_hair_material(material):
     for obj in bpy.data.objects:
         if obj.type != 'MESH' or not (
@@ -136,12 +128,6 @@ def update_circular_smooth_slider(self, context):
 
 class HairPipeSettings(PropertyGroup):
     """Global settings for the hair pipe"""
-    plugin_enabled: BoolProperty(
-        name="启用 FiguHair",
-        description="开启时锁定头发网格并使用 FiguHair 编辑；关闭时允许直接选择头发网格",
-        default=True,
-        update=update_plugin_enabled,
-    )
     shared_hair_material: PointerProperty(
         name="材质选择",
         description="为所有 FiguHair 头发网格使用同一个材质",

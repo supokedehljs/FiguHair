@@ -1816,7 +1816,7 @@ def setup_widget(context):
     wd.region_offset_x = region.x
     wd.region_offset_y = region.y
     settings = obj.hair_pipe_settings
-    addon_entry = context.preferences.addons.get("hair_curve_pipe")
+    addon_entry = context.preferences.addons.get("figuhair")
     widget_layout = addon_entry.preferences if addon_entry is not None else settings
     area_scale = max(0.35, min(1.8, getattr(widget_layout, "widget_area_scale", 1.0)))
     wd.widget_size = min(region.width, region.height) * 0.62 * area_scale
@@ -2736,7 +2736,7 @@ def remove_selected_cross_section_vertices(settings, ps, selected_indices):
 
 class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
     """Open interactive cross-section editor overlay in the 3D viewport"""
-    bl_idname = "hair_pipe.widget_interact"
+    bl_idname = "figuhair.widget_interact"
     bl_label = "编辑横截面"
 
     @classmethod
@@ -2799,7 +2799,7 @@ class HAIRPIPE_OT_widget_interact(bpy.types.Operator):
 
 class HAIRPIPE_OT_widget_hold(bpy.types.Operator):
     """Hold shortcut to temporarily show and edit the cross-section widget"""
-    bl_idname = "hair_pipe.widget_hold"
+    bl_idname = "figuhair.widget_hold"
     bl_label = "按住编辑横截面"
 
     @classmethod
@@ -3051,33 +3051,6 @@ def handle_widget_modal(operator, context, event, close_on_key_release=False):
             dx, dy = widget_to_effective(mx, my, cx, cy, sf, alignment_angle, flip_h)
             sx, sy = widget_to_effective(wd.move_start_x, wd.move_start_y, cx, cy, sf, alignment_angle, flip_h)
             apply_longitudinal_move(context, settings, wd, set(sel), dx - sx, dy - sy)
-            redraw_view3d(context)
-            return {'RUNNING_MODAL'}
-            wd.proportional_radius = max(8.0, min(5000.0, wd.proportional_radius * factor))
-            weights = get_proportional_vertex_weights(
-                context,
-                verts,
-                set(sel),
-                cx,
-                cy,
-                sf,
-                alignment_angle,
-                flip_h,
-                wd.proportional_radius,
-                baseline=initial,
-            )
-            dx, dy = widget_to_effective(mx, my, cx, cy, sf, alignment_angle, flip_h)
-            sx, sy = widget_to_effective(wd.move_start_x, wd.move_start_y, cx, cy, sf, alignment_angle, flip_h)
-            delta_x = dx - sx
-            delta_y = dy - sy
-            for vi, initial_offset in initial.items():
-                if vi >= len(verts):
-                    continue
-                weight = weights.get(vi, 0.0)
-                verts[vi].offset_x = initial_offset[0] + delta_x * weight
-                verts[vi].offset_y = initial_offset[1] + delta_y * weight
-            set_proportional_weights(wd, weights)
-            update_ghost_vertices(ps)
             redraw_view3d(context)
             return {'RUNNING_MODAL'}
         if event.type == 'MOUSEMOVE':
@@ -3553,8 +3526,9 @@ def get_widget_edit_context(context):
 
 
 class HAIRPIPE_OT_widget_add_vertex(bpy.types.Operator):
-    bl_idname = "hair_pipe.widget_add_vertex"
+    bl_idname = "figuhair.widget_add_vertex"
     bl_label = "添加横截面顶点"
+    bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
         obj, settings, ps, wd = get_widget_edit_context(context)
@@ -3570,8 +3544,9 @@ class HAIRPIPE_OT_widget_add_vertex(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_widget_remove_vertex(bpy.types.Operator):
-    bl_idname = "hair_pipe.widget_remove_vertex"
+    bl_idname = "figuhair.widget_remove_vertex"
     bl_label = "删除横截面顶点"
+    bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
         obj, settings, ps, wd = get_widget_edit_context(context)
@@ -3595,20 +3570,20 @@ class HAIRPIPE_MT_widget_context_menu(bpy.types.Menu):
         layout.operator_context = 'INVOKE_DEFAULT'
         wd = getattr(context.window_manager, 'hair_pipe_widget', None)
         bridge_op = layout.operator(
-            "hair_pipe.widget_bridge_offset",
+            "figuhair.widget_bridge_offset",
             text="上下桥接错位",
             icon='ARROW_LEFTRIGHT',
         )
         bridge_op.point_index = int(getattr(wd, 'context_menu_point_index', -1))
         layout.separator()
-        layout.operator("hair_pipe.widget_toggle_ghost", text="设置为幽灵点", icon='GHOST_ENABLED')
-        layout.operator("hair_pipe.widget_make_normal", text="转换为正常点", icon='GHOST_DISABLED')
+        layout.operator("figuhair.widget_toggle_ghost", text="设置为幽灵点", icon='GHOST_ENABLED')
+        layout.operator("figuhair.widget_make_normal", text="转换为正常点", icon='GHOST_DISABLED')
         layout.separator()
-        layout.operator("hair_pipe.cross_section_spread", text="横截面传递", icon='DUPLICATE')
+        layout.operator("figuhair.cross_section_spread", text="横截面传递", icon='DUPLICATE')
 
 
 class HAIRPIPE_OT_widget_smooth_selected_vertices(bpy.types.Operator):
-    bl_idname = "hair_pipe.widget_smooth_selected_vertices"
+    bl_idname = "figuhair.widget_smooth_selected_vertices"
     bl_label = "平滑横截面顶点"
     bl_description = "将选中的横截面顶点向相邻顶点平均位置平滑"
     bl_options = {'REGISTER', 'UNDO'}
@@ -3627,8 +3602,7 @@ class HAIRPIPE_OT_widget_smooth_selected_vertices(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         obj = context.active_object
-        wd = getattr(context.window_manager, "hair_pipe_widget", None)
-        return obj is not None and obj.type == 'CURVE' and wd is not None and wd.is_active
+        return obj is not None and obj.type == 'CURVE' and hasattr(obj, 'hair_pipe_settings')
 
     def execute(self, context):
         obj = context.active_object
@@ -3643,6 +3617,11 @@ class HAIRPIPE_OT_widget_smooth_selected_vertices(bpy.types.Operator):
             idx for idx in get_selected_widget_verts(wd)
             if 0 <= idx < len(verts) and not getattr(verts[idx], 'is_ghost', False)
         }
+        if (not selected and not getattr(wd, 'is_active', False)
+                and 0 <= ps.active_vert_index < len(verts)
+                and not getattr(verts[ps.active_vert_index], 'is_ghost', False)):
+            # 没打开编辑器时，侧栏按钮退回到当前横截面顶点
+            selected = {ps.active_vert_index}
         if not selected:
             self.report({'WARNING'}, "请先选择需要平滑的横截面顶点")
             return {'CANCELLED'}
@@ -3688,8 +3667,9 @@ class HAIRPIPE_OT_widget_smooth_selected_vertices(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_widget_delete_selected_vertices(bpy.types.Operator):
-    bl_idname = "hair_pipe.widget_delete_selected_vertices"
+    bl_idname = "figuhair.widget_delete_selected_vertices"
     bl_label = "删除横截面顶点"
+    bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
@@ -3718,7 +3698,7 @@ class HAIRPIPE_OT_widget_delete_selected_vertices(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_widget_bridge_offset(bpy.types.Operator):
-    bl_idname = "hair_pipe.widget_bridge_offset"
+    bl_idname = "figuhair.widget_bridge_offset"
     bl_label = "上下桥接错位"
     bl_description = "调整当前横截面与上一个横截面的顶点连接偏移"
     bl_options = {'REGISTER', 'UNDO'}
@@ -3820,8 +3800,9 @@ class HAIRPIPE_OT_widget_bridge_offset(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_widget_toggle_ghost(bpy.types.Operator):
-    bl_idname = "hair_pipe.widget_toggle_ghost"
+    bl_idname = "figuhair.widget_toggle_ghost"
     bl_label = "设置为幽灵点"
+    bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
         obj, settings, ps, wd = get_widget_edit_context(context)
@@ -3850,8 +3831,9 @@ class HAIRPIPE_OT_widget_toggle_ghost(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_widget_make_normal(bpy.types.Operator):
-    bl_idname = "hair_pipe.widget_make_normal"
+    bl_idname = "figuhair.widget_make_normal"
     bl_label = "设置为正常点"
+    bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
         obj, settings, ps, wd = get_widget_edit_context(context)
@@ -3882,7 +3864,7 @@ class HAIRPIPE_OT_widget_make_normal(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_widget_toggle_smooth_preview(bpy.types.Operator):
-    bl_idname = "hair_pipe.widget_toggle_smooth_preview"
+    bl_idname = "figuhair.widget_toggle_smooth_preview"
     bl_label = "细分预览"
 
     def execute(self, context):
@@ -3895,7 +3877,7 @@ class HAIRPIPE_OT_widget_toggle_smooth_preview(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_widget_toggle_flip(bpy.types.Operator):
-    bl_idname = "hair_pipe.widget_toggle_flip"
+    bl_idname = "figuhair.widget_toggle_flip"
     bl_label = "水平翻转"
 
     def execute(self, context):
@@ -3908,7 +3890,7 @@ class HAIRPIPE_OT_widget_toggle_flip(bpy.types.Operator):
 
 
 class HAIRPIPE_OT_widget_toggle_grid(bpy.types.Operator):
-    bl_idname = "hair_pipe.widget_toggle_grid"
+    bl_idname = "figuhair.widget_toggle_grid"
     bl_label = "显示网格"
 
     def execute(self, context):
@@ -3922,7 +3904,7 @@ class HAIRPIPE_OT_widget_toggle_grid(bpy.types.Operator):
 
 class HAIRPIPE_OT_widget_stop(bpy.types.Operator):
     """Close the interactive cross-section editor"""
-    bl_idname = "hair_pipe.widget_stop"
+    bl_idname = "figuhair.widget_stop"
     bl_label = "关闭横截面编辑器"
 
     def execute(self, context):

@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "FiguHair - Hair Curve Pipe",
+    "name": "FiguHair",
     "author": "Unknown",
     "version": (1, 0, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > FiguHair",
-    "description": "Generate pipe mesh from curves with per-point custom cross-sections",
+    "description": "将管状网格按松散块转换为头发曲线，并忽略修改器",
     "category": "Add Curve",
 }
 

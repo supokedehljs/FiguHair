@@ -13,7 +13,7 @@ https://github.com/supokedehljs/FiguHair.git
 确认当前目录是插件目录：
 
 ```bash
-cd d:\OneDrive\cursor_workspace\blender\hair_curve_pipe
+cd "C:\Users\supokede\AppData\Roaming\Blender Foundation\Blender\5.0\scripts\addons\figuhair"
 ```
 
 确认 Git 状态：
@@ -80,12 +80,12 @@ git push -u origin main
 
 ## 5. 打包插件给 Blender 安装
 
-推荐保持文件夹名为 `hair_curve_pipe`，因为 Blender 的插件模块名依赖文件夹名；插件在 Blender 里显示为 `FiguHair`。
+文件夹名 `figuhair` 同时就是 Blender 里的模块名，界面显示名为 `FiguHair`。
 
-如需打包安装，可以压缩整个 `hair_curve_pipe` 文件夹为 zip：
+如需打包安装，在 `scripts\addons` 目录下压缩整个 `figuhair` 文件夹（zip 顶层必须是 figuhair/）：
 
 ```bash
-Compress-Archive -Path . -DestinationPath ..\FiguHair.zip -Force
+Compress-Archive -Path .\figuhair -DestinationPath .\FiguHair.zip -Force
 ```
 
 然后在 Blender 中使用 `Edit > Preferences > Add-ons > Install...` 选择 `FiguHair.zip`。
