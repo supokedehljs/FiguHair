@@ -1108,18 +1108,25 @@ def _sticky_frames(curve_obj, ring_specs, is_cyclic, start_normal, point_index_o
         point = point_settings[point_index] if 0 <= point_index < len(point_settings) else None
         normal = None
 
+        state_valid = False
         if point is not None:
             stored_ref = _finite_vector(getattr(point, "roll_ref", ()), Vector((0.0, 0.0, 0.0)))
             stored_tangent = _finite_vector(getattr(point, "roll_tangent", ()), Vector((0.0, 0.0, 0.0)))
             if stored_ref.length > 1e-6 and stored_tangent.length > 1e-6:
                 stored_tangent = stored_tangent.normalized()
-                rotation = stored_tangent.rotation_difference(tangent)
-                normal = rotation @ stored_ref
-                tangential = normal.dot(tangent)
-                if abs(tangential) > 1e-7:
-                    normal = normal - tangent * tangential
-                if normal.length < 1e-6:
-                    normal = None
+                # 只有存储切线与当前切线夹角小于 90° 时，最小旋转才良态。
+                # 翻转曲线方向、复制/迁移、或几何大改后存储切线可能接近反向，
+                # 此时旋转轴不确定，会让截面乱翻；这种情况按当前场重新铺种。
+                if stored_tangent.dot(tangent) > 0.0:
+                    rotation = stored_tangent.rotation_difference(tangent)
+                    normal = rotation @ stored_ref
+                    tangential = normal.dot(tangent)
+                    if abs(tangential) > 1e-7:
+                        normal = normal - tangent * tangential
+                    if normal.length > 1e-6:
+                        state_valid = True
+                    else:
+                        normal = None
 
         if normal is None:
             if ring_index < len(seed_frames):
@@ -1133,10 +1140,14 @@ def _sticky_frames(curve_obj, ring_specs, is_cyclic, start_normal, point_index_o
         if point is not None and not _STICKY_STATE_GUARD:
             stored_ref = Vector(point.roll_ref)
             stored_tangent = Vector(point.roll_tangent)
-            # 只在还没有状态时写入（种子）。之后每帧都由"存储切线→当前切线"的
-            # 最小旋转直接算出，属于当前切线的纯函数，不再写回：
-            # 既不会递归触发重建，也不会沿拖动路径累积漂移。
-            if stored_ref.length <= 1e-6 or stored_tangent.length <= 1e-6:
+            # 种子、陈旧状态、或切线变化超过约 2° 时同步状态：
+            # 这样下一次最小旋转永远是小角度，不会接近 180° 的奇异点；
+            # 同步后紧接着的再次重建会得到完全相同的值，不会递归下去。
+            tangent_moved = (stored_tangent - tangent).length > 0.035
+            if (not state_valid
+                    or stored_ref.length <= 1e-6
+                    or stored_tangent.length <= 1e-6
+                    or tangent_moved):
                 _STICKY_STATE_GUARD = True
                 try:
                     point.roll_ref = normal
